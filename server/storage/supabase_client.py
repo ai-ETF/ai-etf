@@ -30,7 +30,7 @@ def get_supabase():
         return None
         
     try:
-        client: Client = create_client(url, key)
+        client = create_client(url, key)
         logger.info("Supabase客户端初始化成功")
         return client
     except Exception as e:

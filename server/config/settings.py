@@ -26,7 +26,11 @@ class Settings:
         if self.SUPABASE_URL and self.SUPABASE_KEY:
             logger.info("检测到Supabase配置，将使用Supabase作为主要存储")
         else:
-            logger.warning("未配置Supabase，将使用SQLite作为存储")
+            if not self.SUPABASE_URL:
+                logger.warning("未配置SUPABASE_URL环境变量")
+            if not self.SUPABASE_KEY:
+                logger.warning("未配置SUPABASE_KEY环境变量")
+            logger.warning("由于缺少Supabase配置，将使用SQLite作为存储（但当前已禁用SQLite回退机制）")
         
         # 数据库文件路径，默认为"server_data.db"
         self.DB_PATH = os.getenv("ETFSERVER_DB_PATH", "server_data.db")
