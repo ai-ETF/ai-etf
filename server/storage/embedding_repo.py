@@ -2,14 +2,22 @@ import sqlite3
 import json
 from typing import Optional, List, Dict
 from server.config.settings import SETTINGS
+import logging
+
+
+# 配置日志
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingRepo:
     def __init__(self, db_path: Optional[str] = None):
+        logger.debug(f"初始化EmbeddingRepo，数据库路径: {db_path or SETTINGS.DB_PATH}")
         self.db_path = db_path or SETTINGS.DB_PATH
         self._ensure()
 
     def _ensure(self):
+        logger.debug(f"确保嵌入向量表存在，路径: {self.db_path}")
         con = sqlite3.connect(self.db_path)
         cur = con.cursor()
         cur.execute(
@@ -25,29 +33,45 @@ class EmbeddingRepo:
         )
         con.commit()
         con.close()
+        logger.debug("嵌入向量表检查/创建完成")
 
     def insert_many(self, doc_id: str, items: List[Dict]):
+        logger.debug(f"开始批量插入嵌入向量，文档ID: {doc_id}，项目数量: {len(items)}")
         con = sqlite3.connect(self.db_path)
         cur = con.cursor()
-        for it in items:
+        
+        for i, it in enumerate(items):
+            logger.debug(f"插入第 {i+1} 个项目，块ID: {it.get('chunk_id')}")
             cur.execute(
                 "INSERT INTO embeddings(doc_id, chunk_id, text, vector) VALUES (?, ?, ?, ?)",
                 (doc_id, it.get("chunk_id"), it.get("text"), json.dumps(it.get("vector"))),
             )
+            
         con.commit()
         con.close()
+        logger.debug(f"批量插入完成，文档ID: {doc_id}")
 
     def query_all(self, doc_id: Optional[str] = None) -> List[Dict]:
+        logger.debug(f"查询嵌入向量，文档ID过滤: {doc_id}")
         con = sqlite3.connect(self.db_path)
         cur = con.cursor()
+        
         if doc_id:
+            logger.debug(f"查询特定文档的嵌入向量")
             cur.execute("SELECT id, doc_id, chunk_id, text, vector FROM embeddings WHERE doc_id = ?", (doc_id,))
         else:
+            logger.debug(f"查询所有嵌入向量")
             cur.execute("SELECT id, doc_id, chunk_id, text, vector FROM embeddings")
+            
         rows = cur.fetchall()
         con.close()
+        logger.debug(f"数据库查询完成，返回 {len(rows)} 行")
+        
         out = []
-        for r in rows:
+        for i, r in enumerate(rows):
+            logger.debug(f"处理第 {i+1} 行数据，块ID: {r[2]}")
             vec = json.loads(r[4]) if r[4] else None
             out.append({"id": r[0], "doc_id": r[1], "chunk_id": r[2], "text": r[3], "vector": vec})
+            
+        logger.debug(f"数据处理完成，返回 {len(out)} 个项目")
         return out
