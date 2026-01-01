@@ -35,24 +35,33 @@ class EmbeddingRepo:
                 # 从chunk_id中提取索引信息，如果有的话
                 chunk_index = i  # 使用循环索引作为chunk_index
                 
-                # 确保向量数据存在且格式正确
+                # 获取向量数据
                 vector = item.get("vector", [])
-                if not vector or len(vector) != SETTINGS.EMBED_DIM:
-                    # 如果向量为空或维度不正确，使用正确维度的零向量
-                    logger.warning(f"向量维度不正确，实际: {len(vector) if vector else 0}, 期望: {SETTINGS.EMBED_DIM}，使用零向量")
-                    vector = [0.0] * SETTINGS.EMBED_DIM
                 
-                logger.debug(f"向量维度: {len(vector)}, 期望维度: {SETTINGS.EMBED_DIM}")
-                
-                supabase_items.append({
+                # 创建插入项的基础数据
+                chunk_data = {
                     "document_id": doc_id,
                     "document_name": f"doc_{doc_id}",
                     "document_type": "etf_document_chunk",  # 标识这是文档块
                     "chunk_index": chunk_index,
                     "content": item.get("text", ""),
-                    "embedding": vector,  # 确保向量数据正确传递
                     "page_number": chunk_index // 10 + 1  # 基于索引估算页码
-                })
+                }
+                
+                # 只有当向量存在、维度正确且不为空时才添加到数据中
+                if vector and len(vector) == SETTINGS.EMBED_DIM:
+                    chunk_data["embedding"] = vector
+                    logger.debug(f"添加向量数据，维度: {len(vector)}")
+                elif vector and len(vector) != SETTINGS.EMBED_DIM:
+                    logger.warning(f"跳过向量 - 维度不匹配，实际: {len(vector)}, 期望: {SETTINGS.EMBED_DIM}")
+                else:
+                    logger.debug(f"跳过向量 - 向量为空或未提供")
+                
+                logger.debug(f"插入数据 - 文本内容: {item.get('text', '')[:100]}..., 向量状态: {'已包含' if 'embedding' in chunk_data else '未包含'}")
+                
+                supabase_items.append(chunk_data)
+            
+            logger.debug(f"准备插入的完整数据: {supabase_items}")
             
             # 批量插入到document_chunks表
             response = self.supabase.table("document_chunks").insert(supabase_items).execute()

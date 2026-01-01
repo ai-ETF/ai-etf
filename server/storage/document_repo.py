@@ -28,24 +28,21 @@ class DocumentRepo:
         # 将文档元数据作为document_chunks表中的一个特殊条目保存
         logger.debug("使用Supabase保存文档元数据到document_chunks表")
         try:
-            # 创建一个文档元数据条目，只使用存在的字段，为embedding提供适当大小的零向量
-            # 根据SETTINGS.EMBED_DIM创建适当维度的零向量（现在是1536维）
-            zero_vector = [0.0] * SETTINGS.EMBED_DIM
-            logger.debug(f"创建零向量，维度: {len(zero_vector)}")
-            
+            # 创建一个文档元数据条目，不包含embedding字段，使其在数据库中为空
             metadata_entry = {
                 "document_id": doc_id,
                 "document_name": f"doc_{doc_id}",
                 "document_type": "etf_document_metadata",  # 标识这是文档元数据
                 "chunk_index": -1,  # 特殊索引表示元数据
                 "content": f"URL: {url}\nSource: {source or 'N/A'}\n\n{text[:4000] if text else ''}",  # 将URL和source信息存储在content中
-                "embedding": zero_vector,  # 使用正确维度的零向量
                 "page_number": 0  # 元数据页码为0
             }
             
+            logger.debug(f"准备插入的文档元数据: {metadata_entry}")
+            
             # 插入文档元数据
             response = self.supabase.table("document_chunks").insert(metadata_entry).execute()
-            logger.debug(f"文档 {doc_id} 元数据在Supabase中已插入")
+            logger.debug(f"文档 {doc_id} 元数据在Supabase中已插入，响应数据: {response.data}")
         except Exception as e:
             error_msg = f"Supabase保存文档元数据失败: {str(e)}"
             logger.error(error_msg)
