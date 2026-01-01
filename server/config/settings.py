@@ -21,7 +21,7 @@ class Settings:
         # Supabase数据库连接URL
         self.SUPABASE_URL = os.getenv("SUPABASE_URL")
         # Supabase数据库连接密钥
-        self.SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+        self.SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         
         if self.SUPABASE_URL and self.SUPABASE_KEY:
             logger.info("检测到Supabase配置，将使用Supabase作为主要存储")
