@@ -1,6 +1,7 @@
 from typing import List, Dict
 import math
 import logging
+from server.storage.embedding_repo import EmbeddingRepo
 
 
 # 配置日志
@@ -102,6 +103,9 @@ class Retriever:
         scored = []
         for r in rows:
             v = r.get("vector")
+            if v is None:
+                logger.warning(f"跳过向量为None的文本块: {r.get('chunk_id')}")
+                continue
             logger.debug(f"计算与向量 {r.get('chunk_id')} 的相似度")
             score = cosine(query_vector, v)
             scored.append((score, r))
