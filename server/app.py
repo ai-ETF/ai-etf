@@ -1,6 +1,17 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware  # 导入CORS中间件，用于处理跨域请求
 import logging
+
+# 尝试加载 .env 文件
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    logging.info("环境变量从 .env 文件加载成功")
+except ImportError:
+    logging.warning("python-dotenv 未安装，跳过从 .env 文件加载环境变量")
+except Exception as e:
+    logging.error(f"从 .env 文件加载环境变量失败: {e}")
 
 from server.api import ask, upload, test
 from server.storage.supabase_client import get_supabase
