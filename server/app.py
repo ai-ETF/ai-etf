@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware  # 导入CORS中间件，用�
 import logging
 
 from server.api import ask, upload, test
-from server.storage.setup_supabase_tables import setup_supabase_tables
+from server.storage.supabase_client import get_supabase
 
 # 配置日志
 logging.basicConfig(level=logging.DEBUG)
@@ -31,8 +31,13 @@ app.include_router(test.router, prefix="/test")
 @app.on_event('startup')
 def startup_event():
     """应用启动时的事件处理"""
-    logger.info("应用启动，验证Supabase表结构")
-    setup_supabase_tables()
+    logger.info("应用启动，验证Supabase连接")
+    supabase = get_supabase()
+    if not supabase:
+        error_msg = "Supabase连接失败，应用无法启动"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+    logger.info("Supabase连接验证成功")
 
 
 @app.get("/hello")
