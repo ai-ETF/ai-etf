@@ -33,22 +33,17 @@ class EmbeddingRepo:
             supabase_items = []
             for i, item in enumerate(items):
                 logger.debug(f"准备第 {i+1} 个项目，块ID: {item.get('chunk_id')}")
-                # 从chunk_id中提取索引信息，如果有的话
-                chunk_index = 0
-                if '.' in item.get("chunk_id", ""):
-                    try:
-                        chunk_index = int(item["chunk_id"].split('.')[-1])
-                    except:
-                        chunk_index = 0
-                        
+                # 使用循环索引作为chunk_index
+                chunk_index = i
+                
                 supabase_items.append({
                     "document_id": doc_id,
                     "document_name": f"doc_{doc_id}",
-                    "document_type": "etf_document",  # 默认类型，您可以根据需要调整
+                    "document_type": "etf_document_chunk",
                     "chunk_index": chunk_index,
                     "content": item.get("text", ""),
-                    "embedding": item.get("vector", []),
-                    "page_number": 1  # 默认页码，您可以根据需要调整
+                    "embedding": item.get("vector", []),  # 确保向量数据正确传递
+                    "page_number": chunk_index // 10 + 1  # 基于索引估算页码
                 })
             
             # 批量插入到document_chunks表
@@ -65,7 +60,8 @@ class EmbeddingRepo:
         # 从Supabase的document_chunks表查询
         logger.debug("从Supabase的document_chunks表查询嵌入向量")
         try:
-            query = self.supabase.table("document_chunks").select("id, document_id, content, embedding")
+            # 排除chunk_index为-1的元数据条目，只获取实际的文本块
+            query = self.supabase.table("document_chunks").select("id, document_id, content, embedding").neq("chunk_index", -1)
             
             if doc_id:
                 logger.debug(f"查询特定文档的嵌入向量")

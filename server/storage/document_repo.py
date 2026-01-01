@@ -1,6 +1,7 @@
 import json
-import logging
 from typing import Optional
+import logging
+from server.config.settings import SETTINGS
 from server.storage.supabase_client import get_supabase
 
 
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class DocumentRepo:
     def __init__(self, db_path: Optional[str] = None):
-        logger.debug("初始化DocumentRepo")
+        logger.debug(f"初始化DocumentRepo")
         self.supabase = get_supabase()
         
         if not self.supabase:
@@ -22,55 +23,54 @@ class DocumentRepo:
         logger.info("使用Supabase作为文档存储")
 
     def save(self, doc_id: str, url: str, text: str, source: Optional[str] = None):
-        logger.debug(f"保存文档，ID: {doc_id}, URL: {url}, 来源: {source}, 文本长度: {len(text) if text else 0}")
+        logger.debug(f"保存文档元数据，ID: {doc_id}, URL: {url}, 来源: {source}, 文本长度: {len(text) if text else 0}")
         
-        # 使用Supabase存储
-        logger.debug("使用Supabase保存文档")
+        # 将文档元数据作为document_chunks表中的一个特殊条目保存
+        logger.debug("使用Supabase保存文档元数据到document_chunks表")
         try:
-            # 检查文档是否已存在
-            existing_doc = self.supabase.table("documents").select("id").eq("id", doc_id).execute()
-            
-            data = {
-                "id": doc_id, 
-                "url": url, 
-                "source": source, 
-                "text": text
+            # 创建一个文档元数据条目
+            metadata_entry = {
+                "document_id": doc_id,
+                "document_name": f"doc_{doc_id}",
+                "document_type": "etf_document_metadata",  # 标识这是文档元数据
+                "chunk_index": -1,  # 特殊索引表示元数据
+                "content": text[:500] + "..." if len(text) > 500 else text,  # 仅存储内容摘要
+                "embedding": [],  # 元数据不需要嵌入向量
+                "page_number": 0,  # 元数据页码为0
+                "url": url,  # 添加URL字段
+                "source": source  # 添加来源字段
             }
             
-            if existing_doc.data:
-                # 文档已存在，执行更新操作
-                response = self.supabase.table("documents").update(data).eq("id", doc_id).execute()
-                logger.debug(f"文档 {doc_id} 在Supabase中已更新")
-            else:
-                # 文档不存在，执行插入操作
-                response = self.supabase.table("documents").insert(data).execute()
-                logger.debug(f"文档 {doc_id} 在Supabase中已插入")
+            # 插入文档元数据
+            response = self.supabase.table("document_chunks").insert(metadata_entry).execute()
+            logger.debug(f"文档 {doc_id} 元数据在Supabase中已插入")
         except Exception as e:
-            error_msg = f"Supabase保存失败: {str(e)}"
+            error_msg = f"Supabase保存文档元数据失败: {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
     def get(self, doc_id: str):
         logger.debug(f"获取文档，ID: {doc_id}")
         
-        # 从Supabase获取
-        logger.debug("从Supabase获取文档")
+        # 从Supabase的document_chunks表获取文档元数据
+        logger.debug("从Supabase的document_chunks表获取文档元数据")
         try:
-            response = self.supabase.table("documents").select("*").eq("id", doc_id).execute()
+            # 查询chunk_index为-1的条目，这是文档元数据
+            response = self.supabase.table("document_chunks").select("*").eq("document_id", doc_id).eq("chunk_index", -1).execute()
             if response.data:
                 row = response.data[0]
                 result = {
-                    "id": row["id"], 
-                    "url": row["url"], 
-                    "source": row["source"], 
-                    "text": row["text"]
+                    "id": row["document_id"], 
+                    "url": row.get("url", ""), 
+                    "source": row.get("source", None), 
+                    "text": row["content"]
                 }
-                logger.debug(f"文档 {doc_id} Supabase获取完成")
+                logger.debug(f"文档 {doc_id} 元数据获取完成")
                 return result
             else:
                 logger.debug(f"文档 {doc_id} 在Supabase中不存在")
                 return None
         except Exception as e:
-            error_msg = f"Supabase获取失败: {str(e)}"
+            error_msg = f"Supabase获取文档元数据失败: {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
