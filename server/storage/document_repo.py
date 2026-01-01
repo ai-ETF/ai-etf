@@ -28,14 +28,17 @@ class DocumentRepo:
         # 将文档元数据作为document_chunks表中的一个特殊条目保存
         logger.debug("使用Supabase保存文档元数据到document_chunks表")
         try:
-            # 创建一个文档元数据条目，只使用存在的字段
+            # 创建一个文档元数据条目，只使用存在的字段，为embedding提供适当大小的向量
+            # 根据SETTINGS.EMBED_DIM创建适当维度的零向量
+            zero_vector = [0.0] * SETTINGS.EMBED_DIM
+            
             metadata_entry = {
                 "document_id": doc_id,
                 "document_name": f"doc_{doc_id}",
                 "document_type": "etf_document_metadata",  # 标识这是文档元数据
                 "chunk_index": -1,  # 特殊索引表示元数据
                 "content": f"URL: {url}\nSource: {source or 'N/A'}\n\n{text[:4000] if text else ''}",  # 将URL和source信息存储在content中
-                "embedding": [],  # 元数据不需要嵌入向量
+                "embedding": zero_vector,  # 使用零向量而不是空数组
                 "page_number": 0  # 元数据页码为0
             }
             

@@ -1,4 +1,3 @@
-import sqlite3
 import json
 from typing import Optional, List, Dict
 import logging
@@ -33,16 +32,22 @@ class EmbeddingRepo:
             supabase_items = []
             for i, item in enumerate(items):
                 logger.debug(f"准备第 {i+1} 个项目，块ID: {item.get('chunk_id')}")
-                # 使用循环索引作为chunk_index
-                chunk_index = i
+                # 从chunk_id中提取索引信息，如果有的话
+                chunk_index = i  # 使用循环索引作为chunk_index
+                
+                # 确保向量数据存在且格式正确
+                vector = item.get("vector", [])
+                if not vector or len(vector) == 0:
+                    # 如果向量为空，使用零向量
+                    vector = [0.0] * SETTINGS.EMBED_DIM
                 
                 supabase_items.append({
                     "document_id": doc_id,
                     "document_name": f"doc_{doc_id}",
-                    "document_type": "etf_document_chunk",
+                    "document_type": "etf_document_chunk",  # 标识这是文档块
                     "chunk_index": chunk_index,
                     "content": item.get("text", ""),
-                    "embedding": item.get("vector", []),  # 确保向量数据正确传递
+                    "embedding": vector,  # 确保向量数据正确传递
                     "page_number": chunk_index // 10 + 1  # 基于索引估算页码
                 })
             
