@@ -37,9 +37,12 @@ class EmbeddingRepo:
                 
                 # 确保向量数据存在且格式正确
                 vector = item.get("vector", [])
-                if not vector or len(vector) == 0:
-                    # 如果向量为空，使用零向量
+                if not vector or len(vector) != SETTINGS.EMBED_DIM:
+                    # 如果向量为空或维度不正确，使用正确维度的零向量
+                    logger.warning(f"向量维度不正确，实际: {len(vector) if vector else 0}, 期望: {SETTINGS.EMBED_DIM}，使用零向量")
                     vector = [0.0] * SETTINGS.EMBED_DIM
+                
+                logger.debug(f"向量维度: {len(vector)}, 期望维度: {SETTINGS.EMBED_DIM}")
                 
                 supabase_items.append({
                     "document_id": doc_id,
@@ -83,6 +86,7 @@ class EmbeddingRepo:
                 logger.debug(f"处理第 {i+1} 行数据，文档ID: {r['document_id']}")
                 # embedding字段在Supabase中是向量格式，直接使用
                 embedding = r['embedding']
+                logger.debug(f"处理嵌入向量，维度: {len(embedding) if embedding else 0}")
                 out.append({
                     "id": r['id'], 
                     "doc_id": r['document_id'], 

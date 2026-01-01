@@ -1,4 +1,10 @@
 import os
+import logging
+
+
+# 配置日志
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 
 class Settings:
@@ -16,10 +22,18 @@ class Settings:
         self.SUPABASE_URL = os.getenv("SUPABASE_URL")
         # Supabase数据库连接密钥
         self.SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+        
+        if self.SUPABASE_URL and self.SUPABASE_KEY:
+            logger.info("检测到Supabase配置，将使用Supabase作为主要存储")
+        else:
+            logger.warning("未配置Supabase，将使用SQLite作为存储")
+        
         # 数据库文件路径，默认为"server_data.db"
         self.DB_PATH = os.getenv("ETFSERVER_DB_PATH", "server_data.db")
-        # 嵌入向量维度，默认为128
-        self.EMBED_DIM = int(os.getenv("ETFSERVER_EMBED_DIM", "128"))
+        # 嵌入向量维度，设置为1536维以匹配数据库
+        self.EMBED_DIM = int(os.getenv("ETFSERVER_EMBED_DIM", "1536"))
+        
+        logger.info(f"配置加载完成: DB_PATH={self.DB_PATH}, EMBED_DIM={self.EMBED_DIM}")
 
 
 # 创建全局配置实例
