@@ -92,7 +92,7 @@ class PDFProcessor(DocumentProcessor):
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
-                if page_num < 3:  # 预览前3页的文本长度
+                if page_num < 2:  # 预览前3页的文本长度
                     logger.debug(f"  第{page_num+1}页提取字符数: {len(page_text)}")
             
             return text

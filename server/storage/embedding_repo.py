@@ -61,7 +61,7 @@ class EmbeddingRepo:
                 
                 supabase_items.append(chunk_data)
             
-            logger.debug(f"准备插入的完整数据: {supabase_items}")
+            # logger.debug(f"准备插入的完整数据: {supabase_items}")
             
             # 批量插入到document_chunks表
             response = self.supabase.table("document_chunks").insert(supabase_items).execute()
