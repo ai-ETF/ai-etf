@@ -32,7 +32,12 @@ class DocumentService:
         self.doc_repo = DocumentRepo()
         self.emb_repo = EmbeddingRepo()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
-        logger.debug(f"文档服务初始化完成，嵌入维度: {SETTINGS.EMBED_DIM}")
+        
+        # 创建文档存储目录
+        self.doc_dir = Path("docs")
+        self.doc_dir.mkdir(exist_ok=True)
+        
+        logger.debug(f"文档服务初始化完成，嵌入维度: {SETTINGS.EMBED_DIM}, 文档目录: {self.doc_dir}")
 
     def ingest_document(self, url: str, source: str = None) -> str:
         """
@@ -69,11 +74,13 @@ class DocumentService:
         file_extension = self._get_file_extension(url, ct)
         logger.debug(f"检测到文件扩展名: {file_extension}")
         
-        # 所有文档都先保存到临时文件
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension, prefix="etf_doc_") as temp_file:
-            temp_file.write(content)
-            temp_file_path = temp_file.name
-            logger.debug(f"文档已临时保存到: {temp_file_path}")
+        # 所有文档都先保存到docs目录
+        doc_filename = f"etf_doc_{uuid.uuid4()}{file_extension}"
+        doc_file_path = self.doc_dir / doc_filename
+        
+        with open(doc_file_path, 'wb') as doc_file:
+            doc_file.write(content)
+            logger.debug(f"文档已保存到: {doc_file_path}")
 
         text = None
         # 根据内容类型决定如何处理文档
@@ -82,12 +89,12 @@ class DocumentService:
             text = res.text
             logger.debug(f"检测到文本内容，长度: {len(text)} 字符")
         else:
-            # 对于非文本文件（如PDF），从临时文件中提取文本
+            # 对于非文本文件（如PDF），从文档文件中提取文本
             # 尝试从文件中提取文本内容
-            text = self._extract_text_from_file(temp_file_path, file_extension)
+            text = self._extract_text_from_file(str(doc_file_path), file_extension)
             if not text:
                 logger.warning(f"无法从二进制文件中提取文本内容，使用占位符")
-                text = f"[binary document downloaded from {url}; size={len(content)} bytes; saved at: {temp_file_path}]"
+                text = f"[binary document downloaded from {url}; size={len(content)} bytes; saved at: {doc_file_path}]"
             else:
                 logger.debug(f"从二进制文件中成功提取文本内容，长度: {len(text)} 字符")
 
@@ -158,12 +165,12 @@ class DocumentService:
 
         logger.debug(f"文档处理完成，返回文档ID: {doc_id}")
         
-        # 清理临时文件
+        # 清理文档文件
         try:
-            os.unlink(temp_file_path)
-            logger.debug(f"临时文件已清理: {temp_file_path}")
+            os.unlink(doc_file_path)
+            logger.debug(f"文档文件已清理: {doc_file_path}")
         except OSError as e:
-            logger.error(f"删除临时文件失败 {temp_file_path}: {e}")
+            logger.error(f"删除文档文件失败 {doc_file_path}: {e}")
         
         return doc_id
 
