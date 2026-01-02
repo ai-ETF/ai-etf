@@ -81,6 +81,10 @@ class DocumentService:
         logger.debug("开始分割文本")
         chunks = split_text(text, chunk_size=800, overlap=120)
         logger.debug(f"文本分割完成，共生成 {len(chunks)} 个块")
+        
+        # 打印前5个分割的文本内容
+        for i, c in enumerate(chunks[:5]):
+            logger.debug(f"第 {i+1} 个文本块内容预览: {c[:200]}{'...' if len(c) > 200 else ''}")
 
         items = []
         for i, c in enumerate(chunks):
@@ -90,6 +94,11 @@ class DocumentService:
                 # 为每个文本块生成嵌入向量
                 vector = self.embedder.embed_text(c)
                 logger.debug(f"文本块嵌入向量生成完成，向量维度: {len(vector)}")
+                
+                # 记录前5个向量的简短预览
+                if i < 5:
+                    vector_preview = vector[:5]  # 只取向量的前5个值作为预览
+                    logger.debug(f"第 {i+1} 个向量预览 (前5个值): {vector_preview}")
             elif i == 10:
                 logger.debug("... 更多文本块正在处理中，为保持日志清晰，省略后续详细日志 ...")
             
