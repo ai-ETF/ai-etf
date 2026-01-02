@@ -7,11 +7,12 @@ from server.storage.document_repo import DocumentRepo
 from server.storage.embedding_repo import EmbeddingRepo
 from server.config.settings import SETTINGS
 
-
 # 配置日志
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
-
 
 class DocumentService:
     """
@@ -63,7 +64,7 @@ class DocumentService:
         # 根据内容类型决定如何处理文档
         if "text" in ct or url.endswith(".txt") or url.endswith(".md") or url.endswith(".html"):
             text = res.text
-            logger.debug(f"检测到文本内容，长度: {len(text)}")
+            logger.debug(f"检测到文本内容，长度: {len(text)} 字符")
         else:
             # 对于非文本内容，存储占位符
             text = f"[binary document downloaded from {url}; size={len(res.content)} bytes]"
@@ -82,34 +83,57 @@ class DocumentService:
         chunks = split_text(text, chunk_size=800, overlap=120)
         logger.debug(f"文本分割完成，共生成 {len(chunks)} 个块")
         
-        # 打印前5个分割的文本内容
+        # 开始标记和文本块预览
+        logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+        logger.debug("文本块内容预览 (前5个，限制200字符):")
         for i, c in enumerate(chunks[:5]):
-            logger.debug(f"第 {i+1} 个文本块内容预览: {c[:200]}{'...' if len(c) > 200 else ''}")
+            preview = c[:200] + ("..." if len(c) > 200 else "")
+            logger.debug(f"块 {i+1}/{len(chunks)} 预览: {preview}")
+            logger.debug(f"块 {i+1} 完整长度: {len(c)} 字符")
+        logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
 
         items = []
+        vector_generation_start = False
+        
         for i, c in enumerate(chunks):
-            # 只打印前10个文本块的处理信息
+            # 只打印前10个文本块的详细处理信息
             if i < 10:
-                logger.debug(f"正在处理第 {i+1} 个文本块，长度: {len(c)}")
+                if not vector_generation_start:
+                    logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+                    logger.debug("开始生成嵌入向量 (仅显示前10个块的详细信息):")
+                    vector_generation_start = True
+                
+                logger.debug(f"处理块 {i+1}/{len(chunks)} - 长度: {len(c)} 字符")
+                
                 # 为每个文本块生成嵌入向量
                 vector = self.embedder.embed_text(c)
-                logger.debug(f"文本块嵌入向量生成完成，向量维度: {len(vector)}")
                 
-                # 记录前5个向量的简短预览
+                # 打印前5个向量的预览
                 if i < 5:
-                    vector_preview = vector[:5]  # 只取向量的前5个值作为预览
-                    logger.debug(f"第 {i+1} 个向量预览 (前5个值): {vector_preview}")
+                    # 只显示前10个值
+                    vector_preview = vector[:10]
+                    logger.debug(f"块 {i+1} 向量预览 (前10个值): {vector_preview}")
+                    logger.debug(f"块 {i+1} 完整向量长度: {len(vector)} 维度")
+                
+                logger.debug("-" * 50)
             elif i == 10:
                 logger.debug("... 更多文本块正在处理中，为保持日志清晰，省略后续详细日志 ...")
+                logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
             
             items.append({"chunk_id": f"{doc_id}.{i}", "text": c, "vector": vector})
+
+        # 如果处理了少于10个块，添加结束标记
+        if len(chunks) <= 10 and vector_generation_start:
+            logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
 
         # 持久化存储嵌入向量
         logger.debug(f"开始存储 {len(items)} 个嵌入向量")
         
         # 在存储嵌入向量时添加更清晰的日志
+        logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
         self.emb_repo.insert_many(doc_id, items)
         logger.debug("嵌入向量存储完成")
+        logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
 
         logger.debug(f"文档处理完成，返回文档ID: {doc_id}")
         return doc_id
