@@ -82,11 +82,6 @@ class DocumentService:
             doc_file.write(content)
             logger.debug(f"文档已保存到: {doc_file_path}")
 
-        # 保存原始文档
-        logger.debug("正在保存文档到存储库")
-        self.doc_repo.save(doc_id, url, text, source=source)
-        logger.debug("文档保存完成")
-
         text = None
         # 根据内容类型决定如何处理文档
         if self._is_text_type(file_extension, ct):
@@ -106,6 +101,10 @@ class DocumentService:
         doc_id = str(uuid.uuid4())
         logger.debug(f"生成文档ID: {doc_id}")
         
+        # 保存原始文档
+        logger.debug("正在保存文档到存储库")
+        self.doc_repo.save(doc_id, url, text, source=source)
+        logger.debug("文档保存完成")
 
         # 分割文本
         logger.debug("开始分割文本")
