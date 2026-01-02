@@ -7,6 +7,13 @@ from contextlib import asynccontextmanager
 # 设置根日志记录器的级别
 logging.basicConfig(level=logging.DEBUG)
 
+# 设置第三方库的日志级别，避免过多的调试信息
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("hpack").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+
 # 尝试加载 .env 文件
 try:
     from dotenv import load_dotenv
