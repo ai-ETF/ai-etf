@@ -54,5 +54,4 @@ if os.path.exists(local_dir):
     if len(key_files) > 10:
         print(f"  ... 还有 {len(key_files)-10} 个文件")
 else:
-    print("警告: 目标目录不存在，下载可能未完成")_dir=local_dir)
-print(f"模型已下载到: {local_dir}")
+    print("警告: 目标目录不存在，下载可能未完成")
