@@ -1,255 +1,316 @@
+# server/services/document_service.py
 import uuid
 import requests
 import logging
-import tempfile
 import os
 from pathlib import Path
+from abc import ABC, abstractmethod
+from typing import Optional, Tuple, List
 from server.rag.chunker import split_text
 from server.rag.embedder import Embedder
 from server.storage.document_repo import DocumentRepo
 from server.storage.embedding_repo import EmbeddingRepo
 from server.config.settings import SETTINGS
 
-# 配置日志
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+
+class DocumentProcessor(ABC):
+    """文档处理器的抽象基类，定义了处理流程的骨架"""
+    
+    def __init__(self, embedder: Embedder):
+        self.embedder = embedder
+        
+    def process(self, content: bytes, file_extension: str) -> Tuple[str, List[str], List[List[float]]]:
+        """
+        处理文档的主流程模板方法
+        返回: (提取的文本, 文本块列表, 向量列表)
+        """
+        logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+        logger.debug(f"开始使用 {self.__class__.__name__} 处理文档")
+        
+        # 1. 内容提取 (由子类实现)
+        text = self._extract_content(content, file_extension)
+        logger.debug(f"✅ 内容提取完成，字符数: {len(text)}")
+        
+        # 2. 文本分块
+        logger.debug("开始文本分块...")
+        chunks = split_text(text, chunk_size=800, overlap=120)
+        logger.debug(f"✅ 文本分块完成，共 {len(chunks)} 块")
+        
+        # 3. 向量化
+        logger.debug("开始生成文本向量...")
+        vectors = []
+        for i, chunk in enumerate(chunks):
+            vector = self.embedder.embed_text(chunk)
+            vectors.append(vector)
+        logger.debug(f"✅ 向量生成完成，共 {len(vectors)} 个向量")
+        
+        logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+        return text, chunks, vectors
+    
+    @abstractmethod
+    def _extract_content(self, content: bytes, file_extension: str) -> str:
+        """从原始内容中提取文本 (子类必须实现)"""
+        pass
+    
+    def _log_chunks_preview(self, chunks: List[str], limit: int = 5, preview_len: int = 200):
+        """记录文本块预览"""
+        logger.debug("📄 文本块预览 (前5个，限制200字符):")
+        for i, chunk in enumerate(chunks[:limit]):
+            preview = chunk[:preview_len] + ("..." if len(chunk) > preview_len else "")
+            logger.debug(f"  块 {i+1}/{len(chunks)}: {preview}")
+    
+    def _log_vectors_preview(self, vectors: List[List[float]], limit: int = 5, preview_dims: int = 200):
+        """记录向量预览"""
+        logger.debug("🧮 向量预览 (前5个，限制200维度):")
+        for i, vector in enumerate(vectors[:limit]):
+            preview = vector[:preview_dims]
+            logger.debug(f"  向量 {i+1}/{len(vectors)} 前{len(preview)}维: {preview[:10]}..." if len(preview) > 10 else f"  向量 {i+1}/{len(vectors)}: {preview}")
+
+
+class PDFProcessor(DocumentProcessor):
+    """PDF文档处理器"""
+    
+    def _extract_content(self, content: bytes, file_extension: str) -> str:
+        """从PDF文件中提取文本"""
+        logger.debug("🔄 调用PDF工具处理...")
+        try:
+            import pypdf
+            from io import BytesIO
+            
+            text = ""
+            pdf_file = BytesIO(content)
+            pdf_reader = pypdf.PdfReader(pdf_file)
+            
+            logger.debug(f"📑 PDF页数: {len(pdf_reader.pages)}")
+            for page_num, page in enumerate(pdf_reader.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+                if page_num < 3:  # 预览前3页的文本长度
+                    logger.debug(f"  第{page_num+1}页提取字符数: {len(page_text)}")
+            
+            return text
+        except ImportError:
+            logger.error("❌ pypdf库未安装，请运行: pip install pypdf")
+            raise
+        except Exception as e:
+            logger.error(f"❌ PDF处理失败: {e}")
+            return f"[PDF处理错误: {str(e)}]"
+
+
+class TextProcessor(DocumentProcessor):
+    """文本文件处理器"""
+    
+    def _extract_content(self, content: bytes, file_extension: str) -> str:
+        """直接从字节内容解码为文本"""
+        logger.debug("🔄 直接提取文本信息...")
+        try:
+            # 尝试UTF-8解码，失败则尝试其他编码
+            try:
+                text = content.decode('utf-8')
+            except UnicodeDecodeError:
+                text = content.decode('gbk', errors='ignore')
+                logger.debug("⚠️  UTF-8解码失败，使用GBK解码")
+            
+            # 记录文本统计信息
+            lines = text.split('\n')
+            logger.debug(f"📊 文本统计: {len(text)} 字符, {len(lines)} 行")
+            if lines:
+                logger.debug(f"  首行预览: {lines[0][:100]}...")
+            
+            return text
+        except Exception as e:
+            logger.error(f"❌ 文本提取失败: {e}")
+            return f"[文本提取错误: {str(e)}]"
+
+
 class DocumentService:
     """
-    文档服务类
-    负责处理文档的上传、解析、嵌入和存储
+    重构后的文档服务类
+    职责: 协调文档处理流程，管理存储
     """
     
     def __init__(self):
-        """
-        初始化文档服务
-        创建文档存储、嵌入存储和嵌入器实例
-        """
-        logger.debug("初始化文档服务")
+        logger.debug("🚀 初始化文档服务")
         self.doc_repo = DocumentRepo()
         self.emb_repo = EmbeddingRepo()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
         
         # 创建文档存储目录
-        self.doc_dir = Path("docs")
-        self.doc_dir.mkdir(exist_ok=True)
+        # self.doc_dir = Path("docs")
+        # self.doc_dir.mkdir(exist_ok=True)
         
-        logger.debug(f"文档服务初始化完成，嵌入维度: {SETTINGS.EMBED_DIM}, 文档目录: {self.doc_dir}")
+        # 初始化处理器映射
+        self._init_processors()
+        
+        logger.debug(f"✅ 文档服务初始化完成，嵌入维度: {SETTINGS.EMBED_DIM}")
+
+    def _init_processors(self):
+        """初始化文档处理器映射"""
+        self.processors = {
+            '.pdf': PDFProcessor(self.embedder),
+            '.txt': TextProcessor(self.embedder),
+            '.md': TextProcessor(self.embedder),
+            '.html': TextProcessor(self.embedder),
+            '.json': TextProcessor(self.embedder),
+            '.xml': TextProcessor(self.embedder),
+            '.csv': TextProcessor(self.embedder),
+        }
+        logger.debug(f"📋 已注册处理器: {list(self.processors.keys())}")
 
     def ingest_document(self, url: str, source: str = None) -> str:
         """
-        摄取文档，包括下载、分割、嵌入和存储
-        
-        参数:
-            url: 文档的URL地址
-            source: 文档来源（可选）
-            
-        返回:
-            生成的文档ID
-            
-        异常:
-            RuntimeError: 当下载文档失败时抛出
+        摄取文档的主入口
+        清晰的功能步骤:
+        1. 下载文档
+        2. 判断文档类型
+        3. 更改文档拓展名
+        4. 保存到本地
+        5. 根据类型调用对应处理器
+        6. 分块处理 + 向量处理
+        7. 存储结果
         """
-        logger.debug(f"开始处理文档，URL: {url}, 来源: {source}")
+        logger.info("=" * 60)
+        logger.info(f"📥 开始处理文档: {url}")
         
-        # 下载文档
-        logger.debug(f"正在下载文档: {url}")
-        res = requests.get(url, timeout=30)
-        logger.debug(f"下载响应状态码: {res.status_code}")
+        # === 步骤1: 下载文档 ===
+        logger.debug("1️⃣ 下载文档...")
+        content, content_type = self._download_document(url)
+        logger.debug(f"  下载完成，大小: {len(content)} 字节, 类型: {content_type}")
         
-        if res.status_code != 200:
-            error_msg = f"下载失败，URL: {url}，状态码: {res.status_code}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-        # 获取原始内容
-        content = res.content
-        ct = res.headers.get("content-type", "")
-        logger.debug(f"文档内容类型: {ct}")
+        # === 步骤2: 判断文档类型 ===
+        logger.debug("2️⃣ 判断文档类型...")
+        file_extension = self._determine_file_extension(url, content_type, content)
+        processor = self._get_processor(file_extension)
+        logger.debug(f"  判断结果: 扩展名={file_extension}, 处理器={processor.__class__.__name__}")
         
-        # 根据文件扩展名或内容类型判断文件类型
-        file_extension = self._get_file_extension(url, ct)
-        logger.debug(f"检测到文件扩展名: {file_extension}")
+        # === 步骤3&4: 更改拓展名并保存到本地 ===
+        logger.debug("3️⃣&4️⃣ 保存到本地...")
+        local_path = self._save_to_local(content, file_extension)
+        logger.debug(f"  已保存到: {local_path}")
         
-        # 所有文档都先保存到docs目录
-        doc_filename = f"etf_doc_{uuid.uuid4()}{file_extension}"
-        doc_file_path = self.doc_dir / doc_filename
+        # === 步骤5: 根据类型调用对应处理器 ===
+        logger.debug("5️⃣ 调用处理器处理文档内容...")
+        text, chunks, vectors = processor.process(content, file_extension)
         
-        with open(doc_file_path, 'wb') as doc_file:
-            doc_file.write(content)
-            logger.debug(f"文档已保存到: {doc_file_path}")
-
-        text = None
-        # 根据内容类型决定如何处理文档
-        if self._is_text_type(file_extension, ct):
-            # 对于文本类型文件，直接使用文本内容
-            text = res.text
-            logger.debug(f"检测到文本内容，长度: {len(text)} 字符")
-        else:
-            # 对于非文本文件（如PDF），从文档文件中提取文本
-            # 尝试从文件中提取文本内容
-            text = self._extract_text_from_file(str(doc_file_path), file_extension)
-            if not text:
-                logger.warning(f"无法从二进制文件中提取文本内容，使用占位符")
-                text = f"[binary document downloaded from {url}; size={len(content)} bytes; saved at: {doc_file_path}]"
-            else:
-                logger.debug(f"从二进制文件中成功提取文本内容，长度: {len(text)} 字符")
-
-        doc_id = str(uuid.uuid4())
-        logger.debug(f"生成文档ID: {doc_id}")
+        # === 步骤6: 分块处理 + 向量处理 ===
+        logger.debug("6️⃣ 输出处理结果预览...")
+        processor._log_chunks_preview(chunks)
+        processor._log_vectors_preview(vectors)
         
-        # 保存原始文档
-        logger.debug("正在保存文档到存储库")
-        self.doc_repo.save(doc_id, url, text, source=source)
-        logger.debug("文档保存完成")
-
-        # 分割文本
-        logger.debug("开始分割文本")
-        chunks = split_text(text, chunk_size=800, overlap=120)
-        logger.debug(f"文本分割完成，共生成 {len(chunks)} 个块")
+        # === 步骤7: 存储结果 ===
+        logger.debug("7️⃣ 存储处理结果...")
+        doc_id = self._store_results(url, text, source, chunks, vectors)
         
-        # 开始标记和文本块预览
-        logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-        logger.debug("文本块内容预览 (前5个，限制200字符):")
-        for i, c in enumerate(chunks[:5]):
-            preview = c[:200] + ("..." if len(c) > 200 else "")
-            logger.debug(f"块 {i+1}/{len(chunks)} 预览: {preview}")
-            logger.debug(f"块 {i+1} 完整长度: {len(c)} 字符")
-        logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-
-        items = []
-        vector_generation_start = False
+        # 清理临时文件
+        self._cleanup_temp_file(local_path)
         
-        for i, c in enumerate(chunks):
-            # 只打印前10个文本块的详细处理信息
-            if i < 10:
-                if not vector_generation_start:
-                    logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-                    logger.debug("开始生成嵌入向量 (仅显示前10个块的详细信息):")
-                    vector_generation_start = True
-                
-                logger.debug(f"处理块 {i+1}/{len(chunks)} - 长度: {len(c)} 字符")
-                
-                # 为每个文本块生成嵌入向量
-                vector = self.embedder.embed_text(c)
-                
-                # 打印前5个向量的预览
-                if i < 5:
-                    # 只显示前10个值
-                    vector_preview = vector[:10]
-                    logger.debug(f"块 {i+1} 向量预览 (前10个值): {vector_preview}")
-                    logger.debug(f"块 {i+1} 完整向量长度: {len(vector)} 维度")
-                
-                logger.debug("-" * 50)
-            elif i == 10:
-                logger.debug("... 更多文本块正在处理中，为保持日志清晰，省略后续详细日志 ...")
-                logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-            
-            items.append({"chunk_id": f"{doc_id}.{i}", "text": c, "vector": vector})
-
-        # 如果处理了少于10个块，添加结束标记
-        if len(chunks) <= 10 and vector_generation_start:
-            logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-
-        # 持久化存储嵌入向量
-        logger.debug(f"开始存储 {len(items)} 个嵌入向量")
-        
-        # 在存储嵌入向量时添加更清晰的日志
-        logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-        self.emb_repo.insert_many(doc_id, items)
-        logger.debug("嵌入向量存储完成")
-        logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-
-        logger.debug(f"文档处理完成，返回文档ID: {doc_id}")
-        
-        # 清理文档文件
-        try:
-            os.unlink(doc_file_path)
-            logger.debug(f"文档文件已清理: {doc_file_path}")
-        except OSError as e:
-            logger.error(f"删除文档文件失败 {doc_file_path}: {e}")
-        
+        logger.info(f"✅ 文档处理完成! ID: {doc_id}")
+        logger.info("=" * 60)
         return doc_id
-
-    def _is_text_type(self, file_extension: str, content_type: str) -> bool:
-        """
-        判断是否为文本类型文件
-        """
-        # 优先检查内容类型
-        if content_type:
-            # 如果是纯文本类型，返回True
-            if "text" in content_type:
-                return True
-            # 如果是application/json，也视为文本类型
-            if content_type in ['application/json', 'application/xml', 'text/xml']:
-                return True
-            # 如果是application/pdf，明确不是文本类型
-            if content_type == 'application/pdf':
-                return False
+    
+    def _download_document(self, url: str) -> Tuple[bytes, str]:
+        """下载文档并返回内容和类型"""
+        try:
+            res = requests.get(url, timeout=30)
+            if res.status_code != 200:
+                raise RuntimeError(f"下载失败，状态码: {res.status_code}")
+            return res.content, res.headers.get('content-type', '')
+        except Exception as e:
+            logger.error(f"❌ 文档下载失败: {e}")
+            raise
+    
+    def _determine_file_extension(self, url: str, content_type: str, content: bytes) -> str:
+        """综合判断文档类型"""
+        # 方法1: 从URL路径获取扩展名
+        url_ext = Path(url).suffix.lower()
+        if url_ext and len(url_ext) <= 10:  # 合理的扩展名长度
+            logger.debug(f"  从URL获取扩展名: {url_ext}")
+            return url_ext
         
-        # 检查文件扩展名
-        text_extensions = ['.txt', '.md', '.html', '.htm', '.py', '.js', '.ts', '.json', '.xml', '.csv']
-        if file_extension.lower() in text_extensions:
-            return True
-            
-        return False
-
-    def _get_file_extension(self, url: str, content_type: str) -> str:
-        """
-        根据URL或内容类型获取文件扩展名
-        """
-        # 首先尝试从URL获取扩展名
-        path = Path(url).suffix.lower()
-        if path:
-            return path
-            
-        # 如果URL没有扩展名，尝试从content-type推断
+        # 方法2: 从Content-Type推断
         content_type_map = {
             'application/pdf': '.pdf',
-            'application/msword': '.doc',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-            'application/vnd.ms-excel': '.xls',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-            'text/csv': '.csv',
             'text/plain': '.txt',
             'text/html': '.html',
             'application/json': '.json',
             'application/xml': '.xml',
             'text/xml': '.xml',
+            'text/csv': '.csv',
+            'text/markdown': '.md',
+        }
+        if content_type in content_type_map:
+            ext = content_type_map[content_type]
+            logger.debug(f"  从Content-Type推断扩展名: {ext}")
+            return ext
+        
+        # 方法3: 通过文件魔数判断 (最可靠)
+        file_signatures = {
+            b'%PDF': '.pdf',
+            b'\x50\x4B\x03\x04': '.docx',  # ZIP格式，可能是docx
+            b'\x25\x50\x44\x46': '.pdf',   # 另一种PDF签名
         }
         
-        return content_type_map.get(content_type, '.dat')  # 默认扩展名
-
-    def _extract_text_from_file(self, file_path: str, file_extension: str) -> str:
-        """
-        从文件中提取文本内容
-        """
-        logger.debug(f"尝试从文件中提取文本内容: {file_path}, 扩展名: {file_extension}")
+        for signature, ext in file_signatures.items():
+            if content[:4].startswith(signature):
+                logger.debug(f"  通过文件签名判断扩展名: {ext}")
+                return ext
         
-        # 如果是PDF文件，使用pypdf提取文本
-        if file_extension.lower() == '.pdf':
-            try:
-                import pypdf
-                text = ""
-                with open(file_path, 'rb') as file:
-                    pdf_reader = pypdf.PdfReader(file)
-                    for page in pdf_reader.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            text += page_text + "\n"
-                logger.debug(f"PDF文件文本提取完成，提取字符数: {len(text)}")
-                return text
-            except ImportError:
-                logger.error("pypdf库未安装，无法处理PDF文件")
-                return ""
-            except Exception as e:
-                logger.error(f"PDF文件处理失败: {e}")
-                return ""
+        # 默认值
+        logger.warning(f"⚠️  无法确定文档类型，使用默认扩展名 .dat")
+        return '.dat'
+    
+    def _get_processor(self, file_extension: str) -> DocumentProcessor:
+        """根据扩展名获取处理器"""
+        processor = self.processors.get(file_extension.lower())
+        if not processor:
+            logger.warning(f"⚠️  没有找到 {file_extension} 的处理器，使用文本处理器作为后备")
+            return TextProcessor(self.embedder)
+        return processor
+    
+    def _save_to_local(self, content: bytes, file_extension: str) -> Path:
+        """保存文档到本地"""
+        filename = f"temp_doc_{uuid.uuid4()}{file_extension}"
+        filepath = self.doc_dir / filename
         
-        # 如果是其他二进制文件，暂时返回空字符串
-        # 可以在这里添加对其他文件类型的处理
-        logger.debug(f"不支持的文件类型，无法提取文本: {file_extension}")
-        return ""
+        with open(filepath, 'wb') as f:
+            f.write(content)
+        
+        return filepath
+    
+    def _store_results(self, url: str, text: str, source: Optional[str], 
+                      chunks: List[str], vectors: List[List[float]]) -> str:
+        """存储处理结果到数据库"""
+        doc_id = str(uuid.uuid4())
+        
+        # 保存文档元数据
+        self.doc_repo.save(doc_id, url, text, source=source)
+        
+        # 准备嵌入向量数据
+        items = []
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            items.append({
+                "chunk_id": f"{doc_id}.{i}",
+                "text": chunk,
+                "vector": vector
+            })
+        
+        # 批量插入嵌入向量
+        self.emb_repo.insert_many(doc_id, items)
+        
+        return doc_id
+    
+    def _cleanup_temp_file(self, filepath: Path):
+        """清理临时文件"""
+        # try:
+        #     if filepath.exists():
+        #         os.unlink(filepath)
+        #         logger.debug(f"🗑️  已清理临时文件: {filepath}")
+        # except Exception as e:
+        #     logger.warning(f"⚠️  清理临时文件失败: {e}")
