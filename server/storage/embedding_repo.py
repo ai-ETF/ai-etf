@@ -118,7 +118,7 @@ class EmbeddingRepo:
                 {
                     "query_embedding": query_vector,
                     "match_count": top_k,
-                    "doc_id": doc_id
+                    "document_id": doc_id
                 }
             )
             .execute()
