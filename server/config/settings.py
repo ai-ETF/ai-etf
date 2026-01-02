@@ -34,8 +34,8 @@ class Settings:
         
         # 数据库文件路径，默认为"server_data.db"
         self.DB_PATH = os.getenv("ETFSERVER_DB_PATH", "server_data.db")
-        # 嵌入向量维度，设置为1536维以匹配数据库
-        self.EMBED_DIM = int(os.getenv("ETFSERVER_EMBED_DIM", "1536"))
+        # 嵌入向量维度，设置为768维以匹配数据库
+        self.EMBED_DIM = int(os.getenv("ETFSERVER_EMBED_DIM", "768"))
         
         logger.info(f"配置加载完成: DB_PATH={self.DB_PATH}, EMBED_DIM={self.EMBED_DIM}")
 

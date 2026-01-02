@@ -40,7 +40,7 @@ def split_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str
         end = start + chunk_size
         chunk = " ".join(words[start:end])
         chunks.append(chunk)
-        logger.debug(f"生成块 {chunk_num + 1}，长度: {len(chunk)}")
+        # logger.debug(f"生成块 {chunk_num + 1}，长度: {len(chunk)}")
         
         if end >= len(words):
             logger.debug(f"已到达文本末尾，停止分割")
@@ -48,7 +48,7 @@ def split_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str
             
         start = end - overlap
         chunk_num += 1
-        logger.debug(f"下一块起始位置: {start}")
+        # logger.debug(f"下一块起始位置: {start}")
         
     logger.debug(f"文本分割完成，共生成 {len(chunks)} 个块")
     return chunks
