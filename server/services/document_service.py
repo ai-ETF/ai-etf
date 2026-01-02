@@ -206,7 +206,7 @@ class DocumentService:
         
         # === 步骤7: 存储结果 ===
         logger.debug("7️⃣ 存储处理结果...")
-        doc_id = self._store_results(url, text, source, chunks, vectors)
+        doc_id = self._store_results(chunks, vectors)
         
         # 清理临时文件
         self._cleanup_temp_file(local_path)
@@ -284,13 +284,9 @@ class DocumentService:
         
         return filepath
     
-    def _store_results(self, url: str, text: str, source: Optional[str], 
-                      chunks: List[str], vectors: List[List[float]]) -> str:
-        """存储处理结果到数据库"""
+    def _store_results(self, chunks: List[str], vectors: List[List[float]]) -> str:
+        """存储处理结果到数据库，仅存储向量块"""
         doc_id = str(uuid.uuid4())
-        
-        # 保存文档元数据
-        self.doc_repo.save(doc_id, url, text, source=source)
         
         # 准备嵌入向量数据
         items = []

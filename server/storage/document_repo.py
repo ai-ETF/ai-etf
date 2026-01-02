@@ -21,91 +21,82 @@ class DocumentRepo:
             
         logger.info("使用Supabase作为文档存储")
 
-    def save_document_metadata(self, doc_id: str, url: str, source: Optional[str] = None, title: Optional[str] = None):
-        """保存文档元数据到 documents 表"""
-        logger.debug(f"保存文档元数据，ID: {doc_id}, URL: {url}, 来源: {source}, 标题: {title}")
+    def save_document_chunks(self, doc_id: str, chunks: List[Dict]):
+        """
+        保存文档分块到 document_chunks 表
+        chunks: 已经过滤掉元数据的纯文本块列表
+        """
+        logger.debug(f"保存文档分块，文档ID: {doc_id}, 块数: {len(chunks)}")
         
         try:
-            # 准备元数据
-            metadata_entry = {
-                "document_id": doc_id,
-                "url": url,
-                "source": source,
-                "title": title or f"Document {doc_id}",
-                "created_at": datetime.utcnow().isoformat() + "Z"  # ISO格式，带时区
-            }
-            
-            # 检查是否已存在相同的 document_id
-            existing_response = self.supabase.table("documents").select("*").eq("document_id", doc_id).execute()
-            
-            if existing_response.data and len(existing_response.data) > 0:
-                # 已存在，更新记录
-                metadata_id = existing_response.data[0]["id"]
-                update_data = {
-                    "url": url,
-                    "source": source,
-                    "title": title or existing_response.data[0].get("title", f"Document {doc_id}"),
-                    "updated_at": datetime.utcnow().isoformat() + "Z"
+            # 准备批量数据
+            chunks_data = []
+            for i, chunk in enumerate(chunks):
+                # 确保每个分块都有必需的信息
+                chunk_data = {
+                    "document_id": doc_id,
+                    "document_name": chunk.get("document_name", f"chunk_{doc_id}_{i}"),
+                    "document_type": chunk.get("document_type", "text_chunk"),
+                    "chunk_index": chunk.get("chunk_index", i),
+                    "content": chunk.get("text", ""),
+                    "embedding": self._format_vector_for_db(chunk.get("embedding", [])),
+                    "page_number": chunk.get("page_number", 1),
+                    "created_at": datetime.utcnow().isoformat() + "Z"
                 }
                 
-                response = self.supabase.table("documents").update(update_data).eq("id", metadata_id).execute()
-                logger.debug(f"文档 {doc_id} 元数据已更新")
-            else:
-                # 不存在，插入新记录
-                response = self.supabase.table("documents").insert(metadata_entry).execute()
-                logger.debug(f"文档 {doc_id} 元数据已插入")
+                # 跳过空内容或无效的分块
+                if not self._is_valid_chunk(chunk_data):
+                    logger.debug(f"跳过无效分块: 索引={i}, 内容长度={len(chunk_data['content'])}")
+                    continue
+                    
+                chunks_data.append(chunk_data)
             
-            if response.data and len(response.data) > 0:
-                metadata_id = response.data[0]["id"]
-                logger.debug(f"文档元数据操作成功，metadata_id: {metadata_id}")
-                return metadata_id
+            # 批量插入
+            if chunks_data:
+                # 首先删除该文档的所有旧分块（避免重复）
+                self._delete_document_chunks(doc_id)
+                
+                # 批量插入新分块
+                response = self.supabase.table("document_chunks").insert(chunks_data).execute()
+                logger.debug(f"成功插入 {len(chunks_data)} 个文档块")
+                return len(chunks_data)
             else:
-                logger.error("保存文档元数据失败，无返回数据")
-                return None
+                logger.warning("没有有效的文档分块需要保存")
+                return 0
                 
         except Exception as e:
-            error_msg = f"Supabase保存文档元数据失败: {str(e)}"
+            error_msg = f"Supabase保存文档分块失败: {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-    def save_document_chunk(self, doc_id: str, chunk_index: int, content: str, 
-                           embedding: List[float], metadata_id: Optional[str] = None,
-                           document_name: Optional[str] = None, document_type: Optional[str] = None,
-                           page_number: int = 1):
-        """保存单个文档分块到 document_chunks 表"""
-        logger.debug(f"保存文档分块，文档ID: {doc_id}, 块索引: {chunk_index}, 内容长度: {len(content)}")
-        
+    def save_single_chunk(self, doc_id: str, chunk_data: Dict):
+        """保存单个文档分块"""
         try:
-            # 如果没有 metadata_id，尝试从 documents 表获取
-            if not metadata_id:
-                metadata_id = self._get_metadata_id_by_doc_id(doc_id)
+            # 确保有必需的字段
+            chunk_index = chunk_data.get("chunk_index", 0)
+            content = chunk_data.get("text", "")
+            
+            logger.debug(f"保存单个文档分块，文档ID: {doc_id}, 块索引: {chunk_index}, 内容长度: {len(content)}")
+            
+            # 跳过空内容
+            if not content or len(content.strip()) == 0:
+                logger.warning("内容为空，跳过保存")
+                return None
             
             # 准备分块数据
-            chunk_data = {
+            chunk_entry = {
                 "document_id": doc_id,
-                "document_metadata_id": metadata_id,
-                "document_name": document_name or f"chunk_{doc_id}_{chunk_index}",
-                "document_type": document_type or "text_chunk",
+                "document_name": chunk_data.get("document_name", f"chunk_{doc_id}_{chunk_index}"),
+                "document_type": chunk_data.get("document_type", "text_chunk"),
                 "chunk_index": chunk_index,
                 "content": content,
-                "embedding": self._format_vector_for_db(embedding),
-                "page_number": page_number,
-                "is_metadata": False,
+                "embedding": self._format_vector_for_db(chunk_data.get("embedding", [])),
+                "page_number": chunk_data.get("page_number", 1),
                 "created_at": datetime.utcnow().isoformat() + "Z"
             }
             
-            # 检查是否已存在相同的文档分块
-            existing_response = self.supabase.table("document_chunks").select("*").eq("document_id", doc_id).eq("chunk_index", chunk_index).execute()
-            
-            if existing_response.data and len(existing_response.data) > 0:
-                # 已存在，更新记录
-                chunk_id = existing_response.data[0]["id"]
-                response = self.supabase.table("document_chunks").update(chunk_data).eq("id", chunk_id).execute()
-                logger.debug(f"文档分块 {doc_id}.{chunk_index} 已更新")
-            else:
-                # 不存在，插入新记录
-                response = self.supabase.table("document_chunks").insert(chunk_data).execute()
-                logger.debug(f"文档分块 {doc_id}.{chunk_index} 已插入")
+            # 插入分块
+            response = self.supabase.table("document_chunks").insert(chunk_entry).execute()
             
             if response.data and len(response.data) > 0:
                 chunk_id = response.data[0]["id"]
@@ -116,98 +107,16 @@ class DocumentRepo:
                 return None
                 
         except Exception as e:
-            error_msg = f"Supabase保存文档分块失败: {str(e)}"
+            error_msg = f"Supabase保存单个文档分块失败: {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-    def save_document_chunks_batch(self, doc_id: str, chunks: List[Dict], 
-                                  metadata_id: Optional[str] = None,
-                                  document_name: Optional[str] = None, 
-                                  document_type: Optional[str] = None):
-        """批量保存文档分块到 document_chunks 表"""
-        logger.debug(f"批量保存文档分块，文档ID: {doc_id}, 块数: {len(chunks)}")
-        
-        try:
-            # 如果没有 metadata_id，尝试从 documents 表获取
-            if not metadata_id:
-                metadata_id = self._get_metadata_id_by_doc_id(doc_id)
-            
-            # 准备批量数据
-            chunks_data = []
-            for i, chunk in enumerate(chunks):
-                chunk_data = {
-                    "document_id": doc_id,
-                    "document_metadata_id": metadata_id,
-                    "document_name": document_name or f"chunk_{doc_id}_{i}",
-                    "document_type": document_type or chunk.get("document_type", "text_chunk"),
-                    "chunk_index": i,
-                    "content": chunk.get("text", ""),
-                    "embedding": self._format_vector_for_db(chunk.get("embedding", [])),
-                    "page_number": chunk.get("page", 1),
-                    "is_metadata": False,
-                    "created_at": datetime.utcnow().isoformat() + "Z"
-                }
-                chunks_data.append(chunk_data)
-            
-            # 批量插入
-            if chunks_data:
-                # 首先删除该文档的所有旧分块（可选，根据需求）
-                # self.supabase.table("document_chunks").delete().eq("document_id", doc_id).execute()
-                
-                # 批量插入新分块
-                response = self.supabase.table("document_chunks").insert(chunks_data).execute()
-                logger.debug(f"成功批量插入 {len(chunks_data)} 个文档块")
-                return True
-            else:
-                logger.warning("没有文档分块需要保存")
-                return False
-                
-        except Exception as e:
-            error_msg = f"Supabase批量保存文档分块失败: {str(e)}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-    def get_document_metadata(self, doc_id: str):
-        """从 documents 表获取文档元数据"""
-        logger.debug(f"获取文档元数据，ID: {doc_id}")
-        
-        try:
-            response = self.supabase.table("documents").select("*").eq("document_id", doc_id).execute()
-            
-            if response.data and len(response.data) > 0:
-                row = response.data[0]
-                result = {
-                    "id": row["id"],
-                    "document_id": row["document_id"],
-                    "url": row.get("url", ""),
-                    "source": row.get("source", ""),
-                    "title": row.get("title", ""),
-                    "created_at": row.get("created_at", ""),
-                    "updated_at": row.get("updated_at", "")
-                }
-                logger.debug(f"文档 {doc_id} 元数据获取完成")
-                return result
-            else:
-                logger.debug(f"文档 {doc_id} 在documents表中不存在")
-                return None
-                
-        except Exception as e:
-            error_msg = f"Supabase获取文档元数据失败: {str(e)}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-    def get_document_chunks(self, doc_id: str, exclude_metadata: bool = True):
+    def get_document_chunks(self, doc_id: str):
         """获取文档的所有分块"""
         logger.debug(f"获取文档分块，文档ID: {doc_id}")
         
         try:
-            query = self.supabase.table("document_chunks").select("*").eq("document_id", doc_id)
-            
-            if exclude_metadata:
-                query = query.eq("is_metadata", False)
-            
-            query = query.order("chunk_index")
-            response = query.execute()
+            response = self.supabase.table("document_chunks").select("*").eq("document_id", doc_id).order("chunk_index").execute()
             
             chunks = []
             if response.data:
@@ -219,7 +128,7 @@ class DocumentRepo:
                         "page_number": row.get("page_number", 1),
                         "document_name": row.get("document_name", ""),
                         "document_type": row.get("document_type", ""),
-                        "metadata_id": row.get("document_metadata_id"),
+                        "embedding": self._parse_vector_from_db(row.get("embedding")),
                         "created_at": row.get("created_at", "")
                     }
                     chunks.append(chunk)
@@ -232,109 +141,177 @@ class DocumentRepo:
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-    def get_document_with_chunks(self, doc_id: str):
-        """获取文档元数据及其所有分块"""
-        logger.debug(f"获取文档及其分块，ID: {doc_id}")
+    def get_chunk_by_id(self, chunk_id: str):
+        """根据ID获取单个分块"""
+        logger.debug(f"获取分块，ID: {chunk_id}")
         
         try:
-            # 获取元数据
-            metadata = self.get_document_metadata(doc_id)
-            if not metadata:
-                return None
+            response = self.supabase.table("document_chunks").select("*").eq("id", chunk_id).execute()
             
-            # 获取分块
-            chunks = self.get_document_chunks(doc_id)
-            
-            result = {
-                "metadata": metadata,
-                "chunks": chunks,
-                "total_chunks": len(chunks)
-            }
-            
-            logger.debug(f"文档 {doc_id} 及其 {len(chunks)} 个分块获取完成")
-            return result
-            
-        except Exception as e:
-            error_msg = f"获取文档及其分块失败: {str(e)}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-    def delete_document(self, doc_id: str):
-        """删除文档及其所有分块"""
-        logger.debug(f"删除文档，ID: {doc_id}")
-        
-        try:
-            # 由于设置了外键级联删除，删除documents表中的记录会自动删除document_chunks表中的相关记录
-            response = self.supabase.table("documents").delete().eq("document_id", doc_id).execute()
-            
-            if response.data:
-                logger.debug(f"文档 {doc_id} 删除成功")
-                return True
+            if response.data and len(response.data) > 0:
+                row = response.data[0]
+                chunk = {
+                    "id": row["id"],
+                    "document_id": row["document_id"],
+                    "chunk_index": row["chunk_index"],
+                    "content": row["content"],
+                    "page_number": row.get("page_number", 1),
+                    "document_name": row.get("document_name", ""),
+                    "document_type": row.get("document_type", ""),
+                    "embedding": self._parse_vector_from_db(row.get("embedding")),
+                    "created_at": row.get("created_at", "")
+                }
+                return chunk
             else:
-                logger.debug(f"文档 {doc_id} 不存在，无需删除")
-                return False
+                logger.debug(f"分块 {chunk_id} 不存在")
+                return None
                 
         except Exception as e:
-            error_msg = f"Supabase删除文档失败: {str(e)}"
+            error_msg = f"Supabase获取分块失败: {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-    def search_documents_by_source(self, source: str):
-        """根据来源搜索文档"""
-        logger.debug(f"根据来源搜索文档，来源: {source}")
+    def delete_document_chunks(self, doc_id: str):
+        """删除文档的所有分块"""
+        logger.debug(f"删除文档分块，文档ID: {doc_id}")
         
         try:
-            response = self.supabase.table("documents").select("*").eq("source", source).execute()
+            response = self.supabase.table("document_chunks").delete().eq("document_id", doc_id).execute()
+            
+            deleted_count = len(response.data) if response.data else 0
+            logger.debug(f"文档 {doc_id} 的 {deleted_count} 个分块删除成功")
+            return deleted_count
+                
+        except Exception as e:
+            error_msg = f"Supabase删除文档分块失败: {str(e)}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+    def search_chunks_by_content(self, keyword: str, limit: int = 10):
+        """根据内容关键词搜索分块"""
+        logger.debug(f"根据内容搜索分块，关键词: {keyword}")
+        
+        try:
+            # 使用模糊搜索
+            response = self.supabase.table("document_chunks").select("*").ilike("content", f"%{keyword}%").limit(limit).execute()
+            
+            chunks = []
+            if response.data:
+                for row in response.data:
+                    chunk = {
+                        "id": row["id"],
+                        "document_id": row["document_id"],
+                        "chunk_index": row["chunk_index"],
+                        "content": row["content"],
+                        "page_number": row.get("page_number", 1),
+                        "document_name": row.get("document_name", ""),
+                        "document_type": row.get("document_type", "")
+                    }
+                    chunks.append(chunk)
+            
+            logger.debug(f"找到 {len(chunks)} 个包含关键词 '{keyword}' 的分块")
+            return chunks
+            
+        except Exception as e:
+            error_msg = f"Supabase根据内容搜索分块失败: {str(e)}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+    def get_all_documents(self):
+        """获取所有文档的ID列表"""
+        logger.debug("获取所有文档ID列表")
+        
+        try:
+            # 使用DISTINCT获取所有唯一的document_id
+            response = self.supabase.table("document_chunks").select("document_id").execute()
             
             documents = []
             if response.data:
+                # 去重
+                seen = set()
                 for row in response.data:
-                    document = {
-                        "id": row["id"],
-                        "document_id": row["document_id"],
-                        "url": row.get("url", ""),
-                        "source": row.get("source", ""),
-                        "title": row.get("title", ""),
-                        "created_at": row.get("created_at", "")
-                    }
-                    documents.append(document)
+                    doc_id = row["document_id"]
+                    if doc_id not in seen:
+                        seen.add(doc_id)
+                        documents.append(doc_id)
             
-            logger.debug(f"找到 {len(documents)} 个来源为 {source} 的文档")
+            logger.debug(f"找到 {len(documents)} 个文档")
             return documents
             
         except Exception as e:
-            error_msg = f"Supabase根据来源搜索文档失败: {str(e)}"
+            error_msg = f"Supabase获取所有文档失败: {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-    def _get_metadata_id_by_doc_id(self, doc_id: str) -> str:
-        """根据 document_id 获取 metadata_id"""
+    def get_document_stats(self, doc_id: str):
+        """获取文档的统计信息"""
+        logger.debug(f"获取文档统计信息，文档ID: {doc_id}")
+        
         try:
-            response = self.supabase.table("documents").select("id").eq("document_id", doc_id).execute()
+            # 获取文档的所有分块
+            chunks = self.get_document_chunks(doc_id)
             
-            if response.data and len(response.data) > 0:
-                return response.data[0]["id"]
+            if not chunks:
+                return None
+            
+            # 计算统计信息
+            total_chunks = len(chunks)
+            total_content_length = sum(len(chunk["content"]) for chunk in chunks)
+            
+            # 获取创建时间范围
+            if chunks[0].get("created_at"):
+                created_at = chunks[0]["created_at"]
             else:
-                # 如果没有找到，创建一个新的文档记录
-                logger.warning(f"文档 {doc_id} 的元数据不存在，正在创建默认元数据...")
-                
-                # 创建默认元数据
-                metadata_entry = {
-                    "document_id": doc_id,
-                    "title": f"Document {doc_id}",
-                    "created_at": datetime.utcnow().isoformat() + "Z"
-                }
-                
-                create_response = self.supabase.table("documents").insert(metadata_entry).execute()
-                
-                if create_response.data and len(create_response.data) > 0:
-                    return create_response.data[0]["id"]
-                else:
-                    raise ValueError(f"无法为文档 {doc_id} 创建元数据记录")
-                    
+                created_at = None
+            
+            stats = {
+                "document_id": doc_id,
+                "total_chunks": total_chunks,
+                "total_content_length": total_content_length,
+                "average_chunk_length": total_content_length / total_chunks if total_chunks > 0 else 0,
+                "created_at": created_at,
+                "chunks": chunks  # 可选：包含所有分块
+            }
+            
+            return stats
+            
         except Exception as e:
-            logger.error(f"获取文档元数据ID失败: {str(e)}")
-            raise RuntimeError(f"获取文档元数据ID失败: {str(e)}")
+            error_msg = f"获取文档统计信息失败: {str(e)}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+    def _delete_document_chunks(self, doc_id: str):
+        """内部方法：删除文档的所有分块"""
+        try:
+            response = self.supabase.table("document_chunks").delete().eq("document_id", doc_id).execute()
+            logger.debug(f"已删除文档 {doc_id} 的所有旧分块")
+        except Exception as e:
+            logger.warning(f"删除文档旧分块失败: {str(e)}")
+            # 这里不抛出异常，因为可能是第一次保存，没有旧分块
+
+    def _is_valid_chunk(self, chunk_data: Dict) -> bool:
+        """检查分块是否有效"""
+        content = chunk_data.get("content", "")
+        
+        # 1. 内容不能为空
+        if not content or len(content.strip()) == 0:
+            return False
+        
+        # 2. 内容不能太短（可根据需要调整）
+        if len(content.strip()) < 10:
+            logger.debug(f"内容过短: {len(content.strip())} 字符")
+            return False
+        
+        # 3. 可以添加更多检查规则
+        # 例如：检查是否包含大量元数据关键词
+        metadata_keywords = ["metadata", "header", "footer", "page", "title", "作者", "日期"]
+        content_lower = content.lower()
+        if any(keyword in content_lower for keyword in metadata_keywords):
+            # 如果内容主要是元数据，可以跳过
+            logger.debug(f"内容可能包含元数据: {content[:50]}...")
+            return False
+        
+        return True
 
     def _format_vector_for_db(self, vector: List[float]) -> str:
         """将向量格式化为数据库存储格式（PostgreSQL vector类型）"""
@@ -345,22 +322,35 @@ class DocumentRepo:
         vector_str = "[" + ",".join(str(v) for v in vector) + "]"
         return vector_str
 
+    def _parse_vector_from_db(self, vector_data) -> List[float]:
+        """从数据库解析向量数据"""
+        if vector_data is None:
+            return []
+        
+        # 如果是字符串，解析它
+        if isinstance(vector_data, str):
+            # 移除方括号并分割
+            vector_str = vector_data.strip()
+            if vector_str.startswith('['):
+                vector_str = vector_str[1:]
+            if vector_str.endswith(']'):
+                vector_str = vector_str[:-1]
+            
+            # 转换为浮点数列表
+            return [float(x) for x in vector_str.split(',')]
+        
+        # 如果已经是列表，直接返回
+        elif isinstance(vector_data, list):
+            return vector_data
+        
+        # 其他情况返回空列表
+        return []
+
     # 为了向后兼容，保留原来的 save 和 get 方法，但修改其实现
-    def save(self, doc_id: str, url: str, text: str, source: Optional[str] = None):
-        """向后兼容的保存方法（仅保存元数据）"""
-        logger.warning("使用旧版save方法，建议使用save_document_metadata方法替代")
-        return self.save_document_metadata(doc_id, url, source)
+    def save(self, doc_id: str, chunks: List[Dict]):
+        """向后兼容的保存方法"""
+        return self.save_document_chunks(doc_id, chunks)
 
     def get(self, doc_id: str):
-        """向后兼容的获取方法（仅获取元数据）"""
-        logger.warning("使用旧版get方法，建议使用get_document_metadata方法替代")
-        metadata = self.get_document_metadata(doc_id)
-        if metadata:
-            # 为了保持接口兼容，返回类似旧格式的数据
-            return {
-                "id": metadata["document_id"],
-                "url": metadata.get("url", ""),
-                "source": metadata.get("source", None),
-                "text": ""  # 旧版本返回文本，新版不存储完整文本
-            }
-        return None
+        """向后兼容的获取方法（返回文档的所有分块）"""
+        return self.get_document_chunks(doc_id)
