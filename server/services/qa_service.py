@@ -1,4 +1,6 @@
 from server.agents.question_agent import QuestionAgent
+from server.agents.document_agent import DocumentAgent
+from server.agents.output_format_agent import OutputFormatAgent
 from server.rag.embedder import Embedder
 from server.rag.retriever import Retriever
 from server.rag.prompt_builder import build_prompt
@@ -26,6 +28,8 @@ class QAService:
         """
         logger.debug("初始化问答服务")
         self.agent = QuestionAgent()
+        self.document_agent = DocumentAgent()
+        self.output_format_agent = OutputFormatAgent()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
         self.emb_repo = EmbeddingRepo()
         self.retriever = Retriever(self.emb_repo)
@@ -49,6 +53,15 @@ class QAService:
         logger.debug("开始分析问题意图")
         decision: DecisionResult = self.agent.analyze(question)
         logger.debug(f"问题分析完成，结果: {decision}")
+
+        # 使用输出格式智能体分析输出格式
+        logger.debug("使用输出格式智能体分析输出格式")
+        format_analysis = self.output_format_agent.analyze(
+            intent=decision.intent,
+            content="",  # 在此阶段上下文内容为空，可扩展为使用检索到的内容
+            user_preference=None
+        )
+        logger.debug(f"输出格式分析完成，结果: {format_analysis}")
         
         # 生成问题的嵌入向量
         logger.debug("生成问题嵌入向量")
@@ -56,13 +69,8 @@ class QAService:
         logger.debug(f"问题嵌入向量生成完成，维度: {len(qvec)}")
         
         #TODO：封装一个类似的函数，以后可以直接调用打印预览
-        # 打印向量预览，仅显示前10个值以避免日志过多
-        preview_dims = 10
-        preview = qvec[:preview_dims]
-        logger.debug(f"问题向量预览 (前{len(preview)}维): {preview if len(preview) <= 10 else f'{preview[:10]}...'}")
-        
         # 打印向量预览，输出完整向量
-        # logger.debug(f"问题向量完整内容: {qvec}")
+        logger.debug(f"问题向量完整内容: {qvec}")
         
         # 检索相关文本块
         logger.debug(f"开始检索相关文本块，top_k: {decision.top_k}")
@@ -71,9 +79,12 @@ class QAService:
         
         # 构建完整提示词
         logger.debug("开始构建提示词")
-        prompt = build_prompt(question, decision.__dict__, top)
+        prompt = build_prompt(question, decision.__dict__, top, format_analysis)
         logger.debug(f"提示词构建完成，长度: {len(prompt)}")
+
+        # 输出完整的prompt内容
+        logger.debug(f"完整提示词内容:\n{prompt}")
         
-        result = {"prompt": prompt, "decision": decision.__dict__, "top_chunks": top}
+        result = {"prompt": prompt, "decision": decision.__dict__, "top_chunks": top, "format_analysis": format_analysis}
         logger.debug("问答处理完成")
         return result

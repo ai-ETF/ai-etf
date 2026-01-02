@@ -5,12 +5,15 @@ import logging
 import os
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
+from urllib.parse import urlparse
+import tempfile
 from server.rag.chunker import split_text
 from server.rag.embedder import Embedder
 from server.storage.document_repo import DocumentRepo
 from server.storage.embedding_repo import EmbeddingRepo
 from server.config.settings import SETTINGS
+from server.agents.document_agent import DocumentAgent  # 导入DocumentAgent
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -19,58 +22,44 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class DocumentProcessor(ABC):
-    """文档处理器的抽象基类，定义了处理流程的骨架"""
-    
-    def __init__(self, embedder: Embedder):
-        self.embedder = embedder
-        
-    def process(self, content: bytes, file_extension: str) -> Tuple[str, List[str], List[List[float]]]:
+class TextProcessor:
+    """
+    文本处理器
+    """
+    def extract_text(self, file_path: str) -> str:
         """
-        处理文档的主流程模板方法
-        返回: (提取的文本, 文本块列表, 向量列表)
+        从文本文件中提取文本
         """
-        logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-        logger.debug(f"开始使用 {self.__class__.__name__} 处理文档")
-        
-        # 1. 内容提取 (由子类实现)
-        text = self._extract_content(content, file_extension)
-        logger.debug(f"✅ 内容提取完成，字符数: {len(text)}")
-        
-        # 2. 文本分块
-        logger.debug("开始文本分块...")
-        chunks = split_text(text, chunk_size=800, overlap=120)
-        logger.debug(f"✅ 文本分块完成，共 {len(chunks)} 块")
-        
-        # 3. 向量化
-        logger.debug("开始生成文本向量...")
-        vectors = []
-        for i, chunk in enumerate(chunks):
-            vector = self.embedder.embed_text(chunk)
-            vectors.append(vector)
-        logger.debug(f"✅ 向量生成完成，共 {len(vectors)} 个向量")
-        
-        logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-        return text, chunks, vectors
-    
-    @abstractmethod
-    def _extract_content(self, content: bytes, file_extension: str) -> str:
-        """从原始内容中提取文本 (子类必须实现)"""
-        pass
-    
-    def _log_chunks_preview(self, chunks: List[str], limit: int = 5, preview_len: int = 200):
-        """记录文本块预览"""
-        logger.debug("📄 文本块预览 (前5个，限制200字符):")
-        for i, chunk in enumerate(chunks[:limit]):
-            preview = chunk[:preview_len] + ("..." if len(chunk) > preview_len else "")
-            logger.debug(f"  块 {i+1}/{len(chunks)}: {preview}")
-    
-    def _log_vectors_preview(self, vectors: List[List[float]], limit: int = 5, preview_dims: int = 200):
-        """记录向量预览"""
-        logger.debug("🧮 向量预览 (前5个，限制200维度):")
-        for i, vector in enumerate(vectors[:limit]):
-            preview = vector[:preview_dims]
-            logger.debug(f"  向量 {i+1}/{len(vectors)} 前{len(preview)}维: {preview[:10]}..." if len(preview) > 10 else f"  向量 {i+1}/{len(vectors)}: {preview}")
+        logger.debug(f"使用TextProcessor提取文本: {file_path}")
+        with open(file_path, 'r', encoding='utf-8') as file:
+            content = file.read()
+        logger.debug(f"TextProcessor提取完成，内容长度: {len(content)}")
+        return content
+
+class PDFProcessor:
+    """
+    PDF处理器
+    """
+    def extract_text(self, file_path: str) -> str:
+        """
+        从PDF文件中提取文本
+        """
+        logger.debug(f"使用PDFProcessor提取文本: {file_path}")
+        try:
+            import pypdf
+            with open(file_path, 'rb') as file:
+                pdf_reader = pypdf.PdfReader(file)
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+            logger.debug(f"PDFProcessor提取完成，内容长度: {len(text)}")
+            return text
+        except ImportError:
+            logger.error("pypdf未安装，无法解析PDF文件")
+            raise
+        except Exception as e:
+            logger.error(f"PDF处理失败: {str(e)}")
+            raise
 
 
 class PDFProcessor(DocumentProcessor):
@@ -141,6 +130,7 @@ class DocumentService:
         self.doc_repo = DocumentRepo()
         self.emb_repo = EmbeddingRepo()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
+        self.document_agent = DocumentAgent()  # 初始化DocumentAgent
         
         # 创建文档存储目录：如果有的话会直接跳过
         self.doc_dir = Path("docs")
@@ -164,17 +154,164 @@ class DocumentService:
         }
         logger.debug(f"📋 已注册处理器: {list(self.processors.keys())}")
 
-    def ingest_document(self, url: str, source: str = None) -> str:
+    def _chunk_by_paragraphs(self, text: str, max_length: int = 600) -> list:
         """
-        摄取文档的主入口
-        清晰的功能步骤:
-        1. 下载文档
-        2. 判断文档类型
-        3. 更改文档拓展名
-        4. 保存到本地
-        5. 根据类型调用对应处理器
-        6. 分块处理 + 向量处理
-        7. 存储结果
+        按段落分块
+        """
+        logger.debug(f"使用段落分块策略，最大长度: {max_length}")
+        
+        paragraphs = text.split('\n\n')
+        chunks = []
+        current_chunk = ""
+        
+        for i, para in enumerate(paragraphs):
+            # 如果单个段落就超过了最大长度，需要进一步分割
+            if len(para) > max_length:
+                sub_chunks = self._split_long_paragraph(para, max_length)
+                for sub_chunk in sub_chunks:
+                    if len(current_chunk) + len(sub_chunk) <= max_length:
+                        current_chunk += "\n\n" + sub_chunk if current_chunk else sub_chunk
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = sub_chunk
+            else:
+                # 检查添加当前段落后是否会超过最大长度
+                if len(current_chunk) + len(para) <= max_length:
+                    current_chunk += "\n\n" + para if current_chunk else para
+                else:
+                    # 如果当前块不为空，先保存它
+                    if current_chunk:
+                        chunks.append(current_chunk)
+                    # 尝试开始一个新块
+                    current_chunk = para
+        
+        # 添加最后一个块
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        logger.debug(f"段落分块完成，生成 {len(chunks)} 个文本块")
+        return chunks
+
+    def _chunk_by_sections(self, text: str, max_length: int = 800) -> list:
+        """
+        按章节分块
+        """
+        logger.debug(f"使用章节分块策略，最大长度: {max_length}")
+        
+        # 简单按标题分块（以"第"字开头或包含"一、二、"等的行）
+        import re
+        # 匹配标题模式
+        title_pattern = r'^(第[一二三四五六七八九十\d]+[章节])|([一二三四五六七八九十\d]、)'
+        
+        lines = text.split('\n')
+        chunks = []
+        current_chunk = ""
+        current_title = ""
+        
+        for line in lines:
+            if re.match(title_pattern, line.strip()):
+                # 遇到新标题，保存当前块
+                if current_chunk and current_title:
+                    chunks.append(current_title + "\n\n" + current_chunk)
+                current_title = line.strip()
+                current_chunk = ""
+            elif len(current_chunk) + len(line) <= max_length:
+                current_chunk += "\n" + line
+            else:
+                # 当前块已满，保存
+                if current_chunk:
+                    if current_title:
+                        chunks.append(current_title + "\n\n" + current_chunk)
+                    else:
+                        chunks.append(current_chunk)
+                current_chunk = line
+        
+        # 添加最后一个块
+        if current_chunk:
+            if current_title:
+                chunks.append(current_title + "\n\n" + current_chunk)
+            else:
+                chunks.append(current_chunk)
+        
+        logger.debug(f"章节分块完成，生成 {len(chunks)} 个文本块")
+        return chunks
+
+    def _split_long_paragraph(self, text: str, max_length: int) -> list:
+        """
+        分割过长的段落
+        """
+        logger.debug(f"分割长段落，最大长度: {max_length}")
+        
+        sentences = text.split('。')  # 以句号为界分割
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            sentence += '。'  # 加回句号
+            if len(current_chunk) + len(sentence) <= max_length:
+                current_chunk += sentence
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                if len(sentence) > max_length:
+                    # 如果单个句子就超过最大长度，按字符硬分割
+                    for i in range(0, len(sentence), max_length):
+                        chunks.append(sentence[i:i+max_length])
+                    current_chunk = ""
+                else:
+                    current_chunk = sentence
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        logger.debug(f"长段落分割完成，生成 {len(chunks)} 个子段落")
+        return chunks
+
+    def _chunk_text(self, text: str, doc_analysis: Optional[Dict] = None) -> list:
+        """
+        将文本分块
+        根据文档分析结果调整分块策略
+        """
+        logger.debug(f"开始文本分块，原始文本长度: {len(text)}")
+        
+        # 根据文档分析结果确定分块策略
+        if doc_analysis:
+            strategy = doc_analysis.get('suggested_chunk_strategy', 'general_document')
+            logger.debug(f"使用文档分析建议的分块策略: {strategy}")
+            
+            # 根据文档类型调整分块参数
+            if "财务报告" in strategy or "financial" in strategy.lower():
+                # 财务报告：按章节或表格分块
+                chunks = self._chunk_by_sections(text, max_length=800)
+            elif "etf" in strategy.lower() or "基金" in strategy or "fund" in strategy.lower():
+                # ETF报告：按基金要素分块
+                chunks = self._chunk_by_sections(text, max_length=600)
+            elif "新闻" in strategy or "news" in strategy.lower():
+                # 新闻文章：按段落分块
+                chunks = self._chunk_by_paragraphs(text, max_length=500)
+            else:
+                # 默认分块策略
+                chunks = self._chunk_by_paragraphs(text, max_length=600)
+        else:
+            # 默认分块策略
+            chunks = self._chunk_by_paragraphs(text, max_length=600)
+        
+        logger.debug(f"文本分块完成，共生成 {len(chunks)} 个块")
+        return chunks
+
+    def ingest_document(self, url: str, source: str = "web") -> Dict[str, any]:
+        """
+        处理文档的主方法
+        步骤:
+        1. 下载文档内容
+        2. 根据URL或内容确定文件扩展名
+        3. 获取对应的处理器
+        4. 从文档中提取文本
+        5. 使用DocumentAgent分析文档
+        6. 根据分析结果智能分块
+        7. 将文本块向量化并存储
+        8. 清理临时文件
         """
         logger.info("=" * 60)
         logger.info(f"📥 开始处理文档: {url}")
@@ -190,26 +327,48 @@ class DocumentService:
         processor = self._get_processor(file_extension)
         logger.debug(f"  判断结果: 扩展名={file_extension}, 处理器={processor.__class__.__name__}")
         
-        # === 步骤3&4: 更改拓展名并保存到本地 ===
-        logger.debug("3️⃣&4️⃣ 保存到本地...")
-        local_path = self._save_to_local(content, file_extension)
-        logger.debug(f"  已保存到: {local_path}")
+        # === 步骤3: 保存到临时文件 ===
+        logger.debug("3️⃣ 保存到临时文件...")
+        temp_file_path = self._save_to_temp_file(content, file_extension)
+        logger.debug(f"  临时文件路径: {temp_file_path}")
         
-        # === 步骤5: 根据类型调用对应处理器 ===
-        logger.debug("5️⃣ 调用处理器处理文档内容...")
-        text, chunks, vectors = processor.process(content, file_extension)
+        try:
+            # === 步骤4: 从文档中提取文本 ===
+            logger.debug("4️⃣ 从文档中提取文本...")
+            text = processor.extract_text(temp_file_path)
+            logger.debug(f"  提取完成，文本长度: {len(text)} 字符")
+            
+            # === 步骤5: 使用DocumentAgent分析文档 ===
+            logger.debug("5️⃣ 使用DocumentAgent分析文档...")
+            doc_analysis = self.document_agent.analyze(text)
+            logger.debug(f"  文档分析完成，类型: {doc_analysis['document_type']}, 置信度: {doc_analysis['confidence']:.2f}")
+            
+            # === 步骤6: 根据分析结果进行智能分块 ===
+            logger.debug("6️⃣ 根据分析结果进行智能分块...")
+            chunks = self._chunk_text(text, doc_analysis)
+            logger.debug(f"  分块完成，共 {len(chunks)} 个文本块")
+            
+            # === 步骤7: 将文本块向量化并存储 ===
+            logger.debug("7️⃣ 将文本块向量化并存储...")
+            vectors = []
+            for i, chunk in enumerate(chunks):
+                vector = self.embedder.embed_text(chunk)
+                vectors.append(vector)
+            
+            # 存储结果
+            doc_id = self._store_results(chunks, vectors)
+            logger.debug(f"  向量化和存储完成，文档ID: {doc_id}")
+            
+        finally:
+            # === 步骤8: 清理临时文件 ===
+            logger.debug("8️⃣ 清理临时文件...")
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+                logger.debug(f"  临时文件已删除: {temp_file_path}")
         
-        # === 步骤6: 分块处理 + 向量处理 ===
-        logger.debug("6️⃣ 输出处理结果预览...")
-        processor._log_chunks_preview(chunks)
-        processor._log_vectors_preview(vectors)
-        
-        # === 步骤7: 存储结果 ===
-        logger.debug("7️⃣ 存储处理结果...")
-        doc_id = self._store_results(chunks, vectors)
-        
-        # 清理临时文件
-        self._cleanup_temp_file(local_path)
+        logger.info(f"✅ 文档处理完成! ID: {doc_id}")
+        logger.info("=" * 60)
+        return {"status": "success", "doc_id": doc_id, "chunks_count": len(chunks)}
         
         logger.info(f"✅ 文档处理完成! ID: {doc_id}")
         logger.info("=" * 60)
@@ -225,88 +384,3 @@ class DocumentService:
         except Exception as e:
             logger.error(f"❌ 文档下载失败: {e}")
             raise
-    
-    def _determine_file_extension(self, url: str, content_type: str, content: bytes) -> str:
-        """综合判断文档类型"""
-        # 方法1: 从URL路径获取扩展名
-        url_ext = Path(url).suffix.lower()
-        if url_ext and len(url_ext) <= 10:  # 合理的扩展名长度
-            logger.debug(f"  从URL获取扩展名: {url_ext}")
-            return url_ext
-        
-        # 方法2: 从Content-Type推断
-        content_type_map = {
-            'application/pdf': '.pdf',
-            'text/plain': '.txt',
-            'text/html': '.html',
-            'application/json': '.json',
-            'application/xml': '.xml',
-            'text/xml': '.xml',
-            'text/csv': '.csv',
-            'text/markdown': '.md',
-        }
-        if content_type in content_type_map:
-            ext = content_type_map[content_type]
-            logger.debug(f"  从Content-Type推断扩展名: {ext}")
-            return ext
-        
-        # 方法3: 通过文件魔数判断 (最可靠)
-        file_signatures = {
-            b'%PDF': '.pdf',
-            b'\x50\x4B\x03\x04': '.docx',  # ZIP格式，可能是docx
-            b'\x25\x50\x44\x46': '.pdf',   # 另一种PDF签名
-        }
-        
-        for signature, ext in file_signatures.items():
-            if content[:4].startswith(signature):
-                logger.debug(f"  通过文件签名判断扩展名: {ext}")
-                return ext
-        
-        # 默认值
-        logger.warning(f"⚠️  无法确定文档类型，使用默认扩展名 .dat")
-        return '.dat'
-    
-    def _get_processor(self, file_extension: str) -> DocumentProcessor:
-        """根据扩展名获取处理器"""
-        processor = self.processors.get(file_extension.lower())
-        if not processor:
-            logger.warning(f"⚠️  没有找到 {file_extension} 的处理器，使用文本处理器作为后备")
-            return TextProcessor(self.embedder)
-        return processor
-    
-    def _save_to_local(self, content: bytes, file_extension: str) -> Path:
-        """保存文档到本地"""
-        filename = f"temp_doc_{uuid.uuid4()}{file_extension}"
-        filepath = self.doc_dir / filename
-        
-        with open(filepath, 'wb') as f:
-            f.write(content)
-        
-        return filepath
-    
-    def _store_results(self, chunks: List[str], vectors: List[List[float]]) -> str:
-        """存储处理结果到数据库，仅存储向量块"""
-        doc_id = str(uuid.uuid4())
-        
-        # 准备嵌入向量数据
-        items = []
-        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            items.append({
-                "chunk_id": f"{doc_id}.{i}",
-                "text": chunk,
-                "vector": vector
-            })
-        
-        # 批量插入嵌入向量
-        self.emb_repo.insert_many(doc_id, items)
-        
-        return doc_id
-    
-    def _cleanup_temp_file(self, filepath: Path):
-        """清理临时文件"""
-        # try:
-        #     if filepath.exists():
-        #         os.unlink(filepath)
-        #         logger.debug(f"🗑️  已清理临时文件: {filepath}")
-        # except Exception as e:
-        #     logger.warning(f"⚠️  清理临时文件失败: {e}")
