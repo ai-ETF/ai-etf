@@ -57,12 +57,12 @@ class QAService:
         
         #TODO：封装一个类似的函数，以后可以直接调用打印预览
         # 打印向量预览，仅显示前10个值以避免日志过多
-        # preview_dims = 10
-        # preview = qvec[:preview_dims]
-        # logger.debug(f"问题向量预览 (前{len(preview)}维): {preview if len(preview) <= 10 else f'{preview[:10]}...'}")
+        preview_dims = 10
+        preview = qvec[:preview_dims]
+        logger.debug(f"问题向量预览 (前{len(preview)}维): {preview if len(preview) <= 10 else f'{preview[:10]}...'}")
         
         # 打印向量预览，输出完整向量
-        logger.debug(f"问题向量完整内容: {qvec}")
+        # logger.debug(f"问题向量完整内容: {qvec}")
         
         # 检索相关文本块
         logger.debug(f"开始检索相关文本块，top_k: {decision.top_k}")
