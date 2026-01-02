@@ -84,14 +84,21 @@ class DocumentService:
 
         items = []
         for i, c in enumerate(chunks):
-            logger.debug(f"正在处理第 {i+1} 个文本块，长度: {len(c)}")
-            # 为每个文本块生成嵌入向量
-            vector = self.embedder.embed_text(c)
-            logger.debug(f"文本块嵌入向量生成完成，向量维度: {len(vector)}")
+            # 只打印前10个文本块的处理信息
+            if i < 10:
+                logger.debug(f"正在处理第 {i+1} 个文本块，长度: {len(c)}")
+                # 为每个文本块生成嵌入向量
+                vector = self.embedder.embed_text(c)
+                logger.debug(f"文本块嵌入向量生成完成，向量维度: {len(vector)}")
+            elif i == 10:
+                logger.debug("... 更多文本块正在处理中，为保持日志清晰，省略后续详细日志 ...")
+            
             items.append({"chunk_id": f"{doc_id}.{i}", "text": c, "vector": vector})
 
         # 持久化存储嵌入向量
         logger.debug(f"开始存储 {len(items)} 个嵌入向量")
+        
+        # 在存储嵌入向量时添加更清晰的日志
         self.emb_repo.insert_many(doc_id, items)
         logger.debug("嵌入向量存储完成")
 
