@@ -36,7 +36,9 @@ def build_prompt(question: str, decision: Dict, chunks: List[Dict]) -> str:
     # 添加上下文文本块
     for i, c in enumerate(chunks):
         score = c.get('score')
-        score_str = f"{score:.4f}" if score is not None else "N/A"
+        # score_str = f"{score:.4f}" if score is not None else "N/A"
+        # 使用安全的格式化方式处理可能为None的分数
+        score_str = f"{score:.4f}" if score is not None and isinstance(score, (int, float)) else "N/A"
         logger.debug(f"添加文本块 {i+1}，得分: {score_str}")
         lines.append(f"--- Chunk {i+1} (score={score_str}) ---\n")
         lines.append(c.get("text") + "\n\n")

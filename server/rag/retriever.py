@@ -70,8 +70,23 @@ class Retriever:
         self.embedding_repo = embedding_repo
 
     def retrieve(self, query_vector, top_k=5, doc_id=None):
-        return self.embedding_repo.match_by_vector(
+        # 调用数据库的match_chunks函数
+        results = self.embedding_repo.match_by_vector(
             query_vector=query_vector,
             top_k=top_k,
             doc_id=doc_id
         )
+        
+        # 将数据库返回的字段映射到应用所需的字段
+        mapped_results = []
+        for result in results:
+            mapped_result = {
+                "chunk_id": result.get("chunk_id"),
+                "text": result.get("content"),  # 数据库返回的是content字段
+                "score": result.get("similarity"),  # 数据库返回的是similarity字段，映射为score
+                "page_number": result.get("page_number"),
+                "chunk_index": result.get("chunk_index")
+            }
+            mapped_results.append(mapped_result)
+        
+        return mapped_results
