@@ -142,9 +142,9 @@ class DocumentService:
         self.emb_repo = EmbeddingRepo()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
         
-        # 创建文档存储目录
-        # self.doc_dir = Path("docs")
-        # self.doc_dir.mkdir(exist_ok=True)
+        # 创建文档存储目录：如果有的话会直接跳过
+        self.doc_dir = Path("docs")
+        self.doc_dir.mkdir(exist_ok=True)
         
         # 初始化处理器映射
         self._init_processors()
