@@ -178,13 +178,21 @@ class DocumentService:
         """
         判断是否为文本类型文件
         """
+        # 优先检查内容类型
+        if content_type:
+            # 如果是纯文本类型，返回True
+            if "text" in content_type:
+                return True
+            # 如果是application/json，也视为文本类型
+            if content_type in ['application/json', 'application/xml', 'text/xml']:
+                return True
+            # 如果是application/pdf，明确不是文本类型
+            if content_type == 'application/pdf':
+                return False
+        
         # 检查文件扩展名
         text_extensions = ['.txt', '.md', '.html', '.htm', '.py', '.js', '.ts', '.json', '.xml', '.csv']
         if file_extension.lower() in text_extensions:
-            return True
-            
-        # 检查内容类型
-        if "text" in content_type:
             return True
             
         return False
