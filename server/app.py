@@ -4,6 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware  # 导入CORS中间件，用�
 import logging
 from contextlib import asynccontextmanager
 
+# 设置根日志记录器的级别
+logging.basicConfig(level=logging.DEBUG)
+
 # 尝试加载 .env 文件
 try:
     from dotenv import load_dotenv
@@ -23,8 +26,8 @@ from server.api import ask, upload, test
 from server.storage.supabase_client import get_supabase
 
 # 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 @asynccontextmanager
