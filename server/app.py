@@ -73,10 +73,10 @@ app.include_router(ask.router, prefix="/api")
 app.include_router(test.router, prefix="/test")
 
 
-@app.get("/hello")
-def hello():
-    """
-    简单的测试端点，用于验证服务器是否正常运行
-    返回: {"message": "Hello World"}
-    """
-    return {"message": "Hello World"}
+# @app.get("/hello")
+# def hello():
+#     """
+#     简单的测试端点，用于验证服务器是否正常运行
+#     返回: {"message": "Hello World"}
+#     """
+#     return {"message": "Hello World"}

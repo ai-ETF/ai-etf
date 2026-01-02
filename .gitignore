@@ -144,4 +144,7 @@ Thumbs.db
 # Poetry
 .poetry/
 .venv/
+
+# Local models
 local_models/
+./local_models/

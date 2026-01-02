@@ -1,6 +1,9 @@
 import uuid
 import requests
 import logging
+import tempfile
+import os
+from pathlib import Path
 from server.rag.chunker import split_text
 from server.rag.embedder import Embedder
 from server.storage.document_repo import DocumentRepo
@@ -57,18 +60,36 @@ class DocumentService:
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-        text = None
+        # 获取原始内容
+        content = res.content
         ct = res.headers.get("content-type", "")
         logger.debug(f"文档内容类型: {ct}")
         
+        # 根据文件扩展名或内容类型判断文件类型
+        file_extension = self._get_file_extension(url, ct)
+        logger.debug(f"检测到文件扩展名: {file_extension}")
+        
+        # 所有文档都先保存到临时文件
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension, prefix="etf_doc_") as temp_file:
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+            logger.debug(f"文档已临时保存到: {temp_file_path}")
+
+        text = None
         # 根据内容类型决定如何处理文档
-        if "text" in ct or url.endswith(".txt") or url.endswith(".md") or url.endswith(".html"):
+        if self._is_text_type(file_extension, ct):
+            # 对于文本类型文件，直接使用文本内容
             text = res.text
             logger.debug(f"检测到文本内容，长度: {len(text)} 字符")
         else:
-            # 对于非文本内容，存储占位符
-            text = f"[binary document downloaded from {url}; size={len(res.content)} bytes]"
-            logger.debug(f"检测到非文本内容，使用占位符")
+            # 对于非文本文件（如PDF），从临时文件中提取文本
+            # 尝试从文件中提取文本内容
+            text = self._extract_text_from_file(temp_file_path, file_extension)
+            if not text:
+                logger.warning(f"无法从二进制文件中提取文本内容，使用占位符")
+                text = f"[binary document downloaded from {url}; size={len(content)} bytes; saved at: {temp_file_path}]"
+            else:
+                logger.debug(f"从二进制文件中成功提取文本内容，长度: {len(text)} 字符")
 
         doc_id = str(uuid.uuid4())
         logger.debug(f"生成文档ID: {doc_id}")
@@ -136,4 +157,84 @@ class DocumentService:
         logger.debug("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
 
         logger.debug(f"文档处理完成，返回文档ID: {doc_id}")
+        
+        # 清理临时文件
+        try:
+            os.unlink(temp_file_path)
+            logger.debug(f"临时文件已清理: {temp_file_path}")
+        except OSError as e:
+            logger.error(f"删除临时文件失败 {temp_file_path}: {e}")
+        
         return doc_id
+
+    def _is_text_type(self, file_extension: str, content_type: str) -> bool:
+        """
+        判断是否为文本类型文件
+        """
+        # 检查文件扩展名
+        text_extensions = ['.txt', '.md', '.html', '.htm', '.py', '.js', '.ts', '.json', '.xml', '.csv']
+        if file_extension.lower() in text_extensions:
+            return True
+            
+        # 检查内容类型
+        if "text" in content_type:
+            return True
+            
+        return False
+
+    def _get_file_extension(self, url: str, content_type: str) -> str:
+        """
+        根据URL或内容类型获取文件扩展名
+        """
+        # 首先尝试从URL获取扩展名
+        path = Path(url).suffix.lower()
+        if path:
+            return path
+            
+        # 如果URL没有扩展名，尝试从content-type推断
+        content_type_map = {
+            'application/pdf': '.pdf',
+            'application/msword': '.doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+            'application/vnd.ms-excel': '.xls',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+            'text/csv': '.csv',
+            'text/plain': '.txt',
+            'text/html': '.html',
+            'application/json': '.json',
+            'application/xml': '.xml',
+            'text/xml': '.xml',
+        }
+        
+        return content_type_map.get(content_type, '.dat')  # 默认扩展名
+
+    def _extract_text_from_file(self, file_path: str, file_extension: str) -> str:
+        """
+        从文件中提取文本内容
+        """
+        logger.debug(f"尝试从文件中提取文本内容: {file_path}, 扩展名: {file_extension}")
+        
+        # 如果是PDF文件，使用pypdf提取文本
+        if file_extension.lower() == '.pdf':
+            try:
+                import pypdf
+                text = ""
+                with open(file_path, 'rb') as file:
+                    pdf_reader = pypdf.PdfReader(file)
+                    for page in pdf_reader.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n"
+                logger.debug(f"PDF文件文本提取完成，提取字符数: {len(text)}")
+                return text
+            except ImportError:
+                logger.error("pypdf库未安装，无法处理PDF文件")
+                return ""
+            except Exception as e:
+                logger.error(f"PDF文件处理失败: {e}")
+                return ""
+        
+        # 如果是其他二进制文件，暂时返回空字符串
+        # 可以在这里添加对其他文件类型的处理
+        logger.debug(f"不支持的文件类型，无法提取文本: {file_extension}")
+        return ""
