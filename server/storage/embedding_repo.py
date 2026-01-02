@@ -110,3 +110,17 @@ class EmbeddingRepo:
             error_msg = f"Supabase查询失败: {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+    def match_by_vector(self, query_vector, top_k, doc_id=None):
+        return (
+            self.supabase
+            .rpc(
+                "match_chunks",
+                {
+                    "query_embedding": query_vector,
+                    "match_count": top_k,
+                    "doc_id": doc_id
+                }
+            )
+            .execute()
+            .data
+        )

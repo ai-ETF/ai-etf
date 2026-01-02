@@ -38,7 +38,7 @@ class DocumentRepo:
                 "page_number": 0  # 元数据页码为0
             }
             
-            logger.debug(f"准备插入的文档元数据: {metadata_entry}")
+            # logger.debug(f"准备插入的文档元数据: {metadata_entry}")
             
             # 插入文档元数据
             response = self.supabase.table("document_chunks").insert(metadata_entry).execute()

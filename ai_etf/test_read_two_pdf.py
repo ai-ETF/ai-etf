@@ -79,7 +79,7 @@ class MultiPDFProcessor:
                 return ""
         return text
     
-    def split_pdf_into_chunks(self, pdf_file: str, chunk_size_threshold: int = 300) -> List[str]:
+    def split_pdf_into_chunks(self, pdf_file: str, chunk_size_threshold: int = 800) -> List[str]:
         """PDF分块（与之前相同）
             pdf_file: PDF文件路径
             chunk_size_threshold: 块大小阈值，默认300字符
