@@ -35,8 +35,10 @@ def build_prompt(question: str, decision: Dict, chunks: List[Dict]) -> str:
     logger.debug("添加上下文文本块")
     # 添加上下文文本块
     for i, c in enumerate(chunks):
-        logger.debug(f"添加文本块 {i+1}，得分: {c.get('score'):.4f}")
-        lines.append(f"--- Chunk {i+1} (score={c.get('score'):.4f}) ---\n")
+        score = c.get('score')
+        score_str = f"{score:.4f}" if score is not None else "N/A"
+        logger.debug(f"添加文本块 {i+1}，得分: {score_str}")
+        lines.append(f"--- Chunk {i+1} (score={score_str}) ---\n")
         lines.append(c.get("text") + "\n\n")
     
     logger.debug("添加问题部分")

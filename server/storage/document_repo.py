@@ -28,14 +28,16 @@ class DocumentRepo:
         # 将文档元数据作为document_chunks表中的一个特殊条目保存
         logger.debug("使用Supabase保存文档元数据到document_chunks表")
         try:
-            # 创建一个文档元数据条目，不包含embedding字段，使其在数据库中为空
+            # 创建一个文档元数据条目
             metadata_entry = {
                 "document_id": doc_id,
                 "document_name": f"doc_{doc_id}",
                 "document_type": "etf_document_metadata",  # 标识这是文档元数据
                 "chunk_index": -1,  # 特殊索引表示元数据
-                "content": f"URL: {url}\nSource: {source or 'N/A'}\n\n{text[:4000] if text else ''}",  # 将URL和source信息存储在content中
-                "page_number": 0  # 元数据页码为0
+                "content": text[:4000] if text else "",  # 仅存储实际文档内容
+                "page_number": 0,  # 元数据页码为0
+                "url": url,  # 添加URL字段
+                "source": source  # 添加来源字段
             }
             
             # logger.debug(f"准备插入的文档元数据: {metadata_entry}")
@@ -58,25 +60,11 @@ class DocumentRepo:
             response = self.supabase.table("document_chunks").select("*").eq("document_id", doc_id).eq("chunk_index", -1).execute()
             if response.data:
                 row = response.data[0]
-                # 从content中提取URL和原始文本
-                content = row["content"]
-                url = ""
-                source = None
-                text = content
-                
-                if content.startswith("URL: "):
-                    lines = content.split("\n")
-                    if len(lines) >= 2:
-                        url = lines[0].replace("URL: ", "")
-                        if lines[1].startswith("Source: "):
-                            source = lines[1].replace("Source: ", "")
-                            text = "\n".join(lines[2:]) if len(lines) > 2 else ""
-                
                 result = {
                     "id": row["document_id"], 
-                    "url": url, 
-                    "source": source, 
-                    "text": text
+                    "url": row.get("url", ""), 
+                    "source": row.get("source", None), 
+                    "text": row["content"]
                 }
                 logger.debug(f"文档 {doc_id} 元数据获取完成")
                 return result
