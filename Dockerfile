@@ -14,7 +14,7 @@ ENV POETRY_NO_INTERACTION=1 \
     POETRY_VIRTUALENVS_CREATE=false \
     POETRY_CACHE_DIR='/var/cache/pypoetry' \
     POETRY_HOME='/usr/local' \
-    POETRY_VERSION=1.8.3
+    POETRY_VERSION=2.2.1
 
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN curl -sSL https://install.python-poetry.org | python3 -
@@ -25,14 +25,15 @@ WORKDIR /app
 # 安装系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libsqlite3-dev\
     && rm -rf /var/lib/apt/lists/*
 
 # 复制pyproject.toml和poetry.lock（如果存在）
 COPY pyproject.toml poetry.lock ./
 
 # 安装依赖（仅生产环境依赖）
-RUN poetry install --no-ansi --only=main
+# RUN poetry install --no-ansi --only=main --no-root = 不安装当前项目本身，只装依赖
+RUN poetry install --no-ansi --only=main --no-root
+
 
 # 复制项目文件
 COPY . .

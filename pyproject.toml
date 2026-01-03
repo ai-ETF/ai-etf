@@ -9,8 +9,6 @@ python = "^3.10"
 pypdf = "^4.0.0"
 pdfplumber = "^0.7.1"
 scikit-learn = "^1.3.0"
-pysqlite3 = "^0.5.2"
-pysqlite3-binary = "^0.5.2"  # 代码中同时导入了 pysqlite3 和 pysqlite3-binary
 python-dotenv = "^1.0.0"
 
 # === 新增以下关键AI依赖 ===
