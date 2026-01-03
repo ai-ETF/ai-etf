@@ -70,7 +70,7 @@ class QAService:
         
         #TODO：封装一个类似的函数，以后可以直接调用打印预览
         # 打印向量预览，输出完整向量
-        logger.debug(f"问题向量完整内容: {qvec}")
+        # logger.debug(f"问题向量完整内容: {qvec}")
         
         # 检索相关文本块
         logger.debug(f"开始检索相关文本块，top_k: {decision.top_k}")
