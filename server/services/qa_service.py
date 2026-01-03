@@ -83,8 +83,8 @@ class QAService:
         logger.debug(f"提示词构建完成，长度: {len(prompt)}")
 
         # 输出完整的prompt内容（限制为前1000个字符）
-        logger.debug(f"完整提示词内容:\n{prompt[:1000]}{'...' if len(prompt) > 1000 else ''}")
-        logger.debug(f"完整提示词内容:\n{prompt[:]}{'...' if len(prompt) > 1000 else ''}")
+        # logger.debug(f"完整提示词内容:\n{prompt[:1000]}{'...' if len(prompt) > 1000 else ''}")
+        # logger.debug(f"完整提示词内容:\n{prompt[:]}{'...' if len(prompt) > 1000 else ''}")
         logger.debug(f"完整提示词内容:\n{format_prompt_for_log(prompt)}")
 
         result = {"prompt": prompt, "decision": decision.__dict__, "top_chunks": top, "format_analysis": format_analysis}
