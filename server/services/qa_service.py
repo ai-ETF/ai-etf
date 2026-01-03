@@ -82,8 +82,8 @@ class QAService:
         prompt = build_prompt(question, decision.__dict__, top, format_analysis)
         logger.debug(f"提示词构建完成，长度: {len(prompt)}")
 
-        # 输出完整的prompt内容
-        logger.debug(f"完整提示词内容:\n{prompt}")
+        # 输出完整的prompt内容（限制为前100个字符）
+        logger.debug(f"完整提示词内容:\n{prompt[:100]}{'...' if len(prompt) > 100 else ''}")
         
         result = {"prompt": prompt, "decision": decision.__dict__, "top_chunks": top, "format_analysis": format_analysis}
         logger.debug("问答处理完成")
