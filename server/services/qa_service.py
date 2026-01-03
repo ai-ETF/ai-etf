@@ -70,7 +70,7 @@ class QAService:
         
         #TODO：封装一个类似的函数，以后可以直接调用打印预览
         # 打印向量预览，输出完整向量
-        logger.debug(f"问题向量完整内容: {qvec}")
+        # logger.debug(f"问题向量完整内容: {qvec}")
         
         # 检索相关文本块
         logger.debug(f"开始检索相关文本块，top_k: {decision.top_k}")
@@ -83,7 +83,7 @@ class QAService:
         logger.debug(f"提示词构建完成，长度: {len(prompt)}")
 
         # 输出完整的prompt内容（限制为前100个字符）
-        logger.debug(f"完整提示词内容:\n{prompt[:100]}{'...' if len(prompt) > 100 else ''}")
+        logger.debug(f"完整提示词内容:\n{prompt[:100]}{'...' if len(prompt) > 1000 else ''}")
         
         result = {"prompt": prompt, "decision": decision.__dict__, "top_chunks": top, "format_analysis": format_analysis}
         logger.debug("问答处理完成")
