@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  ai-etf-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-etf-app
+    ports:
+      - "8000:8000"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - ETFSERVER_EMBED_DIM=${ETFSERVER_EMBED_DIM:-768}
+      - PYTHONPATH=/app
+    volumes:
+      - ./local_models:/app/local_models
+      - ./docs:/app/docs
+    command: poetry run uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+    depends_on:
+      - supabase
+
+  supabase:
+    image: supabase/postgres:14.1.0
+    container_name: ai-etf-supabase
+    environment:
+      - POSTGRES_DB=ai_etf
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - supabase_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  supabase_data:
