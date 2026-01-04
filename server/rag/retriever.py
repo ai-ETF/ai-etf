@@ -41,29 +41,6 @@ def _norm(a):
     return result
 
 
-def cosine(a, b):
-    """
-    计算两个向量的余弦相似度
-    
-    参数:
-        a, b: 两个向量
-        
-    返回:
-        余弦相似度值，范围在-1到1之间
-    """
-    logger.debug(f"计算余弦相似度，向量a长度: {len(a)}, 向量b长度: {len(b)}")
-    na = _norm(a)
-    nb = _norm(b)
-    logger.debug(f"向量a模长: {na}, 向量b模长: {nb}")
-    
-    if na == 0 or nb == 0:
-        logger.debug("其中一个向量为零向量，余弦相似度为0")
-        return 0.0
-    
-    result = _dot(a, b) / (na * nb)
-    logger.debug(f"余弦相似度计算完成，结果: {result}")
-    return result
-
 
 class Retriever:
     def __init__(self, embedding_repo):
