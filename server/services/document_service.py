@@ -11,6 +11,7 @@ from server.rag.embedder import Embedder
 from server.storage.document_repo import DocumentRepo
 from server.storage.embedding_repo import EmbeddingRepo
 from server.config.settings import SETTINGS
+from server.agents.document_agent import DocumentAgent
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -25,7 +26,7 @@ class DocumentProcessor(ABC):
     def __init__(self, embedder: Embedder):
         self.embedder = embedder
         
-    def process(self, content: bytes, file_extension: str) -> Tuple[str, List[str], List[List[float]]]:
+    def process(self, content: bytes, file_extension: str, doc_type: str = "general_document") -> Tuple[str, List[str], List[List[float]]]:
         """
         处理文档的主流程模板方法
         返回: (提取的文本, 文本块列表, 向量列表)
@@ -39,7 +40,16 @@ class DocumentProcessor(ABC):
         
         # 2. 文本分块
         logger.debug("开始文本分块...")
-        chunks = split_text(text, chunk_size=800, overlap=120)
+        # 根据文档类型调整分块策略
+        if doc_type == "financial_report":
+            chunks = split_text(text, chunk_size=1000, overlap=200)  # 财务报告使用更大的块大小
+        elif doc_type == "etf_report":
+            chunks = split_text(text, chunk_size=900, overlap=150)  # ETF报告使用适中的块大小
+        elif doc_type == "regulatory_document":
+            chunks = split_text(text, chunk_size=700, overlap=150)  # 法规文档使用较小的块大小以保持条款完整性
+        else:
+            chunks = split_text(text, chunk_size=800, overlap=120)  # 默认分块策略
+        
         logger.debug(f"✅ 文本分块完成，共 {len(chunks)} 块")
         
         # 3. 向量化
@@ -141,6 +151,7 @@ class DocumentService:
         self.doc_repo = DocumentRepo()
         self.emb_repo = EmbeddingRepo()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
+        self.document_agent = DocumentAgent()  # 添加DocumentAgent实例
         
         # 创建文档存储目录：如果有的话会直接跳过
         self.doc_dir = Path("docs")
@@ -195,18 +206,25 @@ class DocumentService:
         local_path = self._save_to_local(content, file_extension)
         logger.debug(f"  已保存到: {local_path}")
         
-        # === 步骤5: 根据类型调用对应处理器 ===
-        logger.debug("5️⃣ 调用处理器处理文档内容...")
-        text, chunks, vectors = processor.process(content, file_extension)
+        # === 步骤5: 使用DocumentAgent分析文档类型和结构 ===
+        logger.debug("5️⃣ 使用DocumentAgent分析文档...")
+        text_content = self._decode_content(content)  # 先解码内容以供分析
+        analysis_result = self.document_agent.analyze(text_content)
+        doc_type = analysis_result["document_type"]
+        logger.debug(f"  文档类型分析结果: {doc_type}，置信度: {analysis_result['confidence']:.2f}")
         
-        # === 步骤6: 分块处理 + 向量处理 ===
-        logger.debug("6️⃣ 输出处理结果预览...")
+        # === 步骤6: 根据文档类型调用对应处理器处理文档内容 ===
+        logger.debug("6️⃣ 调用处理器处理文档内容...")
+        text, chunks, vectors = processor.process(content, file_extension, doc_type)
+        
+        # === 步骤7: 分块处理 + 向量处理 ===
+        logger.debug("7️⃣ 输出处理结果预览...")
         processor._log_chunks_preview(chunks)
         processor._log_vectors_preview(vectors)
         
-        # === 步骤7: 存储结果 ===
-        logger.debug("7️⃣ 存储处理结果...")
-        doc_id = self._store_results(chunks, vectors)
+        # === 步骤8: 存储结果到Supabase的document_chunks表 ===
+        logger.debug("8️⃣ 存储处理结果...")
+        doc_id = self._store_results(chunks, vectors, doc_type, analysis_result)
         
         # 清理临时文件
         self._cleanup_temp_file(local_path)
@@ -215,6 +233,13 @@ class DocumentService:
         logger.info("=" * 60)
         return doc_id
     
+    def _decode_content(self, content: bytes) -> str:
+        """解码字节内容为字符串，用于DocumentAgent分析"""
+        try:
+            return content.decode('utf-8')
+        except UnicodeDecodeError:
+            return content.decode('gbk', errors='ignore')
+
     def _download_document(self, url: str) -> Tuple[bytes, str]:
         """下载文档并返回内容和类型"""
         try:
@@ -284,7 +309,7 @@ class DocumentService:
         
         return filepath
     
-    def _store_results(self, chunks: List[str], vectors: List[List[float]]) -> str:
+    def _store_results(self, chunks: List[str], vectors: List[List[float]], doc_type: str, analysis_result: dict) -> str:
         """存储处理结果到数据库，仅存储向量块"""
         doc_id = str(uuid.uuid4())
         
@@ -294,7 +319,10 @@ class DocumentService:
             items.append({
                 "chunk_id": f"{doc_id}.{i}",
                 "text": chunk,
-                "vector": vector
+                "vector": vector,
+                "document_type": doc_type,
+                "document_name": f"doc_{doc_id}",
+                "chunk_index": i
             })
         
         # 批量插入嵌入向量
