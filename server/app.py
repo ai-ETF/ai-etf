@@ -1,11 +1,11 @@
 import os
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware  # 导入CORS中间件，用于处理跨域请求
+from fastapi.middleware.cors import CORSMiddleware
 import logging
 from contextlib import asynccontextmanager
 
 # 设置根日志记录器的级别
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 # 设置第三方库的日志级别，避免过多的调试信息
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -17,10 +17,6 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 # 尝试加载 .env 文件
 try:
     from dotenv import load_dotenv
-    # 使用相对路径，基于当前工作目录
-    # __file__ 是当前文件(server/app.py)的路径
-    # os.path.dirname(__file__) 得到 server 目录
-    # os.path.dirname(os.path.dirname(__file__)) 得到项目根目录
     dotenv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
     load_dotenv(dotenv_path=dotenv_path)
     logging.info("环境变量从 .env 文件加载成功")
@@ -29,12 +25,15 @@ except ImportError:
 except Exception as e:
     logging.error(f"从 .env 文件加载环境变量失败: {e}")
 
-from server.api import ask, upload, test
+# 显式导入并使用别名
+from server.api.ask import router as ask_router
+from server.api.upload import router as upload_router
+from server.api.test import router as test_router
 from server.storage.supabase_client import get_supabase
 
 # 配置日志
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 @asynccontextmanager
@@ -47,36 +46,34 @@ async def lifespan(app: FastAPI):
         logger.error(error_msg)
         raise RuntimeError(error_msg)
     logger.info("Supabase连接验证成功")
-    
-    yield  # 在这里应用运行
-    
-    # 关闭时的清理工作可以放在这里
+
+    yield  # 应用在此处运行
+
     logger.info("应用关闭")
 
 
-# 创建FastAPI应用实例，设置标题
-app = FastAPI(title="ETF RAG Server", lifespan=lifespan)
+# 创建FastAPI应用实例
+app = FastAPI(title="AI-ETF Server", lifespan=lifespan, debug=True)
 
-# 添加CORS中间件，允许跨域请求（在生产环境中应限制为具体域名）
+# 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生产环境中应替换为具体域名列表
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 注册API路由，前缀为/api
-app.include_router(upload.router, prefix="/api")
-app.include_router(ask.router, prefix="/api")
-# 注册测试路由，前缀为/test
-app.include_router(test.router, prefix="/test")
+# 注册API路由，并添加标签用于文档分类
+app.include_router(upload_router, prefix="/api", tags=["upload"])
+app.include_router(ask_router, prefix="/api", tags=["ask"])
+app.include_router(test_router, prefix="/api", tags=["test"])
 
+@app.get("/")
+def read_root():
+    return {"Hello": "World"}
 
-# @app.get("/hello")
-# def hello():
-#     """
-#     简单的测试端点，用于验证服务器是否正常运行
-#     返回: {"message": "Hello World"}
-#     """
-#     return {"message": "Hello World"}
+# 支持直接运行：python server/app.py
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

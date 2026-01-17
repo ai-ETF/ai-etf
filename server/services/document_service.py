@@ -5,13 +5,14 @@ import logging
 import os
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from server.rag.chunker import split_text
 from server.rag.embedder import Embedder
 from server.storage.document_repo import DocumentRepo
 from server.storage.embedding_repo import EmbeddingRepo
 from server.config.settings import SETTINGS
 from server.agents.document_agent import DocumentAgent
+from server.storage.supabase_client import get_supabase
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -42,7 +43,7 @@ class DocumentProcessor(ABC):
         logger.debug("开始文本分块...")
         # 根据文档类型调整分块策略
         if doc_type == "financial_report":
-            chunks = split_text(text, chunk_size=1000, overlap=200)  # 财务报告使用更大的块大小
+            chunks = split_text(text, chunk_size=1000, overlap=200)  # 财理报告使用更大的块大小
         elif doc_type == "etf_report":
             chunks = split_text(text, chunk_size=900, overlap=150)  # ETF报告使用适中的块大小
         elif doc_type == "regulatory_document":
@@ -152,6 +153,7 @@ class DocumentService:
         self.emb_repo = EmbeddingRepo()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
         self.document_agent = DocumentAgent()  # 添加DocumentAgent实例
+        self.supabase = get_supabase()
         
         # 创建文档存储目录：如果有的话会直接跳过
         self.doc_dir = Path("docs")
@@ -232,7 +234,72 @@ class DocumentService:
         logger.info(f"✅ 文档处理完成! ID: {doc_id}")
         logger.info("=" * 60)
         return doc_id
-    
+
+    def process_file_from_edge(self, file_id: str, user_id: str, download_url: str, doc_type: str = "general_document", parse_strategy: Dict = None) -> str:
+        """
+        从Edge Function接收的文件处理请求
+        严格按照指定的表操作规则执行
+        """
+        logger.info("=" * 60)
+        logger.info(f"📥 开始处理Edge Function请求: file_id={file_id}, user_id={user_id}")
+        
+        # 步骤 1: 下载文件
+        logger.debug("1️⃣ 下载文件...")
+        try:
+            response = requests.get(download_url, timeout=60)
+            if response.status_code != 200:
+                raise RuntimeError(f"下载失败，状态码: {response.status_code}")
+            content = response.content
+            logger.debug(f"  下载完成，大小: {len(content)} 字节")
+        except Exception as e:
+            logger.error(f"❌ 文件下载失败: {e}")
+            self._update_document_status(file_id, 'failed', {'error': str(e)})
+            raise
+
+        # 步骤 2: 创建documents记录
+        logger.debug("2️⃣ 创建documents记录...")
+        document_id = str(uuid.uuid4())
+        title = self._extract_title_from_content(content)
+        metadata = {
+            'file_id': file_id,
+            'parse_strategy': parse_strategy or {},
+            'model_version': 'text2vec-base-chinese',
+            'processing_timestamp': str(uuid.uuid4())
+        }
+        
+        self._create_document_record(document_id, file_id, user_id, title, doc_type, metadata)
+
+        try:
+            # 步骤 3: 使用DocumentAgent分析文档类型和结构
+            logger.debug("3️⃣ 使用DocumentAgent分析文档...")
+            text_content = self._decode_content(content)  # 先解码内容以供分析
+            analysis_result = self.document_agent.analyze(text_content)
+            analyzed_doc_type = analysis_result["document_type"]
+            logger.debug(f"  文档类型分析结果: {analyzed_doc_type}，置信度: {analysis_result['confidence']:.2f}")
+
+            # 步骤 4: 根据文档类型选择处理器并处理文档内容
+            logger.debug("4️⃣ 根据文档类型处理文档内容...")
+            file_extension = self._determine_file_extension(download_url, '', content)
+            processor = self._get_processor(file_extension)
+            text, chunks, vectors = processor.process(content, file_extension, analyzed_doc_type)
+
+            # 步骤 5: 向量化并写入document_chunks
+            logger.debug("5️⃣ 向量化并写入document_chunks...")
+            self._store_chunks_to_document_chunks(document_id, chunks, vectors, analysis_result)
+
+            # 步骤 6: 更新documents状态为ready
+            logger.debug("6️⃣ 更新documents状态为ready...")
+            self._update_document_status(document_id, 'ready')
+
+            logger.info(f"✅ 文件处理完成! document_id: {document_id}")
+        except Exception as e:
+            logger.error(f"❌ 处理过程中发生错误: {e}")
+            self._update_document_status(document_id, 'failed', {'error': str(e)})
+            raise
+
+        logger.info("=" * 60)
+        return document_id
+
     def _decode_content(self, content: bytes) -> str:
         """解码字节内容为字符串，用于DocumentAgent分析"""
         try:
@@ -329,6 +396,95 @@ class DocumentService:
         self.emb_repo.insert_many(doc_id, items)
         
         return doc_id
+
+    def _create_document_record(self, document_id: str, file_id: str, user_id: str, title: str, doc_type: str, metadata: Dict):
+        """在documents表中创建记录"""
+        try:
+            doc_data = {
+                'id': document_id,
+                'file_id': file_id,
+                'user_id': user_id,
+                'status': 'processing',
+                'title': title,
+                'doc_type': doc_type,
+                'metadata': metadata
+            }
+            
+            response = self.supabase.table("documents").insert(doc_data).execute()
+            logger.debug(f"documents记录创建成功，document_id: {document_id}")
+        except Exception as e:
+            logger.error(f"❌ 创建documents记录失败: {str(e)}")
+            raise
+
+    def _store_chunks_to_document_chunks(self, document_id: str, chunks: List[str], vectors: List[List[float]], analysis_result: Dict):
+        """将分块和向量存储到document_chunks表"""
+        try:
+            # 准备批量插入数据
+            chunks_data = []
+            for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+                chunk_data = {
+                    'document_id': document_id,
+                    'chunk_index': i,
+                    'content': chunk,
+                    'embedding': vector,
+                    'metadata': {
+                        'confidence': analysis_result.get('confidence', 0.0),
+                        'document_type': analysis_result.get('document_type', 'general_document'),
+                        'parse_strategy': analysis_result.get('suggested_chunk_strategy', {})
+                    }
+                }
+                
+                # 如果是PDF，尝试提取页码信息
+                if analysis_result.get('document_type') == 'financial_report':
+                    # 在这里可以根据实际情况提取页码信息
+                    chunk_data['page_number'] = i // 10 + 1  # 简单估算
+                
+                chunks_data.append(chunk_data)
+            
+            # 批量插入到document_chunks表
+            response = self.supabase.table("document_chunks").insert(chunks_data).execute()
+            logger.debug(f"成功插入 {len(chunks_data)} 个chunks到document_chunks表")
+        except Exception as e:
+            logger.error(f"❌ 存储chunks到document_chunks表失败: {str(e)}")
+            raise
+
+    def _update_document_status(self, document_id: str, status: str, metadata: Dict = None):
+        """更新documents表中的文档状态"""
+        try:
+            update_data = {'status': status}
+            if metadata:
+                # 获取现有metadata并合并新数据
+                response = self.supabase.table("documents").select("metadata").eq("id", document_id).execute()
+                if response.data:
+                    existing_metadata = response.data[0].get('metadata', {})
+                    existing_metadata.update(metadata)
+                    update_data['metadata'] = existing_metadata
+            
+            response = self.supabase.table("documents").update(update_data).eq("id", document_id).execute()
+            logger.debug(f"documents记录更新成功，document_id: {document_id}, status: {status}")
+        except Exception as e:
+            logger.error(f"❌ 更新documents记录失败: {str(e)}")
+            raise
+
+    def _extract_title_from_content(self, content: bytes) -> str:
+        """从文件内容中提取标题"""
+        try:
+            # 尝试解码内容
+            text = self._decode_content(content)
+            lines = text.split('\n')
+            
+            # 查找第一个非空行作为标题
+            for line in lines:
+                stripped = line.strip()
+                if stripped:
+                    # 截取前100个字符作为标题
+                    return stripped[:100]
+                    
+            # 如果没找到合适标题，使用默认值
+            return "Untitled Document"
+        except Exception as e:
+            logger.warning(f"提取标题时出错: {str(e)}")
+            return "Untitled Document"
     
     def _cleanup_temp_file(self, filepath: Path):
         """清理临时文件"""

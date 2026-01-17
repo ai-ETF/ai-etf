@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List, Any
+from typing import Optional, List, Dict, Any
 
 
 class UploadRequest(BaseModel):
@@ -47,3 +47,14 @@ class AskResponse(BaseModel):
     prompt: str  # 构建的完整提示词
     decision: Optional[Any]  # 决策结果（意图、输出格式等）
     top_chunks: Optional[List[Chunk]]  # 相关的文本块列表
+
+
+class ProcessFileFromEdgeRequest(BaseModel):
+    """
+    Edge Function发送的文件处理请求数据模型
+    """
+    file_id: str
+    user_id: str
+    download_url: str
+    doc_type: Optional[str] = "general_document"
+    parse_strategy: Optional[Dict[str, Any]] = None
