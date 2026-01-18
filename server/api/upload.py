@@ -5,8 +5,6 @@ from server.config.settings import SETTINGS
 import logging
 import json
 
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()

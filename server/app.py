@@ -1,8 +1,13 @@
 import os
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from server.api.upload import router as upload_router
+from server.api.ask import router as ask_router
+from server.config.settings import SETTINGS
 import logging
-from contextlib import asynccontextmanager
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI()
 
 # 设置根日志记录器的级别
 logging.basicConfig(level=logging.INFO)

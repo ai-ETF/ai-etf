@@ -3,8 +3,6 @@ from server.models.schemas import AskRequest, AskResponse
 from server.services.qa_service import QAService
 import logging
 
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()

@@ -2,9 +2,7 @@ from typing import Optional
 from server.models.decision import DecisionResult
 import logging
 
-
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
+# 获取模块级别日志记录器
 logger = logging.getLogger(__name__)
 
 

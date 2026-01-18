@@ -14,10 +14,6 @@ from server.config.settings import SETTINGS
 from server.agents.document_agent import DocumentAgent
 from server.storage.supabase_client import get_supabase
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 

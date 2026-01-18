@@ -4,8 +4,6 @@ import logging
 from server.storage.embedding_repo import EmbeddingRepo
 
 
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 

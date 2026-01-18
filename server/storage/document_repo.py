@@ -4,8 +4,6 @@ import logging
 from datetime import datetime
 from server.storage.supabase_client import get_supabase
 
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 

@@ -7,8 +7,6 @@ except Exception:
     Client = None
 
 
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 

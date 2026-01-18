@@ -1,9 +1,6 @@
 from typing import List
 import logging
 
-
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 

@@ -4,8 +4,6 @@ import os
 from typing import List
 
 
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 

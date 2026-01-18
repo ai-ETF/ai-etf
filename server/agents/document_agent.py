@@ -1,9 +1,6 @@
 from typing import Dict, Optional
 import logging
 
-
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 

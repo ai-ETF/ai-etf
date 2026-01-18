@@ -9,9 +9,6 @@ from server.models.decision import DecisionResult
 from server.config.settings import SETTINGS
 import logging
 
-
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
