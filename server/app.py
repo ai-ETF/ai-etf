@@ -1,18 +1,33 @@
 import os
 from contextlib import asynccontextmanager
-import os
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import os
+import logging
+
+# 首先加载环境变量
+try:
+    from dotenv import load_dotenv
+    # 计算当前文件的上级目录的上级目录，即项目根目录
+    current_file_dir = os.path.dirname(os.path.abspath(__file__))  # server/
+    project_root_dir = os.path.dirname(current_file_dir)          # ai-etf/
+    dotenv_path = os.path.join(project_root_dir, '.env')
+    load_dotenv(dotenv_path=dotenv_path)
+    logging.basicConfig(level=logging.INFO)
+    logging.info("环境变量从 .env 文件加载成功")
+except ImportError:
+    logging.basicConfig(level=logging.INFO)
+    logging.warning("python-dotenv 未安装，跳过从 .env 文件加载环境变量")
+except Exception as e:
+    logging.basicConfig(level=logging.INFO)
+    logging.error(f"从 .env 文件加载环境变量失败: {e}")
+
+# 现在导入其他模块，这时环境变量已经可用
 from server.api.upload import router as upload_router
 from server.api.ask import router as ask_router
 from server.config.settings import SETTINGS
-import logging
 
 logger = logging.getLogger(__name__)
-
-app = FastAPI()
-
-# 设置根日志记录器的级别
-logging.basicConfig(level=logging.INFO)
 
 # 设置第三方库的日志级别，避免过多的调试信息
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -20,17 +35,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("hpack").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
-
-# 尝试加载 .env 文件
-try:
-    from dotenv import load_dotenv
-    dotenv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
-    load_dotenv(dotenv_path=dotenv_path)
-    logging.info("环境变量从 .env 文件加载成功")
-except ImportError:
-    logging.warning("python-dotenv 未安装，跳过从 .env 文件加载环境变量")
-except Exception as e:
-    logging.error(f"从 .env 文件加载环境变量失败: {e}")
 
 # 显式导入并使用别名
 from server.api.ask import router as ask_router
@@ -40,7 +44,7 @@ from server.storage.supabase_client import get_supabase
 
 # 配置日志
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(SETTINGS.LOG_LEVEL if hasattr(SETTINGS, 'LOG_LEVEL') else logging.INFO)
 
 
 @asynccontextmanager
@@ -65,7 +69,7 @@ app = FastAPI(title="AI-ETF Server", lifespan=lifespan, debug=True)
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # 在生产环境中应该限制为特定的域名
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

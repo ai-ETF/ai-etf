@@ -16,11 +16,13 @@ class Settings:
         # 获取日志级别，默认为DEBUG
         log_level_str = os.getenv("LOG_LEVEL", "DEBUG").upper()
         log_level = getattr(logging, log_level_str, logging.DEBUG)
-        # 配置日志
-        logging.basicConfig(
-            level=log_level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+        
+        # 配置日志（只有在尚未配置时才配置）
+        if not logging.getLogger().handlers:
+            logging.basicConfig(
+                level=log_level,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
         
         self.LOG_LEVEL = log_level
         
@@ -35,7 +37,7 @@ class Settings:
             if not self.SUPABASE_URL:
                 logging.warning("未配置SUPABASE_URL环境变量")
             if not self.SUPABASE_KEY:
-                logging.warning("未配置SUPABASE_KEY环境变量")
+                logging.warning("未配置SUPABASE_SERVICE_ROLE_KEY环境变量")
             logging.warning("由于缺少Supabase配置，将使用SQLite作为存储（但当前已禁用SQLite回退机制）")
         
         # 数据库文件路径，默认为"server_data.db"
