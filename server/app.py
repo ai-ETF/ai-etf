@@ -1,4 +1,3 @@
-import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +16,9 @@ def init_logging():
             level=log_level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
+    else:
+        # 如果已经有处理器，更新根日志记录器的级别
+        logging.getLogger().setLevel(log_level)
     
     # 设置第三方库的日志级别，避免过多的调试信息
     logging.getLogger("httpcore").setLevel(logging.WARNING)
