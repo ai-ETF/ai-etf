@@ -17,13 +17,6 @@ class Settings:
         log_level_str = os.getenv("LOG_LEVEL", "DEBUG").upper()
         log_level = getattr(logging, log_level_str, logging.DEBUG)
         
-        # 配置日志（只有在尚未配置时才配置）
-        if not logging.getLogger().handlers:
-            logging.basicConfig(
-                level=log_level,
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-        
         self.LOG_LEVEL = log_level
         
         # Supabase数据库连接URL
@@ -47,6 +40,22 @@ class Settings:
         
         logging.info(f"配置加载完成: DB_PATH={self.DB_PATH}, EMBED_DIM={self.EMBED_DIM}, LOG_LEVEL={log_level_str}")
 
+
+def configure_logging():
+    """在应用启动时配置日志"""
+    log_level_str = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    log_level = getattr(logging, log_level_str, logging.DEBUG)
+    
+    # 只有在尚未配置日志处理器时才进行配置
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+
+
+# 在模块加载时配置日志（应用启动时）
+configure_logging()
 
 # 创建全局配置实例
 SETTINGS = Settings()

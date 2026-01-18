@@ -5,6 +5,29 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
 
+def init_logging():
+    """初始化日志系统"""
+    # 获取日志级别，默认为DEBUG
+    log_level_str = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    log_level = getattr(logging, log_level_str, logging.DEBUG)
+    
+    # 配置根日志记录器
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    
+    # 设置第三方库的日志级别，避免过多的调试信息
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("hpack").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    
+    logging.info(f"日志系统初始化完成，级别: {log_level_str}")
+
+
 # 首先加载环境变量
 try:
     from dotenv import load_dotenv
@@ -13,14 +36,14 @@ try:
     project_root_dir = os.path.dirname(current_file_dir)          # ai-etf/
     dotenv_path = os.path.join(project_root_dir, '.env')
     load_dotenv(dotenv_path=dotenv_path)
-    logging.basicConfig(level=logging.INFO)
     logging.info("环境变量从 .env 文件加载成功")
 except ImportError:
-    logging.basicConfig(level=logging.INFO)
     logging.warning("python-dotenv 未安装，跳过从 .env 文件加载环境变量")
 except Exception as e:
-    logging.basicConfig(level=logging.INFO)
     logging.error(f"从 .env 文件加载环境变量失败: {e}")
+
+# 初始化日志系统
+init_logging()
 
 # 现在导入其他模块，这时环境变量已经可用
 from server.api.upload import router as upload_router
@@ -28,23 +51,7 @@ from server.api.ask import router as ask_router
 from server.config.settings import SETTINGS
 
 logger = logging.getLogger(__name__)
-
-# 设置第三方库的日志级别，避免过多的调试信息
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("hpack").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("requests").setLevel(logging.WARNING)
-
-# 显式导入并使用别名
-from server.api.ask import router as ask_router
-from server.api.upload import router as upload_router
-from server.api.test import router as test_router
-from server.storage.supabase_client import get_supabase
-
-# 配置日志
-logger = logging.getLogger(__name__)
-logger.setLevel(SETTINGS.LOG_LEVEL if hasattr(SETTINGS, 'LOG_LEVEL') else logging.INFO)
+logger.setLevel(SETTINGS.LOG_LEVEL)
 
 
 @asynccontextmanager
