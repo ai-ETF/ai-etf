@@ -68,7 +68,7 @@ async def ask_stream(req: AskRequest):
             logger.debug("🎨 使用OutputFormatAgent分析输出格式...")
             format_result = svc.output_format_agent.analyze(
                 intent=decision.intent,
-                content:req.question
+                content=req.question
             )
             logger.info(f"📝 输出格式分析: {format_result['primary_format']}")
             
