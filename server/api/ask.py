@@ -21,7 +21,7 @@ async def ask(req: AskRequest):
     
     try:
         logger.debug("开始处理问答请求")
-        result = svc.handle_question(req.question, doc_id=req.doc_id)
+        result = svc.handle_question(req.question, doc_id=req.doc_id, user_id="default_user", chat_id="default_chat")
         logger.debug("问答处理完成")
     except Exception as e:
         logger.error(f"处理问答请求时发生错误: {str(e)}")
@@ -50,7 +50,7 @@ async def ask_stream(req: AskRequest):
         try:
             # 使用规则型智能体进行意图识别
             logger.debug("🧠 使用规则型智能体进行意图识别...")
-            agent_decision = svc.rule_agent.decide_intent(req.question)
+            agent_decision = svc.rule_agent.decide_intent(req.question, "default_user", "default_chat")
             logger.info(f"🎯 意图识别结果: {agent_decision.intent}")
             
             # 发送意图识别结果
@@ -68,7 +68,7 @@ async def ask_stream(req: AskRequest):
             logger.debug("🎨 使用OutputFormatAgent分析输出格式...")
             format_result = svc.output_format_agent.analyze(
                 intent=decision.intent,
-                content=req.question
+                content:req.question
             )
             logger.info(f"📝 输出格式分析: {format_result['primary_format']}")
             

@@ -39,7 +39,7 @@ class QAService:
         
         logger.debug(f"✅ 问答服务初始化完成，嵌入维度: {SETTINGS.EMBED_DIM}")
 
-    def handle_question(self, question: str, doc_id: str = None):
+    def handle_question(self, question: str, doc_id: str = None, user_id: str = "default_user", chat_id: str = "default_chat"):
         """
         处理用户问题，通过智能体决策、向量检索、生成完整Prompt并发送到Supabase进行AI处理
         """
@@ -47,7 +47,7 @@ class QAService:
         
         # 使用规则型智能体进行意图识别
         logger.debug("🧠 使用规则型智能体进行意图识别...")
-        agent_decision = self.rule_agent.decide_intent(question)
+        agent_decision = self.rule_agent.decide_intent(question, user_id, chat_id)
         logger.info(f"🎯 意图识别结果: {agent_decision.intent}")
         
         # 统一处理：所有意图均走 RAG + Supabase AI 流程

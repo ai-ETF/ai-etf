@@ -22,7 +22,7 @@ class TestETFRuleBasedAgent(unittest.TestCase):
         simple_queries = [
             "这个ETF的投资标的是什么？",
             "ETF的费用比率是多少？",
-            "介绍一下510300这只基金",
+            "介绍一下001234这只基金",
             "这只基金的历史表现怎么样？"
         ]
         
@@ -44,13 +44,6 @@ class TestETFRuleBasedAgent(unittest.TestCase):
         
         for query in comparison_queries:
             result = self.agent.decide_intent(query, "test_user", "test_chat")
-            # 检查是否是对比意图或包含比较关键词
-            is_comparison = (
-                result.intent == IntentType.ETF_COMPARISON or 
-                '比较' in query or 
-                '哪个' in query
-            )
-            # 这里我们只是验证系统能够正确处理意图识别
             self.assertIsInstance(result, AgentDecision)
     
     def test_risk_assessment_intent_recognition(self):
@@ -81,16 +74,13 @@ class TestETFRuleBasedAgent(unittest.TestCase):
     
     def test_entity_extraction(self):
         """测试实体抽取功能"""
-        # 直接测试实体提取功能，使用符合ETF代码格式的查询
-        result = self.agent.decide_intent("沪深300ETF和创业板ETF哪个风险更低？", "test_user", "test_chat")
-        extracted_names = result.extracted_params.get('etf_names', [])
+        # 直接测试实体提取功能
+        result = self.agent.decide_intent("介绍一下510300和159915这两只ETF", "test_user", "test_chat")
+        extracted_codes = result.extracted_params.get('etf_codes', [])
         
-        # 检查是否提取到了ETF名称
-        has_hs300 = any('沪深300' in name for name in extracted_names)
-        has_cyb = any('创业板' in name for name in extracted_names)
-        
-        # 至少提取到一个ETF名称
-        self.assertTrue(has_hs300 or has_cyb, f"Expected to extract ETF names, got: {extracted_names}")
+        # 检查是否提取到了ETF代码
+        self.assertIn('510300', extracted_codes)
+        self.assertIn('159915', extracted_codes)
 
 
 class TestRoutingLogic(unittest.TestCase):
@@ -161,7 +151,7 @@ class TestRoutingLogic(unittest.TestCase):
             },
             {
                 'query': "这个ETF有什么风险因素？",
-                'expected_intent': 'risk_assement'
+                'expected_intent': 'risk_assessment'
             }
         ]
         
