@@ -1,6 +1,7 @@
 import json
 from typing import Optional, List, Dict
 import logging
+import re
 from server.config.settings import SETTINGS
 from server.storage.supabase_client import get_supabase
 
@@ -11,17 +12,17 @@ class EmbeddingRepo:
     def __init__(self, db_path: Optional[str] = None):
         logger.debug(f"初始化EmbeddingRepo")
         self.supabase = get_supabase()
-        
+
         if not self.supabase:
             error_msg = "Supabase客户端初始化失败，请检查环境变量SUPABASE_URL和SUPABASE_SERVICE_ROLE_KEY是否已设置"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
-            
+
         logger.info("使用Supabase作为嵌入向量存储")
 
     def insert_many(self, doc_id: str, items: List[Dict]):
         logger.debug(f"开始批量插入嵌入向量，文档ID: {doc_id}，项目数量: {len(items)}")
-        
+
         # 使用Supabase存储到document_chunks表
         logger.debug("使用Supabase批量插入到document_chunks表")
         try:
@@ -31,10 +32,10 @@ class EmbeddingRepo:
                 logger.debug(f"准备第 {i+1} 个项目，块ID: {item.get('chunk_id')}")
                 # 从chunk_id中提取索引信息，如果有的话
                 chunk_index = i  # 使用循环索引作为chunk_index
-                
+
                 # 获取向量数据
                 vector = item.get("vector", [])
-                
+
                 # 创建插入项的基础数据
                 chunk_data = {
                     "document_id": doc_id,
@@ -44,7 +45,7 @@ class EmbeddingRepo:
                     "content": item.get("text", ""),
                     "page_number": chunk_index // 10 + 1  # 基于索引估算页码
                 }
-                
+
                 # 只有当向量存在、维度正确且不为空时才添加到数据中
                 if vector and len(vector) == SETTINGS.EMBED_DIM:
                     chunk_data["embedding"] = vector
@@ -53,13 +54,13 @@ class EmbeddingRepo:
                     logger.warning(f"跳过向量 - 维度不匹配，实际: {len(vector)}, 期望: {SETTINGS.EMBED_DIM}")
                 else:
                     logger.debug(f"跳过向量 - 向量为空或未提供")
-                
+
                 logger.debug(f"插入数据 - 文本内容: {item.get('text', '')[:100]}..., 向量状态: {'已包含' if 'embedding' in chunk_data else '未包含'}")
-                
+
                 supabase_items.append(chunk_data)
-            
+
             # logger.debug(f"准备插入的完整数据: {supabase_items}")
-            
+
             # 批量插入到document_chunks表
             response = self.supabase.table("document_chunks").insert(supabase_items).execute()
             logger.debug(f"批量插入在Supabase中完成，文档ID: {doc_id}，插入数量: {len(response.data) if hasattr(response, 'data') else len(supabase_items)}")
@@ -70,23 +71,23 @@ class EmbeddingRepo:
 
     def query_all(self, doc_id: Optional[str] = None) -> List[Dict]:
         logger.debug(f"查询嵌入向量，文档ID过滤: {doc_id}")
-        
+
         # 从Supabase的document_chunks表查询
         logger.debug("从Supabase的document_chunks表查询嵌入向量")
         try:
             # 排除chunk_index为-1的元数据条目，只获取实际的文本块
-            query = self.supabase.table("document_chunks").select("id, document_id, content, embedding").neq("chunk_index", -1)
-            
+            query = self.supabase.table("document_chunks").select("id, document_id, content, embedding, document_type").neq("chunk_index", -1)
+
             if doc_id:
                 logger.debug(f"查询特定文档的嵌入向量")
                 query = query.eq("document_id", doc_id)
             else:
                 logger.debug(f"查询所有嵌入向量")
-            
+
             response = query.execute()
             rows = response.data
             logger.debug(f"Supabase查询完成，返回 {len(rows)} 行")
-            
+
             out = []
             for i, r in enumerate(rows):
                 logger.debug(f"处理第 {i+1} 行数据，文档ID: {r['document_id']}")
@@ -94,13 +95,14 @@ class EmbeddingRepo:
                 embedding = r['embedding']
                 logger.debug(f"处理嵌入向量，维度: {len(embedding) if embedding else 0}")
                 out.append({
-                    "id": r['id'], 
-                    "doc_id": r['document_id'], 
-                    "chunk_id": f"{r['document_id']}.{r.get('chunk_index', 0)}", 
-                    "text": r['content'], 
-                    "vector": embedding
+                    "id": r['id'],
+                    "doc_id": r['document_id'],
+                    "chunk_id": f"{r['document_id']}.{r.get('chunk_index', 0)}",
+                    "text": r['content'],
+                    "vector": embedding,
+                    "doc_type": r.get('document_type', 'other'),
                 })
-                
+
             logger.debug(f"Supabase数据处理完成，返回 {len(out)} 个项目")
             return out
         except Exception as e:
@@ -121,3 +123,143 @@ class EmbeddingRepo:
             .execute()
             .data
         )
+
+    def match_by_keywords(self, query_text: str, top_k: int = 20, doc_id: Optional[str] = None) -> List[Dict]:
+        """基于关键词的稀疏检索（优先 FTS，失败时回退 ilike）。"""
+        if not query_text:
+            return []
+
+        # 简单关键词抽取：中文连续词块 + 英文/数字串，去除过短词
+        raw_terms = re.findall(r"[一-鿿]{2,}|[a-zA-Z0-9_\-]{2,}", query_text)
+        stop_terms = {
+            "是什么", "多少", "哪个", "或者", "以及", "请问", "一下", "一个", "这个",
+            "问题", "基金", "证券", "投资", "开放式", "指数", "交易型"
+        }
+        terms = []
+        for term in raw_terms:
+            normalized_term = term.strip().lower()
+            if not normalized_term or normalized_term in stop_terms:
+                continue
+            terms.append(normalized_term)
+
+        # 去重保序
+        dedup_terms = []
+        seen = set()
+        for term in terms:
+            if term not in seen:
+                dedup_terms.append(term)
+                seen.add(term)
+
+        if not dedup_terms:
+            return []
+
+        select_fields = "id, document_id, chunk_index, page_number, content, document_type"
+
+        # 逐关键词召回，再在应用层累积分数（命中关键词数量）
+        hit_map: Dict[str, Dict] = {}
+
+        def _merge_rows(rows: List[Dict], score_boost: float = 1.0):
+            for row in rows or []:
+                chunk_id = row.get("id")
+                if not chunk_id:
+                    continue
+
+                if chunk_id not in hit_map:
+                    hit_map[chunk_id] = {
+                        "chunk_id": chunk_id,
+                        "content": row.get("content", ""),
+                        "document_id": row.get("document_id"),
+                        "document_name": row.get("document_name") or row.get("doc_name") or "未知文档",
+                        "doc_type": row.get("document_type", "other"),
+                        "chunk_index": row.get("chunk_index"),
+                        "page_number": row.get("page_number"),
+                        "keyword_hits": 0,
+                        "sparse_score": 0.0,
+                    }
+
+                hit_map[chunk_id]["keyword_hits"] += 1
+                hit_map[chunk_id]["sparse_score"] += score_boost
+
+        # 优先尝试数据库 RPC FTS/BM25（若已在 Supabase 创建函数）
+        try:
+            rpc_rows = (
+                self.supabase
+                .rpc(
+                    "match_chunks_fts",
+                    {
+                        "query_text": " ".join(dedup_terms[:8]),
+                        "match_count": max(50, top_k),
+                        "document_id": doc_id,
+                    },
+                )
+                .execute()
+                .data
+            )
+
+            if rpc_rows:
+                for row in rpc_rows:
+                    chunk_id = row.get("chunk_id") or row.get("id")
+                    if not chunk_id:
+                        continue
+                    hit_map[chunk_id] = {
+                        "chunk_id": chunk_id,
+                        "content": row.get("content", ""),
+                        "document_id": row.get("document_id"),
+                        "document_name": row.get("document_name") or row.get("doc_name") or "未知文档",
+                        "doc_type": row.get("document_type", "other"),
+                        "chunk_index": row.get("chunk_index"),
+                        "page_number": row.get("page_number"),
+                        "keyword_hits": int(row.get("keyword_hits", 1)),
+                        "sparse_score": float(row.get("fts_score", row.get("rank", 0.0))),
+                    }
+
+                logger.debug(f"关键词检索: RPC FTS 命中 {len(hit_map)} 条")
+                sparse_results = sorted(
+                    hit_map.values(),
+                    key=lambda item: (item.get("sparse_score", 0.0), item.get("keyword_hits", 0)),
+                    reverse=True,
+                )
+                return sparse_results[:top_k]
+        except Exception as rpc_error:
+            logger.debug(f"RPC FTS 不可用，降级客户端 FTS: {rpc_error}")
+
+        # 回退到客户端 FTS：使用 text_search + simple 配置
+        fts_ok = False
+        try:
+            # 逐词 FTS（plain），避免复杂 tsquery 语法在中文场景报错
+            for term in dedup_terms[:8]:
+                term_query = self.supabase.table("document_chunks").select(select_fields).limit(max(20, top_k))
+                if doc_id:
+                    term_query = term_query.eq("document_id", doc_id)
+                term_query = term_query.text_search("content", term, {"type": "plain", "config": "simple"})
+                term_response = term_query.execute()
+                _merge_rows(term_response.data or [], score_boost=2.0)
+
+            fts_ok = True
+            logger.debug(f"关键词检索: FTS 命中 {len(hit_map)} 条")
+        except Exception as fts_error:
+            logger.warning(f"FTS 检索不可用，回退 ilike: {fts_error}")
+
+        if not fts_ok:
+            for term in dedup_terms[:8]:
+                query = (
+                    self.supabase
+                    .table("document_chunks")
+                    .select(select_fields)
+                    .ilike("content", f"%{term}%")
+                    .limit(max(20, top_k))
+                )
+
+                if doc_id:
+                    query = query.eq("document_id", doc_id)
+
+                response = query.execute()
+                _merge_rows(response.data or [], score_boost=1.0)
+
+        # 关键词命中次数降序
+        sparse_results = sorted(
+            hit_map.values(),
+            key=lambda item: (item.get("sparse_score", 0.0), item.get("keyword_hits", 0)),
+            reverse=True,
+        )
+        return sparse_results[:top_k]
