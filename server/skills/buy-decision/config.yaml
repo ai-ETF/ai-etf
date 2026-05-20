@@ -1,0 +1,109 @@
+# Buy Decision Skill Configuration
+
+skill:
+  name: buy-decision
+  version: 1.0.0
+  description: 买入决策Skill - 帮助用户在多个ETF之间做买入选择
+  author: team
+
+# 数据需求定义
+# 莱拉加载此Skill后，读取data_requirements，据此向小研发起数据请求
+data_requirements:
+  # 简要数据需求 - 用户提问后立即触发收集
+  brief:
+    - valuation        # PE、PB、分位
+    - fundamental      # 营收增速、利润率、趋势
+    - fund_flow        # 资金净流向（近1月/3月/6月）
+    - composition      # 成分股、权重（用于标的理解阶段）
+
+  # 详细数据需求 - 追问链结束后触发收集（或简要数据就绪后继续收集）
+  detail:
+    - valuation        # 更详细的估值数据
+    - fundamental      # 更详细的基本面数据
+    - bull_views       # 看多观点（数据支撑+逻辑）
+    - bear_views       # 看空观点（数据支撑+逻辑）
+    - institution_views  # 投行观点
+    - policy_events     # 政策事件
+    - fund_flow        # 更长时间维度的资金流向
+
+# 输出配置
+output:
+  type: exec_plan_document
+  template: assets/exec_plan_template.md
+  save_path: /users/{user_id}/plans/{target}_{date}.md
+
+# 资源文件索引
+resources:
+  references:
+    - references/intent_routing.md
+    - references/inquiry.md
+    - references/four_rules.md
+    - references/decision_framework.md
+    - references/detail_report.md
+  assets:
+    - assets/exec_plan_template.md
+    - assets/examples.md
+
+# 状态字段定义
+# 莱拉在执行此Skill时，需要在state中维护的字段
+state_fields:
+  # 追问链状态
+  inquiry_step: int           # 当前追问步骤 (1-6)
+  answers: object             # 用户在各步骤的回答
+    goal: string              # 投资目标
+    horizon: string           # 投资期限
+    risk_tolerance: string    # 风险承受能力
+
+  # 四条纪律
+  post_buy_rules: object
+    logic_anchor: object
+      buy_logic: string       # 买入逻辑
+      invalid_signals: array  # 逻辑失效信号
+    risk_bottom_line: object
+      position_limit: string  # 仓位上限
+      max_loss_tolerance: string  # 最大浮亏承受
+      trigger_action: string  # 触发动作
+    take_profit: object
+      method: string          # 止盈方式
+      steps: array            # 分批止盈的步骤
+    add_position: object
+      conditions: array       # 补仓条件
+      max_position_after_add: string  # 补仓后上限
+
+  # 决策结果
+  decision: object
+    selected_target: string   # 选择的标的
+    position_size: string     # 仓位
+    method: string            # 建仓方式
+    timing: string            # 入场时机
+    reason: string            # 理由
+
+  # 数据状态
+  data_status: object
+    brief_ready: boolean
+    detail_ready: boolean
+    collection_id: string
+
+  # 执行计划文档路径
+  exec_plan_path: string
+
+# 情绪信号关键词
+# 检测到这些信号时，暂停当前步骤，通知莱拉执行情绪干预
+emotion_signals:
+  fomo:
+    - "一直涨"
+    - "错过"
+    - "早知道该买"
+    - "踏空"
+  anxiety:
+    - "要不要卖"
+    - "跌了怎么办"
+    - "会不会继续跌"
+  regret:
+    - "早知道"
+    - "拍大腿"
+    - "后悔"
+  overconfidence:
+    - "肯定涨"
+    - "稳赚"
+    - "必涨"

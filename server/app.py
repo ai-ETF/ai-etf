@@ -50,7 +50,8 @@ init_logging()
 # 现在导入其他模块，这时环境变量已经可用
 from server.api.upload import router as upload_router
 from server.api.ask import router as ask_router
-from server.api.test import router as test_router  # 添加test路由
+from server.api.test import router as test_router
+from server.api.chat import router as chat_router
 from server.config.settings import SETTINGS
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,8 @@ app.add_middleware(
 # 注册API路由，并添加标签用于文档分类
 app.include_router(upload_router, prefix="/api", tags=["upload"])
 app.include_router(ask_router, prefix="/api", tags=["ask"])
-app.include_router(test_router, prefix="/api", tags=["test"])  # 重新添加test路由
+app.include_router(test_router, prefix="/api", tags=["test"])
+app.include_router(chat_router, prefix="/api", tags=["chat"])
 
 @app.get("/")
 def read_root():

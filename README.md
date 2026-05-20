@@ -2,10 +2,6 @@
 
 AI-ETF 是一个使用人工智能技术分析交易所交易基金(ETF)的项目。该项目旨在帮助投资者更好地理解和分析ETF市场趋势，提供基于文档的智能问答和对比分析功能。
 
-## 项目概述
-
-AI-ETF 是一个基于人工智能的ETF分析系统，利用RAG（检索增强生成）技术，能够对ETF文档进行智能解析、存储和问答。系统支持PDF等格式的文档上传，并能基于文档内容回答用户问题，特别适用于金融领域的文档分析和对比。
-
 ## 项目架构
 
 ```
@@ -115,8 +111,9 @@ ai-etf/
    ```
 
 4. 激活虚拟环境：
+  - 查看激活方式，接着复制给出的指令激活就可以
    ```bash
-   poetry shell
+   poetry env activate
    ```
 
 5. 下载嵌入模型：
@@ -131,100 +128,15 @@ ai-etf/
    - 配置Supabase相关参数（URL和API密钥）
 
 7. 启动服务：
+
+  - 没有激活环境时，运行：
    ```bash
    poetry run uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
    ```
-
-### 3. Docker部署
-
-1. 构建Docker镜像：
+   - 激活环境时，运行：
    ```bash
-   docker build -t ai-etf-server .
+   uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
    ```
-
-2. 运行容器：
-   ```bash
-   docker run -p 8000:8000 ai-etf-server
-   ```
-
-## API接口说明
-
-### 1. 文档上传接口
-- **路径**: `POST /api/upload`
-- **请求体**:
-  ```json
-  {
-    "url": "string",
-    "source": "string"
-  }
-  ```
-- **响应**:
-  ```json
-  {
-    "success": true,
-    "doc_id": "string"
-  }
-  ```
-
-### 2. 问答接口
-- **路径**: `POST /api/ask`
-- **请求体**:
-  ```json
-  {
-    "question": "string",
-    "doc_id": "string"
-  }
-  ```
-- **响应**:
-  ```json
-  {
-    "prompt": "string",
-    "decision": {
-      "intent": "string",
-      "output_format": "string",
-      "top_k": "number",
-      "doc_filter": "string"
-    },
-    "top_chunks": [
-      {
-        "chunk_id": "string",
-        "text": "string",
-        "score": "number"
-      }
-    ]
-  }
-  ```
-
-### 3. 测试接口
-- **路径**: `GET /test/hello`
-- **响应**:
-  ```json
-  {
-    "message": "Hello World"
-  }
-  ```
-
-## 使用示例
-
-### 1. 文档上传
-```bash
-curl -X POST http://localhost:8000/api/upload \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com/etf_report.pdf",
-    "source": "etf_report"
-  }'
-```
-
-### 2. 问答查询
-```bash
-curl -X POST http://localhost:8000/api/ask \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "两只ETF基金的收益分配原则有什么不同？",
-    "doc_id": "your_doc_id"
-  }'
-```
 
 ## 项目特点
 
@@ -279,42 +191,3 @@ poetry run pytest
 项目使用环境变量进行配置，主要配置项包括：
 - `SUPABASE_URL`: Supabase数据库URL
 - `SUPABASE_SERVICE_ROLE_KEY`: Supabase服务角色密钥
-- `ETFSERVER_EMBED_DIM`: 嵌入向量维度（默认768）
-- `ETFSERVER_DB_PATH`: 数据库路径（如果使用本地数据库）
-
-## 日志系统
-
-项目实现了全面的日志记录系统：
-- 每个函数和方法都包含进入、执行过程和退出时的日志记录
-- 记录关键函数的输入参数、中间结果和最终返回值
-- 记录操作的数据量大小、处理数量及耗时等性能相关信息
-- 增强异常捕获机制，确保错误堆栈和上下文信息被完整记录
-
-## 项目规范
-
-### 代码规范
-- 使用Python 3.10+语法
-- 遵循PEP 8代码风格
-- 使用类型提示增强代码可读性
-- 详细的日志记录便于调试
-
-### 设计模式
-- 使用工厂模式处理不同类型的文档
-- 采用策略模式处理不同的分块策略
-- 使用服务层模式分离业务逻辑和数据访问
-
-## 贡献指南
-
-欢迎提交Issue和Pull Request来改进项目。在提交代码前，请确保：
-1. 代码遵循项目规范
-2. 添加了适当的测试
-3. 更新了相关文档
-4. 通过了所有测试
-
-## 许可证
-
-本项目遵循MIT许可证，详情请见LICENSE文件。
-
-## 致谢
-
-本项目使用了多个开源项目，包括FastAPI、Supabase、Sentence Transformers等，感谢这些项目的贡献者。

@@ -148,3 +148,6 @@ Thumbs.db
 # Local models
 local_models/
 ./local_models/
+
+.claude/
+设计资料/
