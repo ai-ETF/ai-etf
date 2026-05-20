@@ -181,22 +181,45 @@ async def check_data_status_node(state: LyraState) -> Dict[str, Any]:
     return {}
 
 
+async def _llm_direct_answer(state: LyraState) -> str:
+    """没有 skill 实现时，调用 LLM 直接回答用户问题"""
+    user_input = state.get("current_input", "")
+    messages = state.get("messages", [])
+
+    try:
+        llm = get_llm()
+        system_prompt = get_system_prompt()
+
+        # 构建对话历史（最近 5 条）
+        chat_messages = [SystemMessage(content=system_prompt)]
+        for msg in messages[-5:]:
+            chat_messages.append(msg)
+        chat_messages.append(HumanMessage(content=user_input))
+
+        response = await llm.ainvoke(chat_messages)
+        return response.content
+    except Exception as e:
+        logger.error(f"LLM 直接回答失败: {e}")
+        return "抱歉，我暂时无法回答这个问题。请稍后再试。"
+
+
 async def output_node(state: LyraState) -> Dict[str, Any]:
     """
     输出节点
 
     格式化最终响应并输出。
+    如果没有 skill 生成的响应，调用 LLM 直接回答。
     """
     response = state.get("response")
 
     if not response:
-        # 如果没有响应，生成默认回复
         intent = state.get("intent")
 
         if intent == "unknown":
             response = "这个问题我还在学习中。你可以试试问我关于 ETF 买入、对比、定投方面的问题。"
         else:
-            response = "请稍等，我正在整理相关信息..."
+            # 没有 skill 实现的意图，让 LLM 直接回答
+            response = await _llm_direct_answer(state)
 
     messages = state.get("messages", [])
     # 避免重复追加同一条响应
