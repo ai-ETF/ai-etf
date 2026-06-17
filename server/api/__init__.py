@@ -13,12 +13,13 @@ API 路由聚合器
 """
 from fastapi import APIRouter
 
-from . import chat, upload, test, ask
+from . import chat, upload, test, ask, simple_chat
 
 router = APIRouter()
 router.include_router(chat.router)
 router.include_router(upload.router)
 router.include_router(test.router)
 router.include_router(ask.router)
+router.include_router(simple_chat.router)
 
-__all__ = ["chat", "upload", "test", "ask", "router"]
+__all__ = ["chat", "upload", "test", "ask", "simple_chat", "router"]
