@@ -30,7 +30,7 @@ class AkshareClient:
                 import akshare as ak
                 self._akshare = ak
             except ImportError:
-                logger.error("akshare 未安装，请运行: pip install akshare")
+                logger.error("akshare 未安装，请运行: poetry add akshare")
                 raise
         return self._akshare
 

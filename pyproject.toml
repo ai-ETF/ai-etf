@@ -18,7 +18,7 @@ numpy = "^1.24.0"
 # 2. 核心：从你配置的专属源安装CPU版本的PyTorch
 
 # 3. 文本嵌入模型库
-sentence-transformers = "^3.0.0"
+sentence-transformers = "^5.5.1"
 
 # 4. LangChain生态库（根据你的代码按需添加）
 langchain = {version = "^0.3.0", extras = ["anthropic"]}

@@ -1,6 +1,6 @@
 # Claude Code 在 WSL 环境下的 Bash 工具问题
 
-> 使用 Claude Code（Windows 桌面版）开发 WSL 项目时，Bash 工具无法调用 WSL 中安装的工具（如 poetry、pip、python）。
+> 使用 Claude Code（Windows 桌面版）开发 WSL 项目时，Bash 工具无法调用 WSL 中安装的工具（如 poetry、python）。
 
 ---
 
@@ -48,7 +48,7 @@ WSL 中应该有这个文件，找不到说明不在 WSL 环境。
 |---|---|---|
 | Shell | Git Bash (MSYS2) | Bash (Ubuntu 20.04) |
 | PATH | Windows 路径 | Linux 路径 |
-| 安装的工具 | Windows 侧的 git、node 等 | poetry、pip、python 等 |
+| 安装的工具 | Windows 侧的 git、node 等 | poetry、python 等 |
 | 文件系统 | 可访问 WSL 文件（通过 `/mnt/`） | 原生 Linux 文件系统 |
 
 ---
@@ -57,8 +57,8 @@ WSL 中应该有这个文件，找不到说明不在 WSL 环境。
 
 ### 受影响的操作
 
-- `poetry`、`pip`、`python` 等 WSL 环境中的 CLI 工具
-- 依赖 WSL 环境的包管理操作（`poetry add`、`pip install`）
+- `poetry`、`python` 等 WSL 环境中的 CLI 工具
+- 依赖 WSL 环境的包管理操作（`poetry add`）
 - WSL 中的虚拟环境相关命令
 
 ### 不受影响的操作
@@ -77,7 +77,6 @@ WSL 中应该有这个文件，找不到说明不在 WSL 环境。
 
 ```
 ! poetry add akshare
-! pip install -r requirements.txt
 ! python test_qa.py
 ```
 
@@ -96,7 +95,7 @@ WSL 中应该有这个文件，找不到说明不在 WSL 环境。
 当你不确定某个命令该在哪个环境执行时：
 
 ```
-需要 poetry / pip / python？  →  用 ! 前缀 或 WSL 终端
+需要 poetry / python？       →  用 ! 前缀 或 WSL 终端
 需要 git / ls / mkdir？       →  Claude Code Bash 可以
 需要读写文件？               →  Read/Write/Edit 工具，无影响
 ```

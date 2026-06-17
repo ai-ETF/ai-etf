@@ -75,7 +75,7 @@ ai-etf/
 
 ## 技术栈
 
-- **Python 3.10+**: 主要开发语言
+- **Python 3.10.19**: 主要开发语言
 - **FastAPI**: Web框架，提供高性能API服务
 - **Supabase**: 向量数据库和后端服务
 - **Sentence Transformers**: 文本向量化模型

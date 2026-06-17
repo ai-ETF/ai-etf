@@ -223,8 +223,7 @@ class DocumentProcessor:
                 try:
                     import docx
                 except ImportError:
-                    logger.warning("正在为您自动安装 python-docx 以解析 Word 文档...")
-                    os.system("pip install python-docx")
+                    raise ImportError("python-docx 未安装，请运行: poetry add python-docx")
                     import docx
 
                 doc = docx.Document(file_path)

@@ -4,9 +4,12 @@
 使用 LangGraph StateGraph 编排各节点和边，构建莱拉的主控流程。
 """
 import logging
+from typing import AsyncGenerator
+
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
+from langchain_core.messages import AIMessageChunk
 
 from server.graphs.lyra.state import LyraState, create_initial_state
 from server.graphs.lyra.nodes import (
@@ -216,3 +219,64 @@ async def run_lyra(
     result["_waiting_for_input"] = bool(post_snapshot.next)
 
     return result
+
+
+async def stream_lyra(
+    user_id: str,
+    session_id: str,
+    user_input: str,
+) -> AsyncGenerator[tuple[str, dict], None]:
+    """
+    run_lyra 的流式版本，逐 token 输出 LLM 生成内容。
+
+    利用 LangGraph 的 astream() + stream_mode=["messages", "updates"] 获取：
+    - token 级别的 LLM 输出（来自 "messages" 模式）
+    - 节点完成事件（来自 "updates" 模式）
+
+    Yields:
+        (event_type, data) 元组，event_type 包括：
+        - "token": {"content": "..."} — 逐 token 的 LLM 输出
+        - "node_complete": {"node": "...", "output": {...}} — 节点完成
+        - "state_update": {"_interrupted": bool, "_waiting_for_input": bool}
+        - "done": {} — 图执行完毕
+    """
+    graph = get_lyra_graph()
+    config = {"configurable": {"thread_id": session_id}}
+
+    snapshot = await graph.aget_state(config)
+
+    if snapshot.next:
+        logger.info(f"流式恢复 interrupt: session_id={session_id}, resume={user_input[:50]}...")
+        input_data = Command(resume=user_input)
+    else:
+        initial_state = create_initial_state(
+            session_id=session_id,
+            user_id=user_id,
+            user_input=user_input,
+        )
+        input_data = initial_state
+
+    async for event in graph.astream(
+        input_data,
+        config=config,
+        stream_mode=["messages", "updates"],
+    ):
+        # stream_mode=["messages", "updates"] 会交替产生两种事件：
+        # "messages" 模式: (AIMessageChunk, metadata_dict)
+        # "updates" 模式: (node_name, output_dict)
+        if isinstance(event, tuple) and len(event) == 2:
+            first, second = event
+            if isinstance(first, AIMessageChunk):
+                content = first.content
+                if content:
+                    yield ("token", {"content": content})
+            elif isinstance(first, str) and isinstance(second, dict):
+                yield ("node_complete", {"node": first, "output": second})
+
+    # 流式完成后检查中断状态
+    post_snapshot = await graph.aget_state(config)
+    yield ("state_update", {
+        "_interrupted": bool(post_snapshot.next),
+        "_waiting_for_input": bool(post_snapshot.next),
+    })
+    yield ("done", {})

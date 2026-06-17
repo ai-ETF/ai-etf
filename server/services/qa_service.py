@@ -1,13 +1,10 @@
-from server.agents.question_agent import QuestionAgent
-from server.agents.document_agent import DocumentAgent
-from server.agents.output_format_agent import OutputFormatAgent
 from server.rag.embedder import Embedder
 from server.rag.retriever import Retriever
 from server.rag.prompt_builder import build_prompt
 from server.storage.embedding_repo import EmbeddingRepo
-from server.models.decision import DecisionResult
 from server.config.settings import SETTINGS
 from server.services.finance_api_service import FinanceApiService
+from server.graphs.qa.graph import run_qa_analysis
 import logging
 import re
 
@@ -31,12 +28,8 @@ class QAService:
     def __init__(self):
         """
         初始化问答服务
-        创建问题分析智能体、嵌入器、检索器和嵌入存储实例
         """
         logger.debug("初始化问答服务")
-        self.agent = QuestionAgent()
-        self.document_agent = DocumentAgent()
-        self.output_format_agent = OutputFormatAgent()
         self.finance_api = FinanceApiService()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
         self.emb_repo = EmbeddingRepo()
@@ -369,13 +362,22 @@ class QAService:
         normalized_question = self._normalize_question(question)
         retrieval_query = self._build_retrieval_query(normalized_question)
 
-        # 分析问题意图和输出格式
-        logger.debug("开始分析问题意图")
-        decision: DecisionResult = self.agent.analyze(normalized_question)
-        logger.debug(f"问题分析完成，结果: {decision}")
+        # 使用 LangGraph QA 分析图（LLM + 规则回退）
+        logger.debug("开始分析问题意图（LangGraph QA 图）")
+        qa_result = run_qa_analysis(normalized_question)
+        logger.debug(f"QA 分析完成，结果: intent={qa_result['intent']}, top_k={qa_result['top_k']}")
+
+        # 兼容下游代码，构造 decision dict（与原 DecisionResult.__dict__ 格式一致）
+        decision = {
+            "intent": qa_result["intent"],
+            "output_format": qa_result["output_format"],
+            "top_k": qa_result["top_k"],
+            "doc_filter": None,
+        }
+        format_analysis = qa_result.get("format_analysis", {"primary_format": "text"})
 
         # P2: 事实查询走 API（费率/净值/规模），不再让大模型从文档猜
-        if decision.intent == "factual_query" or self._is_fee_question(normalized_question):
+        if decision["intent"] == "factual_query" or self._is_fee_question(normalized_question):
             api_result = self.finance_api.query(normalized_question)
             if api_result:
                 logger.debug(f"API 查询成功: {api_result}")
@@ -388,15 +390,6 @@ class QAService:
                     "source": "api",
                 }
             logger.debug("API 查询失败，降级到 RAG")
-
-        # 使用输出格式智能体分析输出格式
-        logger.debug("使用输出格式智能体分析输出格式")
-        format_analysis = self.output_format_agent.analyze(
-            intent=decision.intent,
-            content="",  # 在此阶段上下文内容为空，可扩展为使用检索到的内容
-            user_preference=None
-        )
-        logger.debug(f"输出格式分析完成，结果: {format_analysis}")
 
         # 生成问题的嵌入向量
         logger.debug("生成问题嵌入向量")
@@ -428,16 +421,16 @@ class QAService:
         candidate_chunks = self._boost_by_doc_type(candidate_chunks, normalized_question)
 
         # 交叉注意力重排序过滤
-        top = self._rerank_and_select(candidate_chunks, retrieval_query, decision.top_k)
+        top = self._rerank_and_select(candidate_chunks, retrieval_query, decision["top_k"])
 
         # 第一道防线：rerank 分数阈值拒识
-        rejected = self._check_rejection(top, decision.__dict__, format_analysis, normalized_question)
+        rejected = self._check_rejection(top, decision, format_analysis, normalized_question)
         if rejected:
             return rejected
 
         # 构建完整提示词
         logger.debug("开始构建提示词")
-        prompt = build_prompt(question, decision.__dict__, top, format_analysis)
+        prompt = build_prompt(question, decision, top, format_analysis)
         logger.debug(f"提示词构建完成，长度: {len(prompt)}")
 
         # 输出完整的prompt内容（限制为前1000个字符）
@@ -448,7 +441,7 @@ class QAService:
         fee_card = self._build_fee_card(question, top)
         result = {
             "prompt": prompt,
-            "decision": decision.__dict__,
+            "decision": decision,
             "top_chunks": top,
             "format_analysis": format_analysis,
             "fee_card": fee_card,
