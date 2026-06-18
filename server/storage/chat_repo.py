@@ -52,16 +52,19 @@ class ChatRepo:
                 "created_at": now,
                 "updated_at": now,
             }
+            logger.debug(f"准备创建会话，数据: {data}")
             result = self.client.table(self.CHATS_TABLE).insert(data).execute()
+            logger.debug(f"Supabase 返回: {result}")
 
             if result.data and len(result.data) > 0:
                 chat = result.data[0]
                 logger.info(f"会话创建成功: chat_id={chat['id']}")
                 return chat
+            logger.warning(f"会话创建无返回数据, result.data={result.data}")
             return None
 
         except Exception as e:
-            logger.error(f"创建会话失败: {e}")
+            logger.error(f"创建会话失败: {type(e).__name__}: {e}")
             return None
 
     def get_chat(self, chat_id: str) -> Optional[Dict]:

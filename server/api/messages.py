@@ -100,10 +100,14 @@ async def create_message(req: MessageRequest):
     if not chat_id:
         # 用问题的前 20 个字符作为会话标题
         title = req.question[:20] + ("..." if len(req.question) > 20 else "")
-        chat = repo.create_chat(user_id=req.user_id, title=title)
+        try:
+            chat = repo.create_chat(user_id=req.user_id, title=title)
+        except Exception as e:
+            logger.error(f"创建会话异常: {type(e).__name__}: {e}")
+            chat = None
         if not chat:
             return create_sse_stream_response(
-                generator=_error_stream("创建会话失败"),
+                generator=_error_stream("创建会话失败，请检查 Supabase 连接和 chats 表是否存在"),
                 session_id="error",
             )
         chat_id = chat["id"]
