@@ -151,7 +151,8 @@ class DocumentProcessor:
                         # 清洗单元格，防止内部换行符破坏 Markdown 格式
                         clean_matrix = []
                         for row in table:
-                            clean_row = [str(cell).replace('\n', ' ').replace('|', '\\|').strip() if cell is not None and str(cell).strip() != "" else "-" for cell in row]
+                            clean_row = [str(cell).replace('\n', ' ').replace('|', '\\|').strip() if cell is not None and str(cell).strip() != "" else "-" for cell in row]
+
                             clean_matrix.append(clean_row)
                         
                         # 将二维数组编译为标准的 Markdown 表格文本
@@ -220,11 +221,11 @@ class DocumentProcessor:
                 
         elif file_path.lower().endswith('.docx'):
             try:
-                try:
-                    import docx
-                except ImportError:
-                    logger.warning("正在为您自动安装 python-docx 以解析 Word 文档...")
-                    os.system("pip install python-docx")
+                    import docx  # type: ignore
+                except ImportError as e:
+                    raise ImportError(
+                        "缺少依赖 python-docx。请先运行: pip install python-docx"
+                    ) from e
                     import docx
                     
                 doc = docx.Document(file_path)
