@@ -189,16 +189,18 @@ class ChatRepo:
             if metadata:
                 data["metadata"] = metadata
 
+            logger.debug(f"准备保存消息: role={role}, chat_id={chat_id}, user_id={user_id}")
             result = self.client.table(self.MESSAGES_TABLE).insert(data).execute()
 
             if result.data and len(result.data) > 0:
                 msg = result.data[0]
                 logger.debug(f"消息已保存: id={msg['id']}, role={role}")
                 return msg
+            logger.warning(f"消息保存无返回数据, result={result}")
             return None
 
         except Exception as e:
-            logger.error(f"保存消息失败: {e}")
+            logger.error(f"保存消息失败: {type(e).__name__}: {e}")
             return None
 
     def get_messages(self, chat_id: str, limit: int = 100) -> List[Dict]:

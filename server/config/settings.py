@@ -52,6 +52,10 @@ class Settings:
         # 数据收集超时（秒）
         self.XIAOYAN_TIMEOUT = int(os.getenv("XIAOYAN_TIMEOUT", "30"))
 
+        # === JWT 认证配置（对接 Supabase Auth）===
+        # Supabase 项目的 JWT Secret，在 Supabase 控制台 Settings > API > JWT Secret 获取
+        self.SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
         # === 情绪检测配置 ===
         self.EMOTION_DETECTION_ENABLED = os.getenv("EMOTION_DETECTION_ENABLED", "true").lower() == "true"
 

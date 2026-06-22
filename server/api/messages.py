@@ -61,6 +61,7 @@ async def stream_with_save(question: str, chat_id: str, user_id: str):
             chat_id=chat_id,
             role="assistant",
             content=full_response,
+            user_id=user_id,
         )
         if assistant_msg:
             logger.debug(f"assistant 消息已保存: id={assistant_msg['id']}")
