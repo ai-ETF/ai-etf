@@ -28,18 +28,21 @@ CREATE POLICY "用户删除自己的会话" ON chats
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 
 -- 查看自己会话下的消息
+DROP POLICY IF EXISTS "用户查看自己的消息" ON messages;
 CREATE POLICY "用户查看自己的消息" ON messages
   FOR SELECT USING (
     chat_id IN (SELECT id FROM chats WHERE user_id = auth.uid())
   );
 
 -- 创建消息（必须在自己的会话下）
+DROP POLICY IF EXISTS "用户创建自己的消息" ON messages;
 CREATE POLICY "用户创建自己的消息" ON messages
   FOR INSERT WITH CHECK (
     chat_id IN (SELECT id FROM chats WHERE user_id = auth.uid())
   );
 
 -- 删除自己会话下的消息
+DROP POLICY IF EXISTS "用户删除自己的消息" ON messages;
 CREATE POLICY "用户删除自己的消息" ON messages
   FOR DELETE USING (
     chat_id IN (SELECT id FROM chats WHERE user_id = auth.uid())
