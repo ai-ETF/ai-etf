@@ -151,7 +151,7 @@ class DocumentProcessor:
                         # 清洗单元格，防止内部换行符破坏 Markdown 格式
                         clean_matrix = []
                         for row in table:
-                            clean_row = [str(cell).replace('\n', ' ').replace('|', '\\|').strip() if cell else "-" for cell in row]
+                            clean_row = [str(cell).replace('\n', ' ').replace('|', '\\|').strip() if cell is not None and str(cell).strip() != "" else "-" for cell in row]
                             clean_matrix.append(clean_row)
                         
                         # 将二维数组编译为标准的 Markdown 表格文本
