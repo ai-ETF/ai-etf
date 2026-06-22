@@ -91,16 +91,19 @@ CREATE POLICY "用户删除自己的文档" ON documents
 -- ============================================================
 ALTER TABLE document_chunks ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "用户查看自己文档的切片" ON document_chunks;
 CREATE POLICY "用户查看自己文档的切片" ON document_chunks
   FOR SELECT USING (
     document_id IN (SELECT id FROM documents WHERE user_id = auth.uid())
   );
 
+DROP POLICY IF EXISTS "用户创建自己文档的切片" ON document_chunks;
 CREATE POLICY "用户创建自己文档的切片" ON document_chunks
   FOR INSERT WITH CHECK (
     document_id IN (SELECT id FROM documents WHERE user_id = auth.uid())
   );
 
+DROP POLICY IF EXISTS "用户删除自己文档的切片" ON document_chunks;
 CREATE POLICY "用户删除自己文档的切片" ON document_chunks
   FOR DELETE USING (
     document_id IN (SELECT id FROM documents WHERE user_id = auth.uid())
