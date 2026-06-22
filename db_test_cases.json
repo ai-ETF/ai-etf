@@ -73,7 +73,7 @@
     "id": 11,
     "name": "级联删除-chat删除后messages清除",
     "test_type": "cascade_delete",
-    "setup_sql": "INSERT INTO chats (id, user_id, title) VALUES ('00000000-0000-0000-0000-000000000011', 'a6ee55ff-b59c-4c2b-bcdd-2519e7072aa1', '级联测试'); INSERT INTO messages (id, chat_id, role, content) VALUES ('00000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-000000000011', 'user', '测试消息');",
+    "setup_sql": "DELETE FROM messages WHERE id = '00000000-0000-0000-0000-000000000012'; DELETE FROM chats WHERE id = '00000000-0000-0000-0000-000000000011'; INSERT INTO chats (id, user_id, title) VALUES ('00000000-0000-0000-0000-000000000011', 'a6ee55ff-b59c-4c2b-bcdd-2519e7072aa1', '级联测试'); INSERT INTO messages (id, chat_id, role, content) VALUES ('00000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-000000000011', 'user', '测试消息');",
     "action_sql": "DELETE FROM chats WHERE id = '00000000-0000-0000-0000-000000000011';",
     "verify_sql": "SELECT COUNT(*) AS cnt FROM messages WHERE chat_id = '00000000-0000-0000-0000-000000000011';",
     "expected_result": 0,
