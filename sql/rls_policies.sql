@@ -7,18 +7,22 @@
 ALTER TABLE chats ENABLE ROW LEVEL SECURITY;
 
 -- 查看自己的会话
+DROP POLICY IF EXISTS "用户查看自己的会话" ON chats;
 CREATE POLICY "用户查看自己的会话" ON chats
   FOR SELECT USING (auth.uid() = user_id);
 
 -- 创建会话（user_id 必须是自己）
+DROP POLICY IF EXISTS "用户创建自己的会话" ON chats;
 CREATE POLICY "用户创建自己的会话" ON chats
   FOR INSERT WITH CHECK (auth.uid() = user_id);
 
 -- 更新自己的会话
+DROP POLICY IF EXISTS "用户更新自己的会话" ON chats;
 CREATE POLICY "用户更新自己的会话" ON chats
   FOR UPDATE USING (auth.uid() = user_id);
 
 -- 删除自己的会话
+DROP POLICY IF EXISTS "用户删除自己的会话" ON chats;
 CREATE POLICY "用户删除自己的会话" ON chats
   FOR DELETE USING (auth.uid() = user_id);
 
