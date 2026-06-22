@@ -67,12 +67,15 @@ CREATE POLICY "用户删除自己的文件" ON files
 -- ============================================================
 ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "用户查看自己的文档" ON documents;
 CREATE POLICY "用户查看自己的文档" ON documents
   FOR SELECT USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "用户创建自己的文档" ON documents;
 CREATE POLICY "用户创建自己的文档" ON documents
   FOR INSERT WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "用户删除自己的文档" ON documents;
 CREATE POLICY "用户删除自己的文档" ON documents
   FOR DELETE USING (auth.uid() = user_id);
 
