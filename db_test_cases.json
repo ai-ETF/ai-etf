@@ -83,7 +83,7 @@
     "id": 12,
     "name": "级联删除-message删除后message_chunks清除",
     "test_type": "cascade_delete",
-    "setup_sql": "INSERT INTO chats (id, user_id, title) VALUES ('00000000-0000-0000-0000-000000000013', 'a6ee55ff-b59c-4c2b-bcdd-2519e7072aa1', '级联测试2'); INSERT INTO messages (id, chat_id, role, content) VALUES ('00000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-000000000013', 'user', '测试消息2'); INSERT INTO message_chunks (id, message_id, chunk_id) VALUES ('00000000-0000-0000-0000-000000000015', '00000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-000000000001');",
+    "setup_sql": "DELETE FROM message_chunks WHERE id = '00000000-0000-0000-0000-000000000015' OR message_id = '00000000-0000-0000-0000-000000000014'; DELETE FROM messages WHERE id = '00000000-0000-0000-0000-000000000014'; DELETE FROM chats WHERE id = '00000000-0000-0000-0000-000000000013'; INSERT INTO chats (id, user_id, title) VALUES ('00000000-0000-0000-0000-000000000013', 'a6ee55ff-b59c-4c2b-bcdd-2519e7072aa1', '级联测试2'); INSERT INTO messages (id, chat_id, role, content) VALUES ('00000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-000000000013', 'user', '测试消息2'); INSERT INTO message_chunks (id, message_id, chunk_id) VALUES ('00000000-0000-0000-0000-000000000015', '00000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-000000000001');",
     "action_sql": "DELETE FROM messages WHERE id = '00000000-0000-0000-0000-000000000014';",
     "verify_sql": "SELECT COUNT(*) AS cnt FROM message_chunks WHERE message_id = '00000000-0000-0000-0000-000000000014';",
     "expected_result": 0,
