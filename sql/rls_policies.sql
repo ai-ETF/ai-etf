@@ -57,12 +57,15 @@ CREATE POLICY "用户删除自己的消息" ON messages
 -- ============================================================
 ALTER TABLE files ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "用户查看自己的文件" ON files;
 CREATE POLICY "用户查看自己的文件" ON files
   FOR SELECT USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "用户创建自己的文件" ON files;
 CREATE POLICY "用户创建自己的文件" ON files
   FOR INSERT WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "用户删除自己的文件" ON files;
 CREATE POLICY "用户删除自己的文件" ON files
   FOR DELETE USING (auth.uid() = user_id);
 
