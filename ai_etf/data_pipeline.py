@@ -24,7 +24,7 @@ except ImportError:
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
 logger = logging.getLogger(__name__)
 # 我们自己脚本中的必要业务日志，提升级别到 WARNING 以穿透上面的屏蔽
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.INFO) 
 # 给自有 logger 增加单独的 StreamHandler 使之能够在 WARNING 级别下依然打印 INFO 进度
 handler = logging.StreamHandler()
 handler.setLevel(logging.INFO)
@@ -123,9 +123,9 @@ class DocumentProcessor:
         if not HAS_RAPID_OCR:
             logger.warning("未安装 fitz 或 rapidocr_onnxruntime，直接走传统纯文本读取。")
             return self._extract_pdf_text_layer(pdf_path)
-
+            
         doc = fitz.open(pdf_path)
-
+        
         # 🚀 阶段二：开启独立表格结构化辅助引擎 (针对 ETF 招募书中的大量费率、持仓表格)
         try:
             plumber_pdf = pdfplumber.open(pdf_path)
@@ -133,12 +133,12 @@ class DocumentProcessor:
             plumber_pdf = None
 
         full_text = []
-
+        
         for page_num in range(len(doc)):
             page = doc[page_num]
             # 1. 优先尝试直接获取文本层 (适合原生PDF文件)
             text = page.get_text()
-
+            
             # --- 🚀 阶段二攻坚：检测并还原 Markdown 表格结构 ---
             table_md = ""
             if plumber_pdf and page_num < len(plumber_pdf.pages):
@@ -147,20 +147,20 @@ class DocumentProcessor:
                     for table in tables:
                         if not table or len(table) < 2:  # 忽略空表或只有一行的无意义表格
                             continue
-
+                        
                         # 清洗单元格，防止内部换行符破坏 Markdown 格式
                         clean_matrix = []
                         for row in table:
                             clean_row = [str(cell).replace('\n', ' ').replace('|', '\\|').strip() if cell else "-" for cell in row]
                             clean_matrix.append(clean_row)
-
+                        
                         # 将二维数组编译为标准的 Markdown 表格文本
                         headers = clean_matrix[0]
                         md_str = "\n\n| " + " | ".join(headers) + " |\n"
                         md_str += "|" + "|".join(["---"] * len(headers)) + "|\n"
                         for row in clean_matrix[1:]:
                             md_str += "| " + " | ".join(row) + " |\n"
-
+                        
                         table_md += md_str + "\n"
                         logger.info(f"[第{page_num+1}页] 成功捕获并结构化还原一张金融表格。")
                 except Exception as e:
@@ -173,14 +173,14 @@ class DocumentProcessor:
                 # 转换到 OCR 可用的格式 (BGR or numpy array)
                 import numpy as np
                 img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-
+                
                 # 如果是 RGBA, 剔除 Alpha通道
                 if pix.n == 4:
                     img_data = img_data[:, :, :3]
-
+                    
                 # RapidOCR 要求 BGR
-                img_bgr = img_data[:, :, ::-1]
-
+                img_bgr = img_data[:, :, ::-1] 
+                
                 try:
                     ocr_result, _ = ocr_engine(img_bgr)
                     if ocr_result:
@@ -189,18 +189,18 @@ class DocumentProcessor:
                         logger.info(f"[第{page_num+1}页] OCR 成功提取 {len(text)} 字符。")
                 except Exception as e:
                     logger.error(f"第 {page_num+1} 页 OCR 解析失败: {e}")
-
+            
             # --- 🚀 混合组装：将表格与文本缝合，防止财务数据丢失 ---
             if table_md:
                 text += "\n" + table_md
-
+                
             # 已移除 --- [Page x] --- 的强制追加，避免干扰切片
             full_text.append(text)
-
+            
         doc.close()
         if plumber_pdf:
             plumber_pdf.close()
-
+            
         return "\n\n".join(full_text)
 
     def process_file_content(self, file_path: str) -> str:
@@ -217,7 +217,7 @@ class DocumentProcessor:
             except Exception as e:
                 print(f"读取 MD 文件失败: {e}")
                 return ""
-
+                
         elif file_path.lower().endswith('.docx'):
             try:
                 try:
@@ -226,7 +226,7 @@ class DocumentProcessor:
                     logger.warning("正在为您自动安装 python-docx 以解析 Word 文档...")
                     os.system("pip install python-docx")
                     import docx
-
+                    
                 doc = docx.Document(file_path)
                 full_text = []
                 for para in doc.paragraphs:
@@ -236,7 +236,7 @@ class DocumentProcessor:
             except Exception as e:
                 print(f"读取 Word 文件失败: {e}")
                 return ""
-
+                
         elif file_path.lower().endswith('.pdf'):
             print(f"检测到 PDF 文件，正在使用 RapidOCR 混合图文解析引擎处理...")
             return self.extract_text(file_path)
@@ -252,7 +252,7 @@ class DocumentProcessor:
         chunks = []
         # 按单个换行符粗略按行读取
         lines = content.split('\n')
-
+        
         current_chunk_text = ""
         current_header = ""
 
@@ -260,7 +260,7 @@ class DocumentProcessor:
             line = line.strip()
             if not line:
                 continue
-
+                
             # 检测是否是 Markdown 标题 (例如 "# 基金介绍" 或 "## 1.1 收益率")
             if re.match(r'^#{1,6}\s', line):
                 # 遇到新标题时，如果上一个 chunk 已经积累了一些内容，先把它存起来
@@ -269,12 +269,12 @@ class DocumentProcessor:
                     context_chunk = f"{current_header}\n{current_chunk_text}" if current_header else current_chunk_text
                     chunks.append(context_chunk)
                     current_chunk_text = ""
-
+                
                 # 更新当前正在处理的标题
                 current_header = line
             else:
                 current_chunk_text += line + "\n"
-
+                
                 # 保护机制：如果某个章节的内容实在太长（超出了限制），也要在段落处切一刀
                 if len(current_chunk_text) > chunk_size_threshold:
                     context_chunk = f"{current_header}\n{current_chunk_text}" if current_header else current_chunk_text
@@ -285,7 +285,7 @@ class DocumentProcessor:
         if current_chunk_text:
             context_chunk = f"{current_header}\n{current_chunk_text}" if current_header else current_chunk_text
             chunks.append(context_chunk.strip())
-
+            
         return [c for c in chunks if len(c.strip()) > 10]
 
     def process_files(self, files_dict: dict, chunk_size_threshold: int = 500):
@@ -304,30 +304,30 @@ class DocumentProcessor:
                 print(f"正在处理文档: {doc_name} => {file_path} (resolved: {resolved_path}) [doc_type={doc_type}]")
             else:
                 print(f"正在处理文档: {doc_name} => {file_path} [doc_type={doc_type}]")
-
+            
             # 这里的 process_file_content 才是真正的 Router（路由器）
             content = self.process_file_content(resolved_path)
-
+            
             if not content:
                 print(f"【跳过】: 无法从 {file_path} 提取内容")
                 continue
-
+            
             # --- 🚀 匹配项目参报书核心创新点一与研究内容(2)：智能数据清洗与结构重建 ---
-
-            # 1. 精准移除"孤立页码"及页脚碎片 (如只有 197, 198 的行，消除低质量语料干扰)
+            
+            # 1. 精准移除“孤立页码”及页脚碎片 (如只有 197, 198 的行，消除低质量语料干扰)
             content = re.sub(r'^\s*\d+\s*$', '', content, flags=re.MULTILINE)
-
-            # 2. 伪造/重建 Markdown 语义树：由于 OCR 破坏了原生排版，我们利用正则将"第一章"等恢复为 Markdown 标题
+            
+            # 2. 伪造/重建 Markdown 语义树：由于 OCR 破坏了原生排版，我们利用正则将“第一章”等恢复为 Markdown 标题
             # 【修复】：移除了将 \d.\d (小数) 当作标题的伪造逻辑，这会摧毁所有的金融表格行并导致后续大面积文本被错误挂在假标题下！
-            content = re.sub(r'^\s*(第[一二三四五六七八九十百零0-9]+[章节篇部分]\s+[一-龥]+.*)$', r'# \1', content, flags=re.MULTILINE)
-            content = re.sub(r'^\s*([一二三四五六七八九十]+、\s*[一-龥]+.*)$', r'## \1', content, flags=re.MULTILINE)
-            content = re.sub(r'^\s*(（[一二三四五六七八九十]+）\s*[一-龥]+.*)$', r'### \1', content, flags=re.MULTILINE)
-
+            content = re.sub(r'^\s*(第[一二三四五六七八九十百零0-9]+[章节篇部分]\s+[\u4e00-\u9fa5]+.*)$', r'# \1', content, flags=re.MULTILINE)
+            content = re.sub(r'^\s*([一二三四五六七八九十]+、\s*[\u4e00-\u9fa5]+.*)$', r'## \1', content, flags=re.MULTILINE)
+            content = re.sub(r'^\s*(（[一二三四五六七八九十]+）\s*[\u4e00-\u9fa5]+.*)$', r'### \1', content, flags=re.MULTILINE)
+            
             # 为了防止当前 PDF 提取没有 Markdown 标题，我们兼容一下老版本的清理逻辑
-            content = re.sub(r'(?<=[一-龥])\s+(?=[一-龥])', '', content)
+            content = re.sub(r'(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])', '', content)
             content = re.sub(r'[ \t]+', ' ', content)
             content = re.sub(r'\n\s*\n', '\n', content)
-
+            
             # --- 核心大换血：调用语义切片器 ---
             chunks = self._markdown_semantic_chunking(content, chunk_size_threshold)
 
@@ -340,7 +340,7 @@ class DocumentProcessor:
                     "doc_type": doc_type,
                     "embedding": None
                 })
-
+            
             self.documents[doc_name] = doc_chunks
             print(f" --- [{doc_name}] 成功分割成 {len(chunks)} 个文本块！")
 
@@ -350,7 +350,7 @@ class DocumentProcessor:
         all_chunks = []
         for doc_name, chunks in self.documents.items():
             all_chunks.extend(chunks)
-
+        
         if not all_chunks:
             print("没有提取到任何文本块，终止向量化流程。")
             return
@@ -358,7 +358,7 @@ class DocumentProcessor:
         # 提取出所有的纯文本列，传入模型
         contents = [chunk["content"] for chunk in all_chunks]
         embeddings = embedding_model.encode(contents, normalize_embeddings=True)
-
+        
         # 将生成的向量 [0.03, -0.42...] 赋值回家
         idx = 0
         for doc_name, chunks in self.documents.items():
@@ -377,7 +377,7 @@ def upload_to_supabase(processor: DocumentProcessor):
     if not url or not key:
         print("\n取消上传: 环境中未配置 Supabase 凭证。")
         return
-
+        
     try:
         supabase: Client = create_client(url, key)
         print("\n成功连接到 Supabase 服务器！准备走完整个知识库入库流程...")
@@ -390,7 +390,7 @@ def upload_to_supabase(processor: DocumentProcessor):
 
     uploaded_docs = 0
     uploaded_chunks = 0
-
+        
     for doc_name, chunks in processor.documents.items():
         print(f"\n开始上传资料: 【{doc_name}】")
         try:
@@ -405,7 +405,7 @@ def upload_to_supabase(processor: DocumentProcessor):
                 "type": "file"
             }).execute()
             file_id = file_res.data[0]["id"]
-
+            
             # 步骤 2：在 documents 表中登记为待处理文档
             doc_res = supabase.table("documents").insert({
                 "file_id": file_id,
@@ -414,7 +414,7 @@ def upload_to_supabase(processor: DocumentProcessor):
                 "title": doc_name
             }).execute()
             document_id = doc_res.data[0]["id"]
-
+            
             # 步骤 3：把对应的 chunks 绑定到这个 document_id 写入
             upload_batch = []
             for index, chunk in enumerate(chunks):
@@ -430,7 +430,7 @@ def upload_to_supabase(processor: DocumentProcessor):
             if not upload_batch:
                 print(f"  -> 【{doc_name}】没有可写入的 embedding 切片，跳过")
                 continue
-
+            
             # 分批写入 chunks 表
             batch_size = 50
             total = len(upload_batch)
@@ -441,10 +441,10 @@ def upload_to_supabase(processor: DocumentProcessor):
 
             uploaded_docs += 1
             uploaded_chunks += total
-
+                
         except Exception as e:
             print(f"❌ 上传 【{doc_name}】 时出错: {e}")
-
+            
     if uploaded_docs:
         print(f"\n✅ 入库完成：文档 {uploaded_docs} 篇，切片 {uploaded_chunks} 条。")
     else:
@@ -456,26 +456,27 @@ if __name__ == "__main__":
     # 假设你在 ai-etf 根目录下运行代码 (python ai_etf/data_pipeline.py)
     # 如果运行报错找不到该文件，可以改为绝对路径或者 "../etf-knowledge/..."
     target_files = {
-        "华泰博瑞中证红利低波ETF招募书": ("etf-knowledge/huataiborui.pdf", "prospectus"),
-        "南方标普中国A股大盘红利低波50ETF招募书": ("etf-knowledge/nanfangbiaopu.pdf", "prospectus"),
-        "ETF大师投资策略-构建投资组合的最佳实践": ("etf-knowledge/ETF Master Investment Strategies.pdf", "other"),
-        "ETF新手快速入门": ("etf-knowledge/ETF新手快速入门.md", "guide"),
-        "ETF基础知识点": ("etf-knowledge/etf_basic_knowledge.md", "guide"),
-        "股息低波动策略_2026": ("etf-knowledge/dividend_low_volatility_strategy_2026.md", "strategy"),
-        "QDII ETF与跨境投资": ("etf-knowledge/etf_qdii_cross_border.md", "guide"),
-        "ETF税收规则详解": ("etf-knowledge/etf_tax_rules.md", "guide"),
-        "ETF交易规则详解": ("etf-knowledge/etf_trading_rules.md", "guide"),
-        "ETF与其他基金类型对比": ("etf-knowledge/etf_vs_other_funds.md", "guide"),
+        # "华泰博瑞中证红利低波ETF招募书": ("etf-knowledge/huataiborui.pdf", "prospectus"),
+        # "南方标普中国A股大盘红利低波50ETF招募书": ("etf-knowledge/nanfangbiaopu.pdf", "prospectus"),
+        # "ETF大师投资策略-构建投资组合的最佳实践": ("etf-knowledge/ETF Master Investment Strategies.pdf", "other"),
+        # "ETF新手快速入门": ("etf-knowledge/ETF新手快速入门.md", "guide"),
+        # "ETF基础知识点": ("etf-knowledge/etf_basic_knowledge.md", "guide"),
+        # "股息低波动策略_2026": ("etf-knowledge/dividend_low_volatility_strategy_2026.md", "strategy"),
+        # "QDII ETF与跨境投资": ("etf-knowledge/etf_qdii_cross_border.md", "guide"),
+        # "ETF税收规则详解": ("etf-knowledge/etf_tax_rules.md", "guide"),
+        # "ETF交易规则详解": ("etf-knowledge/etf_trading_rules.md", "guide"),
+        # "ETF与其他基金类型对比": ("etf-knowledge/etf_vs_other_funds.md", "guide"),
+        "恒生科技指数与ETF投资指南": ("etf-knowledge/hang_seng_tech_etf.md", "guide"),
     }
-
+    
     # 实例化我们的工厂
     pipeline = DocumentProcessor()
-
+    
     # 1. 解析纯文本并切块
     pipeline.process_files(target_files)
-
+    
     # 2. 调用大模型计算向量
     pipeline.generate_embeddings()
-
+    
     # 3. 将数据推送到 Supabase
     upload_to_supabase(pipeline)

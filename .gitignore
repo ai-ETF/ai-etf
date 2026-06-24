@@ -101,7 +101,7 @@ celerybeat.pid
 
 # Environments
 .env
-.venv-3.10.19/
+.venv
 env/
 venv/
 ENV/
@@ -143,11 +143,9 @@ Thumbs.db
 
 # Poetry
 .poetry/
-.venv/
 
-# Local models
-local_models/
-./local_models/
+# 个人工作文档
+任务TODO.md
 
-.claude/
-设计资料/
+# 知识库文件夹（本地存储，不上传）
+etf-knowledge/
