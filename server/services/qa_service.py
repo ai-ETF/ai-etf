@@ -41,7 +41,7 @@ class QAService:
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
         self.emb_repo = EmbeddingRepo()
         self.retriever = Retriever(self.emb_repo)
-
+        
         logger.debug("正在加载 Reranker 重排序模型... (大厂级 RAG 2.0 护城河)")
         try:
             # 引入智源科学院的 BAAI bge-reranker 专门用于中文 RAG 重排
@@ -50,7 +50,7 @@ class QAService:
         except Exception as e:
             logger.warning(f"Reranker 加载失败，将降级为基础模型检索：{e}")
             self.reranker = None
-
+            
         logger.debug(f"问答服务初始化完成，嵌入维度: {SETTINGS.EMBED_DIM}")
 
     def _normalize_question(self, question: str) -> str:
@@ -276,7 +276,7 @@ class QAService:
                 card["evidence"].append(text[:180].replace("\n", " "))
 
         return card
-
+        
     def _rerank_and_select(self, candidate_chunks, retrieval_query, top_k):
         """对候选 chunk 做 rerank 并返回 top_k 结果"""
         if not candidate_chunks or not getattr(self, "reranker", None):
@@ -355,11 +355,11 @@ class QAService:
     def handle_question(self, question: str, doc_id: str = None):
         """
         处理用户问题
-
+        
         参数:
             question: 用户的问题
             doc_id: 限制搜索范围的文档ID（可选）
-
+            
         返回:
             包含提示词、决策结果和相关文本块的字典
         """
@@ -368,7 +368,7 @@ class QAService:
 
         normalized_question = self._normalize_question(question)
         retrieval_query = self._build_retrieval_query(normalized_question)
-
+        
         # 分析问题意图和输出格式
         logger.debug("开始分析问题意图")
         decision: DecisionResult = self.agent.analyze(normalized_question)
@@ -397,16 +397,16 @@ class QAService:
             user_preference=None
         )
         logger.debug(f"输出格式分析完成，结果: {format_analysis}")
-
+        
         # 生成问题的嵌入向量
         logger.debug("生成问题嵌入向量")
         qvec = self.embedder.embed_text(retrieval_query)
         logger.debug(f"问题嵌入向量生成完成，维度: {len(qvec)}")
-
+        
         #TODO：封装一个类似的函数，以后可以直接调用打印预览
         # 打印向量预览，输出完整向量
         # logger.debug(f"问题向量完整内容: {qvec}")
-
+        
         # 检索相关文本块 (重排 RAG 2.0 护城河)
         initial_top_k = 100 if self._is_fee_question(normalized_question) else 20
         logger.debug(f"开始检索相关文本块，第一阶段扩大候选集 top_k: {initial_top_k}")
@@ -455,7 +455,7 @@ class QAService:
         }
         logger.debug("问答处理完成")
         return result
-
+    
 def format_prompt_for_log(prompt: str) -> str:
     if len(prompt) <= 600:
         return prompt
