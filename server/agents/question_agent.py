@@ -12,11 +12,11 @@ class QuestionAgent:
     def analyze(self, question: str, metadata: Optional[dict] = None) -> DecisionResult:
         """
         分析问题意图和输出格式
-
+        
         参数:
             question: 用户提出的问题
             metadata: 可选的元数据（当前未使用）
-
+            
         返回:
             DecisionResult: 包含意图、输出格式、top_k数量等信息的对象
         """
@@ -27,7 +27,7 @@ class QuestionAgent:
         top_k = 5  # 默认返回文本块数量
 
         logger.debug("开始检测问题意图...")
-
+        
         # 扩展的比较类关键词，包含各种口语化和模糊表达
         comparison_keywords = [
             # 中文明确比较
@@ -57,11 +57,11 @@ class QuestionAgent:
             "更好", "更优", "更合适", "更适合",  # 比较级
             "最", "最优", "最好", "最佳", "最强",  # 最高级
         ]
-
+        
         # 检测比较类问题
         # 首先检查是否包含明确的比较关键词
         has_comparison_keyword = any(keyword in q for keyword in comparison_keywords)
-
+        
         # 检查特定句式模式
         has_comparison_pattern = False
         comparison_patterns = [
@@ -78,12 +78,12 @@ class QuestionAgent:
             # 优劣势/优缺点
             lambda s: any(term in s for term in ["优劣", "优缺点", "优点缺点", "优势劣势"]),
         ]
-
+        
         for pattern in comparison_patterns:
             if pattern(q):
                 has_comparison_pattern = True
                 break
-
+        
         if has_comparison_keyword or has_comparison_pattern:
             logger.debug("检测到比较类问题")
             intent = "comparison"
@@ -109,7 +109,7 @@ class QuestionAgent:
             output_format = "text"
         else:
             logger.debug("问题类型为通用型")
-
+            
         logger.debug(f"意图分析完成，结果: intent={intent}, output_format={output_format}, top_k={top_k}")
 
         decision_result = DecisionResult(intent=intent, output_format=output_format, top_k=top_k, doc_filter=None)

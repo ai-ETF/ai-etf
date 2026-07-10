@@ -79,13 +79,13 @@ def _compute_ndcg(relevances, k=5):
     for i, rel in enumerate(relevances[:k]):
         if rel:
             dcg += 1.0 / math.log2(i + 2)
-
+    
     ideal_relevances = sorted(relevances[:k], reverse=True)
     idcg = 0.0
     for i, rel in enumerate(ideal_relevances):
         if rel:
             idcg += 1.0 / math.log2(i + 2)
-
+            
     return dcg / idcg if idcg > 0 else 0.0
 
 
@@ -96,15 +96,15 @@ def _compute_f1(predicted, expected):
         return 1.0
     if not preds or not exps:
         return 0.0
-
+    
     # 字符级 F1 计算
     pred_counter = Counter(preds)
     exp_counter = Counter(exps)
-
+    
     common = sum((pred_counter & exp_counter).values())
     if common == 0:
         return 0.0
-
+        
     precision = common / len(preds)
     recall = common / len(exps)
     return 2 * precision * recall / (precision + recall)
@@ -347,7 +347,7 @@ def main():
     print("==================================================")
     print("🚀 启动 RAG 第三阶段：混合检索与重排测试")
     print("==================================================")
-
+    
     # 1. 初始化 QA 服务 (这会自动触发 BAAI/bge-reranker 模型的下载和加载)
     print("\n[系统]: 正在初始化 QA Service (初次加载重排模型可能需要 1-2 分钟，请耐心等待)...")
     qa_service = QAService()

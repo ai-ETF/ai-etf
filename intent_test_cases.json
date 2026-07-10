@@ -1,0 +1,102 @@
+[
+  {
+    "id": 1,
+    "question": "ETF和股票有什么区别？",
+    "expected_intent": "comparison"
+  },
+  {
+    "id": 2,
+    "question": "恒生科技ETF和纳斯达克ETF哪个更好？",
+    "expected_intent": "comparison"
+  },
+  {
+    "id": 3,
+    "question": "ETF和LOF基金有什么不同？",
+    "expected_intent": "comparison"
+  },
+  {
+    "id": 4,
+    "question": "场内买ETF和场外买基金，哪个更划算？",
+    "expected_intent": "comparison"
+  },
+  {
+    "id": 5,
+    "question": "总结一下恒生科技指数的特点",
+    "expected_intent": "summary"
+  },
+  {
+    "id": 6,
+    "question": "概括一下ETF的交易规则",
+    "expected_intent": "summary"
+  },
+  {
+    "id": 7,
+    "question": "简述一下红利低波策略的核心思路",
+    "expected_intent": "summary"
+  },
+  {
+    "id": 8,
+    "question": "帮我总结一下ETF的税收政策",
+    "expected_intent": "summary"
+  },
+  {
+    "id": 9,
+    "question": "恒生科技ETF未来的走势会怎样？",
+    "expected_intent": "trend"
+  },
+  {
+    "id": 10,
+    "question": "红利低波ETF的发展前景如何？",
+    "expected_intent": "trend"
+  },
+  {
+    "id": 11,
+    "question": "你觉得科技板块未来的方向是什么？",
+    "expected_intent": "trend"
+  },
+  {
+    "id": 12,
+    "question": "ETF市场未来会怎么发展？",
+    "expected_intent": "trend"
+  },
+  {
+    "id": 13,
+    "question": "恒生科技ETF今天净值多少钱？",
+    "expected_intent": "factual_query"
+  },
+  {
+    "id": 14,
+    "question": "华夏恒生科技ETF的规模有多大？",
+    "expected_intent": "factual_query"
+  },
+  {
+    "id": 15,
+    "question": "南方标普ETF的收益率怎么样？",
+    "expected_intent": "factual_query"
+  },
+  {
+    "id": 16,
+    "question": "华泰柏瑞红利低波ETF今天涨跌幅多少？",
+    "expected_intent": "factual_query"
+  },
+  {
+    "id": 17,
+    "question": "什么是ETF？",
+    "expected_intent": "general"
+  },
+  {
+    "id": 18,
+    "question": "新手应该怎么入门ETF投资？",
+    "expected_intent": "general"
+  },
+  {
+    "id": 19,
+    "question": "买ETF需要注意哪些风险？",
+    "expected_intent": "general"
+  },
+  {
+    "id": 20,
+    "question": "ETF的申购赎回流程是怎样的？",
+    "expected_intent": "general"
+  }
+]

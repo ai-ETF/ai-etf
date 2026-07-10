@@ -1,0 +1,83 @@
+[
+  {
+    "name": "费率问答-口语简称",
+    "question": "华泰博瑞或者南方标普ETF的费率是多少？",
+    "relevance_terms": ["管理费", "托管费", "费率"],
+    "expected_rates": {
+      "management_fee": ["0.50%", "0.5%"],
+      "custody_fee": ["0.10%", "0.1%"]
+    }
+  },
+  {
+    "name": "费率问答-标准表达",
+    "question": "南方标普中国A股大盘红利低波50ETF的管理费和托管费是多少？",
+    "relevance_terms": ["管理费", "托管费", "费率"],
+    "expected_rates": {
+      "management_fee": ["0.50%", "0.5%"],
+      "custody_fee": ["0.10%", "0.1%"]
+    }
+  },
+  {
+    "name": "术语释义检索",
+    "question": "华泰柏瑞中证红利低波动ETF的基金托管人是谁？",
+    "relevance_terms": ["基金托管人", "中国建设银行", "释义"],
+    "expected_rates": {}
+  },
+  {
+    "name": "认购费用检索",
+    "question": "这个基金认购费怎么收？",
+    "relevance_terms": ["认购", "申购费", "费率"],
+    "expected_rates": {}
+  },
+  {
+    "name": "管理费单字段验证",
+    "question": "南方标普ETF管理费率是多少？",
+    "relevance_terms": ["管理费", "年费率"],
+    "expected_rates": {
+      "management_fee": ["0.50%", "0.5%"]
+    }
+  },
+  {
+    "name": "新手入门-ETF与股票区别",
+    "question": "ETF和股票有什么区别？",
+    "relevance_terms": ["ETF", "股票", "交易", "指数", "基金"],
+    "expected_rates": {}
+  },
+  {
+    "name": "新手入门-如何开户",
+    "question": "新手如何开户买ETF？",
+    "relevance_terms": ["开户", "证券", "账户", "买卖"],
+    "expected_rates": {}
+  },
+  {
+    "name": "新手入门-红利低波适合买吗",
+    "question": "红利低波ETF适合现在买入吗？",
+    "relevance_terms": ["红利", "低波", "定投", "配置"],
+    "expected_rates": {}
+  },
+  {
+    "name": "新手入门-ETF有什么优势",
+    "question": "ETF有什么优势？为什么推荐新手买ETF？",
+    "relevance_terms": ["分散", "成本", "费用", "优势", "交易"],
+    "expected_rates": {}
+  },
+  {
+    "name": "新手入门-如何挑选ETF",
+    "question": "该怎么挑选一只好的ETF？",
+    "relevance_terms": ["规模", "流动性", "跟踪误差", "费率"],
+    "expected_rates": {}
+  },
+  {
+    "name": "知识库外-比特币",
+    "question": "比特币怎么买？",
+    "relevance_terms": [],
+    "expected_rates": {}
+  },
+  {
+    "name": "越界-天气",
+    "question": "今天天气怎么样？",
+    "relevance_terms": [],
+    "expected_rates": {},
+    "expect_reject": true
+  }
+]
