@@ -191,6 +191,57 @@ class QAService:
         lines.append("\n# 指令:\n请根据以上事实数据，用简洁自然的语言回答用户问题。直接给出准确数字，不要模糊表述。")
         return "\n".join(lines)
 
+    def _build_market_prompt(self, question: str, data: dict) -> str:
+        """构建行情数据 prompt（新增）"""
+        return f"""# 问题:
+{question}
+
+# 实时行情数据（来自金融 API）:
+- 基金名称: {data.get('name', '')} ({data.get('code', '')})
+- 最新价: {data.get('price', 0)} 元
+- 涨跌幅: {data.get('change_pct', 0)}%
+- 涨跌额: {data.get('change', 0)} 元
+- 昨收: {data.get('prev_close', 0)} 元
+
+# 日内行情:
+- 今开: {data.get('open', 0)} 元
+- 最高: {data.get('high', 0)} 元
+- 最低: {data.get('low', 0)} 元
+- 振幅: {data.get('amplitude', 0)}%
+
+# 成交数据:
+- 成交量: {data.get('volume', 0):,.0f} 份
+- 成交额: {data.get('amount', 0):,.0f} 元
+- 换手率: {data.get('turnover_rate', 0)}%
+
+# 盘口:
+- 买一: {data.get('bid_price', 0)} 元
+- 卖一: {data.get('ask_price', 0)} 元
+- 委比: {data.get('order_ratio', 0)}%
+
+# 资金流向:
+- 主力净流入: {data.get('main_inflow', 0):,.0f} 元 ({data.get('main_inflow_pct', 0)}%)
+
+# 指令:
+请用简洁自然的语言回答用户问题。重点说明涨跌幅和价格变化。
+数据更新时间: {data.get('update_time', '')}
+"""
+
+    def _build_ranking_prompt(self, question: str, results: list) -> str:
+        """构建榜单 prompt（新增）"""
+        sort_label = "涨幅" if not any(k in question for k in ["跌", "跌幅"]) else "跌幅"
+        lines = [f"# 问题:\n{question}\n\n# ETF{sort_label}榜（来自金融 API）:", ""]
+        lines.append("| 排名 | 代码 | 名称 | 最新价 | 涨跌幅(%) | 成交额 |")
+        lines.append("|------|------|------|--------|-----------|--------|")
+        for i, item in enumerate(results, 1):
+            amount_str = f"{item.get('amount', 0) / 1e8:.2f}亿" if item.get('amount', 0) > 1e8 else f"{item.get('amount', 0) / 1e4:.2f}万"
+            lines.append(
+                f"| {i} | {item.get('code', '')} | {item.get('name', '')} | "
+                f"{item.get('price', 0):.3f} | {item.get('change_pct', 0):.2f} | {amount_str} |"
+            )
+        lines.append(f"\n# 指令:\n请根据以上{sort_label}榜数据，用简洁自然的语言回答用户问题。可以突出前3名的关键数据。")
+        return "\n".join(lines)
+
     def _boost_by_doc_type(self, chunks: list, question: str) -> list:
         """对事实类问题（费率等），给专业文档类型的 chunk 加权"""
         if not self._is_fee_question(question):
@@ -388,6 +439,35 @@ class QAService:
                     "source": "api",
                 }
             logger.debug("API 查询失败，降级到 RAG")
+
+        # P2: 行情查询走 API（实时行情）（新增）
+        if decision.intent == "market_query":
+            api_result = self.finance_api.query(normalized_question)
+            if api_result:
+                logger.debug(f"行情API查询成功: {api_result.get('name', '')}")
+                return {
+                    "prompt": self._build_market_prompt(normalized_question, api_result),
+                    "decision": decision,
+                    "top_chunks": [],
+                    "format_analysis": {"primary_format": "text"},
+                    "fee_card": {"is_fee_question": False},
+                    "source": "api",
+                }
+            logger.debug("行情API查询失败，降级到 RAG")
+
+        # P2: 榜单查询（新增）
+        if decision.intent == "ranking_query":
+            # 解析排序方向：含"跌"字按跌幅排序，否则按涨幅排序
+            ascending = "跌" in normalized_question
+            results = self.finance_api.query_ranking(ascending=ascending, top_n=decision.top_k)
+            return {
+                "prompt": self._build_ranking_prompt(normalized_question, results),
+                "decision": decision,
+                "top_chunks": [],
+                "format_analysis": {"primary_format": "table"},
+                "fee_card": {"is_fee_question": False},
+                "source": "api",
+            }
 
         # 使用输出格式智能体分析输出格式
         logger.debug("使用输出格式智能体分析输出格式")

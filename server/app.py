@@ -51,6 +51,8 @@ init_logging()
 from server.api.upload import router as upload_router
 from server.api.ask import router as ask_router
 from server.api.test import router as test_router  # 添加test路由
+from server.api.market import router as market_router  # 添加market路由（新增）
+from server.api.watchlist import router as watchlist_router  # 添加watchlist路由（新增）
 from server.config.settings import SETTINGS
 
 logger = logging.getLogger(__name__)
@@ -90,6 +92,8 @@ app.add_middleware(
 app.include_router(upload_router, prefix="/api", tags=["upload"])
 app.include_router(ask_router, prefix="/api", tags=["ask"])
 app.include_router(test_router, prefix="/api", tags=["test"])  # 重新添加test路由
+app.include_router(market_router, prefix="/api/market", tags=["market"])  # 添加market路由（新增）
+app.include_router(watchlist_router, prefix="/api/watchlist", tags=["watchlist"])  # 添加watchlist路由（新增）
 
 @app.get("/")
 def read_root():

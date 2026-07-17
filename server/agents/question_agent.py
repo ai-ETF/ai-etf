@@ -101,6 +101,19 @@ class QuestionAgent:
             intent = "trend"
             top_k = 6  # 趋势类问题需要适中数量的文本块
             output_format = "text"
+        # 检测榜单查询类问题（新增）- 必须在行情查询之前
+        # 注意：榜单查询优先级要高于行情查询，否则"涨幅榜"会被误判为行情查询
+        elif any(k in q for k in ["涨幅榜", "跌幅榜", "排行榜", "etf排名", "涨得最多", "跌得最多", "涨幅最大", "跌幅最大", "涨幅前", "跌幅前", "榜单"]):
+            logger.debug("检测到榜单查询类问题")
+            intent = "ranking_query"
+            top_k = 10
+            output_format = "table"
+        # 检测行情查询类问题（新增）
+        elif any(k in q for k in ["涨跌幅", "涨幅", "跌幅", "现在价格", "实时", "行情", "涨多少", "跌多少", "现在多少钱"]):
+            logger.debug("检测到行情查询类问题")
+            intent = "market_query"
+            top_k = 3
+            output_format = "text"
         # 检测事实查询类问题（可通过 API 直接回答）
         elif any(k in q for k in ["净值", "规模", "收益率", "涨跌幅", "多少钱", "价格"]):
             logger.debug("检测到事实查询类问题")
