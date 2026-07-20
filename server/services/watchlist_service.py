@@ -31,9 +31,8 @@ class WatchlistService:
         return self._client
 
     def _ensure_table(self):
-        """确保 watchlist 表存在（延迟创建）"""
-        # 实际创建在首次操作时进行
-        pass
+        """确保 watchlist 表存在（如不存在则提示用户手动创建）"""
+        self._create_table_if_not_exists()
 
     def _create_table_if_not_exists(self):
         """创建 watchlist 表（如果不存在）"""
