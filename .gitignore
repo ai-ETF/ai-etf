@@ -150,3 +150,4 @@ Thumbs.db
 # 知识库文件夹（本地存储，不上传）
 etf-knowledge/local_models/
 .env
+.local_models

@@ -7,10 +7,10 @@ import json
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(prefix="/upload", tags=["upload"])
 
 
-@router.post("/upload", response_model=UploadResponse)
+@router.post("", response_model=UploadResponse)
 async def upload(req: UploadRequest):
     logger.debug(f"收到上传请求，URL: {req.url}, 来源: {req.source}")
     svc = DocumentService()

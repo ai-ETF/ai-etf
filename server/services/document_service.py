@@ -11,7 +11,7 @@ from server.rag.embedder import Embedder
 from server.storage.document_repo import DocumentRepo
 from server.storage.embedding_repo import EmbeddingRepo
 from server.config.settings import SETTINGS
-from server.agents.document_agent import DocumentAgent
+from server.graphs.document.graph import run_document_analysis
 from server.storage.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ class PDFProcessor(DocumentProcessor):
             
             return text
         except ImportError:
-            logger.error("❌ pypdf库未安装，请运行: pip install pypdf")
+            logger.error("pypdf库未安装，请运行: poetry add pypdf")
             raise
         except Exception as e:
             logger.error(f"❌ PDF处理失败: {e}")
@@ -148,7 +148,6 @@ class DocumentService:
         self.doc_repo = DocumentRepo()
         self.emb_repo = EmbeddingRepo()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
-        self.document_agent = DocumentAgent()  # 添加DocumentAgent实例
         self.supabase = get_supabase()
         
         # 创建文档存储目录：如果有的话会直接跳过
@@ -207,7 +206,7 @@ class DocumentService:
         # === 步骤5: 使用DocumentAgent分析文档类型和结构 ===
         logger.debug("5️⃣ 使用DocumentAgent分析文档...")
         text_content = self._decode_content(content)  # 先解码内容以供分析
-        analysis_result = self.document_agent.analyze(text_content)
+        analysis_result = run_document_analysis(text_content)
         doc_type = analysis_result["document_type"]
         logger.debug(f"  文档类型分析结果: {doc_type}，置信度: {analysis_result['confidence']:.2f}")
         
@@ -269,7 +268,7 @@ class DocumentService:
             # 步骤 3: 使用DocumentAgent分析文档类型和结构
             logger.debug("3️⃣ 使用DocumentAgent分析文档...")
             text_content = self._decode_content(content)  # 先解码内容以供分析
-            analysis_result = self.document_agent.analyze(text_content)
+            analysis_result = run_document_analysis(text_content)
             analyzed_doc_type = analysis_result["document_type"]
             logger.debug(f"  文档类型分析结果: {analyzed_doc_type}，置信度: {analysis_result['confidence']:.2f}")
 
