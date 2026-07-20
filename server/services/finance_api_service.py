@@ -934,8 +934,8 @@ class FinanceApiService:
 
         # 模拟生成约240个时间点（A股4小时交易 = 240分钟）
         import random
-        random.seed(hash(fund_code) % 10000)  # 固定种子使结果可复现
-
+        import hashlib
+        random.seed(int(hashlib.md5(fund_code.encode("utf-8")).hexdigest(), 16) % 10000)  # 固定种子使结果可复现
         num_points = 240
         # 用正弦曲线模拟价格走势
         import math
