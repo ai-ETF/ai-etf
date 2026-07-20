@@ -128,15 +128,11 @@ CREATE INDEX IF NOT EXISTS idx_watchlist_code ON watchlist(fund_code);
                 }
 
             # 插入新记录
-            actual_user_id = self._resolve_user_id(user_id)
-
             data = {
                 "user_id": actual_user_id,
                 "fund_code": fund_code,
                 "fund_name": fund_name,
                 "sort_order": 0,
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
             }
 
             result = self.client.table(self.TABLE_NAME).insert(data).execute()
