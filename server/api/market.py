@@ -243,7 +243,7 @@ async def get_intraday(fund_code: str):
         if not spot:
             raise HTTPException(status_code=404, detail=f"未找到基金代码: {fund_code}")
         items = svc.query_intraday(fund_code)
-        ds = "simulated" if (items and items[0].get("time","").startswith("09")) else "real"
+        ds = "real" if (items and "amount" in items[0]) else "simulated"
         return IntradayResponse(
             code=fund_code, name=spot.get("name",""),
             date=spot.get("data_date",""), prev_close=spot.get("prev_close",0),
