@@ -2,7 +2,7 @@
 name = "test-read-two-pdf"
 version = "0.1.0"
 description = "AI-ETF 是一个使用人工智能技术分析交易所交易基金(ETF)的项目"
-authors = ["Your Name <your.email@example.com>"]
+authors = [{name = "Your Name", email = "your.email@example.com"}]
 
 [tool.poetry.dependencies]
 python = "^3.10"
