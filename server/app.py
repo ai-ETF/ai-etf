@@ -3,6 +3,9 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
+import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 def init_logging():
     """初始化日志系统"""
@@ -79,9 +82,42 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("JWT Secret 配置检查通过")
 
+    # 启动定时刷新行情缓存任务
+    from server.services.finance_api_service import FinanceApiService
+    scheduler = AsyncIOScheduler()
+
+    # 统一定时任务：每30秒检查并刷新（refresh_spot_cache 内部根据交易时段决定是否实际拉取）
+    # 非交易时段：跳过刷新（保留旧缓存），避免无效拉取
+    scheduler.add_job(
+        FinanceApiService.refresh_spot_cache,
+        trigger=IntervalTrigger(seconds=30),
+        id="refresh_etf_spot",
+        name="刷新ETF全量行情缓存（交易时段30s/非交易时段跳过）",
+        replace_existing=True,
+    )
+    logger.info("ETF行情定时刷新任务已注册（每30秒检测一次）")
+
+    scheduler.start()
+
+    # 立即执行第一次热加载（不阻塞启动）
+    asyncio.ensure_future(_warmup_cache())
+
     yield  # 应用在此处运行
 
+    scheduler.shutdown(wait=False)
+    logger.info("ETF行情定时刷新任务已停止")
     logger.info("应用关闭")
+
+
+async def _warmup_cache():
+    """启动时异步预热行情缓存"""
+    from server.services.finance_api_service import FinanceApiService
+    logger.info("[预热] 开始首次全量行情加载...")
+    success = FinanceApiService.refresh_spot_cache()
+    if success:
+        logger.info("[预热] 全量行情加载完成")
+    else:
+        logger.warning("[预热] 全量行情加载失败，将等待定时任务重试")
 
 
 # 创建FastAPI应用实例

@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 import re
 import time
 from typing import Optional, Dict, List
@@ -6,6 +8,25 @@ from typing import Optional, Dict, List
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# K线文件缓存目录
+KLINE_CACHE_DIR = "/tmp/etf_kline_cache"
+KLINE_CACHE_TTL = 86400  # 一天过期
+
+# 判断是否交易时段
+def _is_trading_time() -> bool:
+    """判断当前是否为A股交易时段（9:30-15:00，工作日）"""
+    import datetime
+    now = datetime.datetime.now()
+    # 周末
+    if now.weekday() >= 5:  # 5=周六, 6=周日
+        return False
+    # 9:30 ~ 15:00
+    if now.hour < 9 or (now.hour == 9 and now.minute < 30):
+        return False
+    if now.hour >= 15:
+        return False
+    return True
 
 
 class FinanceApiService:
@@ -23,27 +44,40 @@ class FinanceApiService:
         "华泰柏瑞沪深300": "510300",
     }
 
-    # 实时行情缓存（全量数据较大，缓存5秒）
+    # 实时行情缓存（全量数据较大，缓存30秒）
     _spot_cache: Optional[pd.DataFrame] = None
     _spot_cache_time: float = 0
-    CACHE_TTL = 5  # 缓存有效期（秒）
+    CACHE_TTL = 30  # 缓存有效期（秒），盘中30秒刷新一次足够
+
+    # 基金列表缓存（类级别，全生命周期共享）
+    _fund_list_cache: Optional[list] = None
+    _fund_list_cache_time: float = 0
+    FUND_LIST_CACHE_TTL = 3600  # 基金列表变化极小，缓存1小时
 
     def __init__(self):
-        self._fund_list_cache: Optional[list] = None
+        pass
 
     def _get_fund_list(self) -> list:
-        """获取全量 ETF 基金列表（带缓存）"""
-        if self._fund_list_cache is not None:
+        """获取全量 ETF 基金列表（带类级别缓存，最多1小时刷新一次）"""
+        now = time.time()
+        if (
+            self._fund_list_cache is not None
+            and (now - self._fund_list_cache_time) < self.FUND_LIST_CACHE_TTL
+        ):
             return self._fund_list_cache
+
         try:
             import akshare as ak
+            logger.info("正在加载全量基金列表...")
             df = ak.fund_name_em()
             # 列: 基金代码, 拼音缩写, 基金简称, 基金类型, 拼音全称
-            self._fund_list_cache = df.values.tolist()
+            FinanceApiService._fund_list_cache = df.values.tolist()
+            FinanceApiService._fund_list_cache_time = now
             logger.info(f"基金列表加载成功，共 {len(self._fund_list_cache)} 只基金")
         except Exception as e:
             logger.error(f"加载基金列表失败: {e}")
-            self._fund_list_cache = []
+            if self._fund_list_cache is None:
+                FinanceApiService._fund_list_cache = []
         return self._fund_list_cache
 
     def _resolve_fund_code(self, fund_name: str) -> Optional[str]:
@@ -232,12 +266,16 @@ class FinanceApiService:
             import akshare as ak
             logger.info("正在获取全量ETF实时行情...")
             df = ak.fund_etf_spot_em()
-            self._spot_cache = df
-            self._spot_cache_time = now
+            FinanceApiService._spot_cache = df
+            FinanceApiService._spot_cache_time = now
             logger.info(f"获取实时行情成功，共 {len(df)} 只ETF")
             return df
         except Exception as e:
             logger.error(f"获取实时行情失败: {e}")
+            # 缓存未过期时，即使失败也返回旧缓存
+            if self._spot_cache is not None:
+                logger.info("使用旧缓存数据兜底")
+                return self._spot_cache
             return pd.DataFrame()
 
     def query_spot(self, fund_code: str) -> Optional[Dict]:
@@ -383,65 +421,64 @@ class FinanceApiService:
         limit: int = None
     ) -> List[Dict]:
         """
-        查询ETF历史K线数据
+        查询ETF历史K线数据（带文件缓存，历史数据只增不改，可缓存1天）
 
         参数:
             fund_code: 基金代码（如 "512890"）
-            period: K线周期，可选值：
-                - "daily": 日K线（默认）
-                - "weekly": 周K线
-                - "monthly": 月K线
-            start_date: 起始日期（格式：2024-01-01），可选
-            end_date: 结束日期（格式：2024-12-31），可选
-            limit: 返回数据条数限制，可选
+            period: K线周期（daily/weekly/monthly）
+            start_date: 起始日期
+            end_date: 结束日期
+            limit: 返回数据条数限制
 
         返回:
-            K线数据列表，每条包含：日期、开盘、收盘、最高、最低、成交量、成交额、振幅、涨跌幅、涨跌额、换手率
+            K线数据列表
         """
-        try:
-            import akshare as ak
-            logger.info(f"查询K线数据: {fund_code}, period={period}")
-
-            # 调用 AkShare API
-            df = ak.fund_etf_hist_em(symbol=fund_code, period=period, adjust='')
-
-            if df.empty:
-                logger.warning(f"K线数据为空: {fund_code}")
+        # 尝试从文件缓存读取
+        cached = self._load_kline_cache(fund_code, period)
+        if cached is not None:
+            df = cached
+        else:
+            try:
+                import akshare as ak
+                logger.info(f"查询K线数据: {fund_code}, period={period}")
+                df = ak.fund_etf_hist_em(symbol=fund_code, period=period, adjust='')
+                if df.empty:
+                    logger.warning(f"K线数据为空: {fund_code}")
+                    return []
+                self._save_kline_cache(fund_code, period, df)
+            except Exception as e:
+                logger.error(f"查询K线数据失败: {e}")
                 return []
 
-            # 日期过滤
-            if start_date:
-                df = df[df['日期'] >= start_date]
-            if end_date:
-                df = df[df['日期'] <= end_date]
+        # 日期过滤
+        if start_date:
+            df = df[df['日期'] >= start_date]
+        if end_date:
+            df = df[df['日期'] <= end_date]
 
-            # 数量限制
-            if limit:
-                df = df.tail(limit)
+        # 数量限制
+        if limit:
+            df = df.tail(limit)
 
-            # 转换为列表
-            results = []
-            for _, row in df.iterrows():
-                results.append({
-                    "date": str(row['日期']),
-                    "open": float(row['开盘']),
-                    "close": float(row['收盘']),
-                    "high": float(row['最高']),
-                    "low": float(row['最低']),
-                    "volume": float(row['成交量']),
-                    "amount": float(row['成交额']),
-                    "amplitude": float(row['振幅']),
-                    "change_pct": float(row['涨跌幅']),
-                    "change": float(row['涨跌额']),
-                    "turnover_rate": float(row['换手率']),
-                })
+        # 转换为列表
+        results = []
+        for _, row in df.iterrows():
+            results.append({
+                "date": str(row['日期']),
+                "open": float(row['开盘']),
+                "close": float(row['收盘']),
+                "high": float(row['最高']),
+                "low": float(row['最低']),
+                "volume": float(row['成交量']),
+                "amount": float(row['成交额']),
+                "amplitude": float(row['振幅']),
+                "change_pct": float(row['涨跌幅']),
+                "change": float(row['涨跌额']),
+                "turnover_rate": float(row['换手率']),
+            })
 
-            logger.info(f"返回K线数据: {len(results)} 条")
-            return results
-
-        except Exception as e:
-            logger.error(f"查询K线数据失败: {e}")
-            return []
+        logger.info(f"返回K线数据: {len(results)} 条")
+        return results
 
     def query_kline_by_name(
         self,
@@ -864,6 +901,44 @@ class FinanceApiService:
         except (ValueError, TypeError):
             return None
 
+    # ==================== K线文件缓存方法 ====================
+
+    @staticmethod
+    def _kline_cache_path(fund_code: str, period: str) -> str:
+        """K线缓存文件路径"""
+        os.makedirs(KLINE_CACHE_DIR, exist_ok=True)
+        safe_code = fund_code.replace("/", "_")
+        return f"{KLINE_CACHE_DIR}/{safe_code}_{period}.json"
+
+    @staticmethod
+    def _load_kline_cache(fund_code: str, period: str) -> Optional[pd.DataFrame]:
+        """从文件加载K线缓存，过期返回 None"""
+        path = FinanceApiService._kline_cache_path(fund_code, period)
+        try:
+            if not os.path.exists(path):
+                return None
+            mtime = os.path.getmtime(path)
+            if time.time() - mtime > KLINE_CACHE_TTL:
+                logger.debug(f"K线缓存过期: {fund_code} {period}")
+                os.remove(path)
+                return None
+            df = pd.read_json(path, orient="split")
+            logger.info(f"K线缓存命中: {fund_code} {period} ({len(df)} 条)")
+            return df
+        except Exception as e:
+            logger.warning(f"K线缓存读取失败: {e}")
+            return None
+
+    @staticmethod
+    def _save_kline_cache(fund_code: str, period: str, df: pd.DataFrame) -> None:
+        """将K线数据保存到文件缓存"""
+        path = FinanceApiService._kline_cache_path(fund_code, period)
+        try:
+            df.to_json(path, orient="split", force_ascii=False)
+            logger.info(f"K线缓存已保存: {path} ({len(df)} 条)")
+        except Exception as e:
+            logger.warning(f"K线缓存保存失败: {e}")
+
     # ==================== 分时图数据方法（新增） ====================
 
     def query_intraday(self, fund_code: str) -> List[Dict]:
@@ -1054,3 +1129,31 @@ class FinanceApiService:
 
         logger.info(f"查询资金流向榜: top_n={top_n}, 返回 {len(results)} 条")
         return results
+
+    # ==================== 定时刷新方法（新增） ====================
+
+    @classmethod
+    def refresh_spot_cache(cls) -> bool:
+        """
+        强制刷新全量ETF实时行情缓存（供定时任务调用）。
+
+        交易时段（工作日 9:30-15:00）每30秒拉取一次最新数据。
+        非交易时段跳过实际拉取，保留现有缓存，避免无效网络请求。
+        """
+        import akshare as ak
+        if not _is_trading_time():
+            logger.debug("[定时任务] 非交易时段，跳过刷新")
+            return True  # 返回 True 表示缓存仍有效
+
+        try:
+            now = time.time()
+            logger.info(f"[定时任务] 正在刷新全量ETF实时行情...")
+            df = ak.fund_etf_spot_em()
+            cls._spot_cache = df
+            cls._spot_cache_time = now
+            logger.info(f"[定时任务] 刷新成功，共 {len(df)} 只ETF")
+            return True
+        except Exception as e:
+            logger.error(f"[定时任务] 刷新失败: {e}")
+            # 保留旧缓存不覆盖
+            return False
