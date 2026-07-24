@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
@@ -54,6 +54,7 @@ from server.api.test import router as test_router  # 添加test路由
 from server.api.market import router as market_router  # 添加market路由（新增）
 from server.api.watchlist import router as watchlist_router  # 添加watchlist路由（新增）
 from server.api.secure_chat import router as secure_chat_router  # 添加secure_chat路由（JWT认证）
+from server.auth import get_current_user
 from server.config.settings import SETTINGS
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,12 @@ async def lifespan(app: FastAPI):
         logger.error(error_msg)
         raise RuntimeError(error_msg)
     logger.info("Supabase连接验证成功")
+
+    # 检查 JWT Secret 配置
+    if not SETTINGS.SUPABASE_JWT_SECRET:
+        logger.warning("SUPABASE_JWT_SECRET 未配置，JWT 认证将无法工作")
+    else:
+        logger.info("JWT Secret 配置检查通过")
 
     yield  # 应用在此处运行
 
@@ -93,8 +100,8 @@ app.add_middleware(
 app.include_router(upload_router, prefix="/api", tags=["upload"])
 app.include_router(ask_router, prefix="/api", tags=["ask"])
 app.include_router(test_router, prefix="/api", tags=["test"])  # 重新添加test路由
-app.include_router(market_router, prefix="/api/market", tags=["market"])  # 添加market路由（新增）
-app.include_router(watchlist_router, prefix="/api/watchlist", tags=["watchlist"])  # 添加watchlist路由（新增）
+app.include_router(market_router, prefix="/api/market", tags=["market"], dependencies=[Depends(get_current_user)])  # 添加market路由（新增）
+app.include_router(watchlist_router, prefix="/api/watchlist", tags=["watchlist"], dependencies=[Depends(get_current_user)])  # 添加watchlist路由（新增）
 app.include_router(secure_chat_router, prefix="/api", tags=["secure-chat"])  # 添加secure_chat路由（JWT认证）
 
 @app.get("/")

@@ -8,11 +8,11 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from server.auth.jwt_handler import verify_supabase_token
+from server.auth import get_current_user
 from server.llm import get_llm
 from server.storage.chat_repo import get_chat_repo
 from server.storage.supabase_client import get_supabase
@@ -21,31 +21,6 @@ from server.utils.sse import format_sse_event, create_sse_stream_response
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/secure-chat", tags=["secure-chat"])
-
-
-# ========== 认证依赖 ==========
-
-
-async def get_current_user(authorization: str = Header(...)) -> str:
-    """
-    从 Authorization header 中提取并验证 JWT，返回 user_id（Supabase UUID）。
-
-    前端请求格式：Authorization: Bearer eyJhbGci...
-    """
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="认证格式错误，应为 Bearer <token>")
-
-    token = authorization[7:]  # 去掉 "Bearer " 前缀
-    payload = verify_supabase_token(token)
-
-    if not payload:
-        raise HTTPException(status_code=401, detail="令牌无效或已过期")
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="令牌中未包含用户信息")
-
-    return user_id
 
 
 # ========== 请求/响应模型 ==========
