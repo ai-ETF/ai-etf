@@ -7,6 +7,9 @@ from typing import Optional, Dict, List
 
 import pandas as pd
 
+# _format_spot_data 中 safe_float/safe_str 需要 pandas.notna
+# 榜单/搜索/分类等遍历方法改为操作 _spot_dict.values()，不再依赖 DataFrame
+
 logger = logging.getLogger(__name__)
 
 # K线文件缓存目录
@@ -44,10 +47,10 @@ class FinanceApiService:
         "华泰柏瑞沪深300": "510300",
     }
 
-    # 实时行情缓存（全量数据较大，缓存30秒）
-    _spot_cache: Optional[pd.DataFrame] = None
+    # 代码→行情哈希表（唯一缓存，O(1) 查询）
+    _spot_dict: Optional[dict[str, dict]] = None  # {"512890": {...行情dict...}, ...}
     _spot_cache_time: float = 0
-    CACHE_TTL = 30  # 缓存有效期（秒），盘中30秒刷新一次足够
+    CACHE_TTL = 30  # 缓存有效期（秒），盘中30秒刷新一次
 
     # 基金列表缓存（类级别，全生命周期共享）
     _fund_list_cache: Optional[list] = None
@@ -253,34 +256,41 @@ class FinanceApiService:
         match = re.search(r"(\d+(?:\.\d+)?)\s*%", rate_str)
         return f"{match.group(1)}%" if match else rate_str
 
-    # ==================== 实时行情查询方法（新增） ====================
+    # ==================== 实时行情缓存（哈希表） ====================
 
-    def _get_spot_data(self) -> pd.DataFrame:
-        """获取全量ETF实时行情（带缓存）"""
+    @classmethod
+    def _ensure_spot_dict(cls) -> dict[str, dict]:
+        """获取全量行情哈希表（惰性加载+缓存），返回 代码→行情dict 的映射"""
         now = time.time()
-        if self._spot_cache is not None and (now - self._spot_cache_time) < self.CACHE_TTL:
-            logger.debug(f"使用缓存的实时行情数据（缓存时间: {self.CACHE_TTL}秒）")
-            return self._spot_cache
+        if cls._spot_dict is not None and (now - cls._spot_cache_time) < cls.CACHE_TTL:
+            return cls._spot_dict
 
         try:
             import akshare as ak
             logger.info("正在获取全量ETF实时行情...")
             df = ak.fund_etf_spot_em()
-            FinanceApiService._spot_cache = df
-            FinanceApiService._spot_cache_time = now
-            logger.info(f"获取实时行情成功，共 {len(df)} 只ETF")
-            return df
+            cls._rebuild_spot_dict(df)
+            cls._spot_cache_time = now
+            logger.info(f"获取实时行情成功，共 {len(cls._spot_dict)} 只ETF")
         except Exception as e:
             logger.error(f"获取实时行情失败: {e}")
-            # 缓存未过期时，即使失败也返回旧缓存
-            if self._spot_cache is not None:
-                logger.info("使用旧缓存数据兜底")
-                return self._spot_cache
-            return pd.DataFrame()
+
+        return cls._spot_dict or {}
+
+    @classmethod
+    def _rebuild_spot_dict(cls, df: pd.DataFrame) -> None:
+        """从 DataFrame 构建 代码→行情 哈希表"""
+        d = {}
+        for _, row in df.iterrows():
+            code = str(row.get('代码', ''))
+            if code:
+                d[code] = cls._format_spot_data(row)
+        cls._spot_dict = d
+        logger.debug(f"哈希表构建完成，共 {len(d)} 只ETF")
 
     def query_spot(self, fund_code: str) -> Optional[Dict]:
         """
-        查询单只ETF实时行情
+        查询单只ETF实时行情，O(1) 哈希表查询。
 
         参数:
             fund_code: 基金代码（如 "512890"）
@@ -288,16 +298,8 @@ class FinanceApiService:
         返回:
             行情数据字典，失败返回 None
         """
-        df = self._get_spot_data()
-        if df.empty:
-            return None
-
-        row = df[df['代码'] == fund_code]
-        if row.empty:
-            logger.warning(f"未找到基金代码: {fund_code}")
-            return None
-
-        return self._format_spot_data(row.iloc[0])
+        d = self._ensure_spot_dict()
+        return d.get(fund_code)
 
     def query_spot_by_name(self, fund_name: str) -> Optional[Dict]:
         """
@@ -320,50 +322,50 @@ class FinanceApiService:
         查询ETF涨幅榜/跌幅榜
 
         参数:
-            sort_by: 排序字段（如 '涨跌幅', '成交额', '换手率'）
+            sort_by: 排序字段（如 'change_pct', 'amount', 'turnover_rate'）
             top_n: 返回数量（默认10）
             ascending: 排序方向（False=从高到低，True=从低到高）
 
         返回:
             行情数据列表
         """
-        df = self._get_spot_data()
-        if df.empty:
+        d = self._ensure_spot_dict()
+        if not d:
             return []
 
-        # 确保排序字段存在
-        if sort_by not in df.columns:
-            logger.warning(f"排序字段 '{sort_by}' 不存在，使用默认字段 '涨跌幅'")
-            sort_by = '涨跌幅'
-
-        df_sorted = df.sort_values(by=sort_by, ascending=ascending)
-        results = []
-        for _, row in df_sorted.head(top_n).iterrows():
-            results.append(self._format_spot_data(row))
+        items = list(d.values())
+        # 安全取值，不存在的字段降级到 'change_pct'
+        key = sort_by if sort_by in items[0] else 'change_pct'
+        items.sort(key=lambda x: x.get(key, 0), reverse=not ascending)
+        results = items[:top_n]
 
         logger.debug(f"返回 {len(results)} 条榜单数据（排序: {sort_by}, 升序: {ascending}）")
         return results
 
     def _format_spot_data(self, row) -> Dict:
         """
-        格式化单行行情数据
+        格式化单行行情数据（支持 pandas Series 或 dict 输入）
 
         参数:
-            row: pandas Series（一行数据）
+            row: pandas Series 或 dict
 
         返回:
             格式化后的行情数据字典
         """
         def safe_float(val, default=0.0):
-            """安全转换为浮点数"""
+            """安全转换为浮点数（支持 pandas NA 和 None）"""
+            if val is None or (isinstance(val, float) and val != val):  # NaN check
+                return default
             try:
-                return float(val) if pd.notna(val) else default
+                return float(val)
             except (ValueError, TypeError):
                 return default
 
         def safe_str(val, default=""):
             """安全转换为字符串"""
-            return str(val) if pd.notna(val) else default
+            if val is None or (isinstance(val, float) and val != val):
+                return default
+            return str(val)
 
         return {
             # 基础信息
@@ -638,38 +640,29 @@ class FinanceApiService:
         返回:
             匹配的ETF列表
         """
-        # 使用实时行情数据做搜索，因为 fund_etf_spot_em 包含所有ETF的代码和名称
-        df = self._get_spot_data()
-        if df.empty:
+        d = self._ensure_spot_dict()
+        if not d:
             return []
 
         keyword_lower = keyword.lower()
-
-        # 在代码和名称中模糊匹配
-        mask = (
-            df['代码'].astype(str).str.contains(keyword)
-            | df['名称'].str.contains(keyword, na=False, case=False)
-        )
-
-        matched = df[mask].head(top_n)
-
         results = []
-        for _, row in matched.iterrows():
-            item = {
-                "code": str(row.get('代码', '')),
-                "name": str(row.get('名称', '')),
-                "fund_type": None,  # 实时行情数据不包含基金类型
-                "net_asset_scale": None,
-                "management_fee": None,
-                "tracking_target": None,
-            }
-
-            if include_quote:
-                item["price"] = self._safe_float(row.get('最新价'))
-                item["change_pct"] = self._safe_float(row.get('涨跌幅'))
-                item["change"] = self._safe_float(row.get('涨跌额'))
-
-            results.append(item)
+        for item in d.values():
+            if keyword_lower in item["code"].lower() or keyword_lower in item["name"].lower():
+                result = {
+                    "code": item["code"],
+                    "name": item["name"],
+                    "fund_type": None,
+                    "net_asset_scale": None,
+                    "management_fee": None,
+                    "tracking_target": None,
+                }
+                if include_quote:
+                    result["price"] = item.get("price")
+                    result["change_pct"] = item.get("change_pct")
+                    result["change"] = item.get("change")
+                results.append(result)
+                if len(results) >= top_n:
+                    break
 
         logger.info(f"搜索ETF: keyword={keyword}, 匹配到 {len(results)} 条")
         return results
@@ -681,63 +674,45 @@ class FinanceApiService:
         参数:
             filters: 筛选条件字典
                 - keyword: 关键词
-                - max_fee: 最大管理费率（需要从概览数据获取）
-                - min_scale_billion: 最小规模（亿）
-                - max_scale_billion: 最大规模（亿）
                 - min_return: 最小涨跌幅
                 - max_return: 最大涨跌幅
                 - top_n: 返回数量
-                - sort_by: 排序字段
+                - sort_by: 排序字段（change_pct / amount / ...）
                 - sort_order: 排序方向
 
         返回:
             符合条件的ETF列表
         """
-        df = self._get_spot_data()
-        if df.empty:
+        d = self._ensure_spot_dict()
+        if not d:
             return []
 
         keyword = filters.get("keyword", "ETF")
         min_return = filters.get("min_return")
         max_return = filters.get("max_return")
-        sort_by = filters.get("sort_by", "涨跌幅")
+        sort_by = filters.get("sort_by", "change_pct")
         sort_order = filters.get("sort_order", "desc")
         top_n = filters.get("top_n", 20)
 
+        items = list(d.values())
+
         # 1. 关键词过滤
         if keyword:
-            df = df[
-                df['代码'].astype(str).str.contains(keyword)
-                | df['名称'].str.contains(keyword, na=False, case=False)
-            ]
+            kw = keyword.lower()
+            items = [x for x in items if kw in x["code"].lower() or kw in x["name"].lower()]
 
         # 2. 涨跌幅过滤
         if min_return is not None:
-            df = df[df['涨跌幅'] >= min_return]
+            items = [x for x in items if x.get("change_pct", 0) >= min_return]
         if max_return is not None:
-            df = df[df['涨跌幅'] <= max_return]
+            items = [x for x in items if x.get("change_pct", 0) <= max_return]
 
         # 3. 排序
-        if sort_by in df.columns:
-            ascending = (sort_order == "asc")
-            df = df.sort_values(by=sort_by, ascending=ascending)
+        key = sort_by if sort_by in items[0] else "change_pct"
+        items.sort(key=lambda x: x.get(key, 0), reverse=(sort_order != "asc"))
 
         # 4. 取前N条
-        df = df.head(top_n)
-
-        # 转换为列表
-        results = []
-        for _, row in df.iterrows():
-            results.append({
-                "code": str(row.get('代码', '')),
-                "name": str(row.get('名称', '')),
-                "price": self._safe_float(row.get('最新价')),
-                "change_pct": self._safe_float(row.get('涨跌幅')),
-                "change": self._safe_float(row.get('涨跌额')),
-                "fund_type": None,
-                "net_asset_scale": None,
-                "tracking_target": None,
-            })
+        results = items[:top_n]
 
         logger.info(f"筛选ETF: 条件={filters}, 返回 {len(results)} 条")
         return results
@@ -750,8 +725,8 @@ class FinanceApiService:
             分类列表，每个分类包含名称、类型、数量
         """
         # 使用实时行情数据统计
-        df = self._get_spot_data()
-        if df.empty:
+        d = self._ensure_spot_dict()
+        if not d:
             return []
 
         # 从名称中提取分类关键词
@@ -809,8 +784,8 @@ class FinanceApiService:
         }
 
         category_counts = {}
-        for _, row in df.iterrows():
-            name = str(row.get('名称', ''))
+        for item in d.values():
+            name = item["name"]
             matched = False
             for kw, cat in categories.items():
                 if kw in name:
@@ -829,7 +804,7 @@ class FinanceApiService:
                 "count": count,
             })
 
-        logger.info(f"获取分类列表: 共 {len(results)} 个分类, {len(df)} 只基金")
+        logger.info(f"获取分类列表: 共 {len(results)} 个分类, {len(d)} 只基金")
         return results
 
     def get_category_funds(self, category: str, top_n: int = 50) -> List[Dict]:
@@ -843,8 +818,8 @@ class FinanceApiService:
         返回:
             该分类下的ETF列表（含实时行情）
         """
-        df = self._get_spot_data()
-        if df.empty:
+        d = self._ensure_spot_dict()
+        if not d:
             return []
 
         # 分类名称反向查找关键词
@@ -876,18 +851,21 @@ class FinanceApiService:
             keywords = [category.replace("ETF", "")]
 
         # 筛选
-        mask = df['名称'].str.contains('|'.join(keywords), na=False, case=False)
-        filtered = df[mask].head(top_n)
-
         results = []
-        for _, row in filtered.iterrows():
-            results.append({
-                "code": str(row.get('代码', '')),
-                "name": str(row.get('名称', '')),
-                "price": self._safe_float(row.get('最新价')),
-                "change_pct": self._safe_float(row.get('涨跌幅')),
-                "change": self._safe_float(row.get('涨跌额')),
-            })
+        for item in d.values():
+            name = item["name"]
+            for kw in keywords:
+                if kw in name:
+                    results.append({
+                        "code": item["code"],
+                        "name": item["name"],
+                        "price": item.get("price"),
+                        "change_pct": item.get("change_pct"),
+                        "change": item.get("change"),
+                    })
+                    break
+            if len(results) >= top_n:
+                break
 
         logger.info(f"获取分类ETF: category={category}, 返回 {len(results)} 条")
         return results
@@ -1102,29 +1080,27 @@ class FinanceApiService:
         返回:
             资金流向排行榜
         """
-        df = self._get_spot_data()
-        if df.empty:
+        d = self._ensure_spot_dict()
+        if not d:
             return []
 
-        sort_col = '主力净流入-净额'
-        if sort_col not in df.columns:
-            return []
-
-        df_sorted = df.sort_values(by=sort_col, ascending=ascending)
+        sort_col = 'main_inflow'
+        items = list(d.values())
+        items.sort(key=lambda x: x.get(sort_col, 0), reverse=not ascending)
         results = []
-        for _, row in df_sorted.head(top_n).iterrows():
+        for item in items[:top_n]:
             results.append({
-                "code": str(row.get('代码', '')),
-                "name": str(row.get('名称', '')),
-                "price": self._safe_float(row.get('最新价')),
-                "change_pct": self._safe_float(row.get('涨跌幅')),
-                "main_inflow": self._safe_float(row.get('主力净流入-净额')),
-                "main_inflow_pct": self._safe_float(row.get('主力净流入-净占比')),
-                "large_inflow": self._safe_float(row.get('大单净流入-净额')),
-                "medium_inflow": self._safe_float(row.get('中单净流入-净额')),
-                "small_inflow": self._safe_float(row.get('小单净流入-净额')),
-                "amount": self._safe_float(row.get('成交额')),
-                "turnover_rate": self._safe_float(row.get('换手率')),
+                "code": item["code"],
+                "name": item["name"],
+                "price": item.get("price"),
+                "change_pct": item.get("change_pct"),
+                "main_inflow": item.get("main_inflow"),
+                "main_inflow_pct": item.get("main_inflow_pct"),
+                "large_inflow": item.get("large_inflow"),
+                "medium_inflow": item.get("medium_inflow"),
+                "small_inflow": item.get("small_inflow"),
+                "amount": item.get("amount"),
+                "turnover_rate": item.get("turnover_rate"),
             })
 
         logger.info(f"查询资金流向榜: top_n={top_n}, 返回 {len(results)} 条")
@@ -1149,8 +1125,9 @@ class FinanceApiService:
             now = time.time()
             logger.info(f"[定时任务] 正在刷新全量ETF实时行情...")
             df = ak.fund_etf_spot_em()
-            cls._spot_cache = df
             cls._spot_cache_time = now
+            # 同步构建哈希表
+            cls._rebuild_spot_dict(df)
             logger.info(f"[定时任务] 刷新成功，共 {len(df)} 只ETF")
             return True
         except Exception as e:
