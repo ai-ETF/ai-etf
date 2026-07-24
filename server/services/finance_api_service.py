@@ -16,20 +16,8 @@ logger = logging.getLogger(__name__)
 KLINE_CACHE_DIR = "/tmp/etf_kline_cache"
 KLINE_CACHE_TTL = 86400  # 一天过期
 
-# 判断是否交易时段
-def _is_trading_time() -> bool:
-    """判断当前是否为A股交易时段（9:30-15:00，工作日）"""
-    import datetime
-    now = datetime.datetime.now()
-    # 周末
-    if now.weekday() >= 5:  # 5=周六, 6=周日
-        return False
-    # 9:30 ~ 15:00
-    if now.hour < 9 or (now.hour == 9 and now.minute < 30):
-        return False
-    if now.hour >= 15:
-        return False
-    return True
+# 判断是否交易时段（从 spot_cache_scheduler 导入，保持兼容）
+from server.services.spot_cache_scheduler import _is_trading_time
 
 
 class FinanceApiService:
@@ -260,22 +248,10 @@ class FinanceApiService:
 
     @classmethod
     def _ensure_spot_dict(cls) -> dict[str, dict]:
-        """获取全量行情哈希表（惰性加载+缓存），返回 代码→行情dict 的映射"""
-        now = time.time()
-        if cls._spot_dict is not None and (now - cls._spot_cache_time) < cls.CACHE_TTL:
+        """获取全量行情哈希表（只读缓存，不主动拉取），返回 代码→行情dict 的映射"""
+        if cls._spot_dict is not None:
             return cls._spot_dict
-
-        try:
-            import akshare as ak
-            logger.info("正在获取全量ETF实时行情...")
-            df = ak.fund_etf_spot_em()
-            cls._rebuild_spot_dict(df)
-            cls._spot_cache_time = now
-            logger.info(f"获取实时行情成功，共 {len(cls._spot_dict)} 只ETF")
-        except Exception as e:
-            logger.error(f"获取实时行情失败: {e}")
-
-        return cls._spot_dict or {}
+        return {}
 
     @classmethod
     def _rebuild_spot_dict(cls, df: pd.DataFrame) -> None:
