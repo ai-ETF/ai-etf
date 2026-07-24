@@ -1,14 +1,13 @@
 """
 自选股 API 端点
 
-提供自选股管理接口：
-1. 添加自选股
-2. 移除自选股
-3. 查询自选股列表
-4. 清空自选股
+提供自选股管理接口，user_id 从 JWT 中自动读取，不从请求体取。
 """
+import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from server.auth import get_current_user
 from server.models.schemas import (
     WatchlistAddRequest,
     WatchlistRemoveRequest,
@@ -17,7 +16,6 @@ from server.models.schemas import (
     WatchlistItem,
 )
 from server.services.watchlist_service import WatchlistService
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -25,109 +23,89 @@ router = APIRouter()
 
 
 @router.post("/add", response_model=WatchlistActionResponse)
-async def add_watchlist(req: WatchlistAddRequest):
+async def add_watchlist(
+    req: WatchlistAddRequest,
+    current_user: str = Depends(get_current_user),
+):
     """
-    添加自选股
+    添加自选股（需 JWT 认证）
 
-    请求体:
-        user_id: 用户ID
-        fund_code: 基金代码（如 512890）
-        fund_name: 基金名称（可选，系统自动获取）
-
-    返回:
-        WatchlistActionResponse
+    user_id 从 JWT 中自动读取，无需在请求体中传入。
     """
-    logger.info(f"添加自选股: user={req.user_id}, code={req.fund_code}")
+    logger.info(f"添加自选股: user={current_user}, code={req.fund_code}")
     svc = WatchlistService()
 
     result = svc.add(
-        user_id=req.user_id,
+        user_id=current_user,
         fund_code=req.fund_code,
-        fund_name=req.fund_name
+        fund_name=req.fund_name,
     )
 
     return WatchlistActionResponse(
         success=result["success"],
         message=result["message"],
-        item=WatchlistItem(**result["item"]) if result.get("item") else None
+        item=WatchlistItem(**result["item"]) if result.get("item") else None,
     )
 
 
 @router.delete("/remove", response_model=WatchlistActionResponse)
-async def remove_watchlist(req: WatchlistRemoveRequest):
+async def remove_watchlist(
+    req: WatchlistRemoveRequest,
+    current_user: str = Depends(get_current_user),
+):
     """
-    移除自选股
+    移除自选股（需 JWT 认证）
 
-    请求体:
-        user_id: 用户ID
-        fund_code: 基金代码
-
-    返回:
-        WatchlistActionResponse
+    user_id 从 JWT 中自动读取，无需在请求体中传入。
     """
-    logger.info(f"移除自选股: user={req.user_id}, code={req.fund_code}")
+    logger.info(f"移除自选股: user={current_user}, code={req.fund_code}")
     svc = WatchlistService()
 
-    result = svc.remove(
-        user_id=req.user_id,
-        fund_code=req.fund_code
-    )
+    result = svc.remove(user_id=current_user, fund_code=req.fund_code)
 
     return WatchlistActionResponse(
         success=result["success"],
         message=result["message"],
-        item=None
+        item=None,
     )
 
 
-@router.get("/list/{user_id}", response_model=WatchlistResponse)
+@router.get("/list", response_model=WatchlistResponse)
 async def list_watchlist(
-    user_id: str,
-    include_quote: bool = Query(True, description="是否包含实时行情")
+    include_quote: bool = Query(True, description="是否包含实时行情"),
+    current_user: str = Depends(get_current_user),
 ):
     """
-    查询自选股列表
+    查询自选股列表（需 JWT 认证）
 
-    参数:
-        user_id: 用户ID
-        include_quote: 是否包含实时行情（默认 true）
-
-    返回:
-        WatchlistResponse: 包含自选股列表和实时行情
+    user_id 从 JWT 中自动读取，无需在 URL 中传入。
     """
-    logger.info(f"查询自选股列表: user={user_id}, include_quote={include_quote}")
+    logger.info(f"查询自选股列表: user={current_user}, include_quote={include_quote}")
     svc = WatchlistService()
 
-    result = svc.list(user_id=user_id, include_quote=include_quote)
+    result = svc.list(user_id=current_user, include_quote=include_quote)
 
     items = [WatchlistItem(**item) for item in result["items"]]
 
-    return WatchlistResponse(
-        total=result["total"],
-        items=items
-    )
+    return WatchlistResponse(total=result["total"], items=items)
 
 
-@router.delete("/clear/{user_id}")
-async def clear_watchlist(user_id: str):
+@router.delete("/clear")
+async def clear_watchlist(current_user: str = Depends(get_current_user)):
     """
-    清空自选股列表
+    清空自选股列表（需 JWT 认证）
 
-    参数:
-        user_id: 用户ID
-
-    返回:
-        {"success": bool, "message": str, "removed_count": int}
+    user_id 从 JWT 中自动读取，无需在 URL 中传入。
     """
-    logger.info(f"清空自选股: user={user_id}")
+    logger.info(f"清空自选股: user={current_user}")
     svc = WatchlistService()
 
-    result = svc.clear(user_id=user_id)
+    result = svc.clear(user_id=current_user)
 
     return result
 
 
 @router.get("/health")
 async def health_check():
-    """健康检查"""
+    """健康检查（公开）"""
     return {"status": "ok", "service": "watchlist"}

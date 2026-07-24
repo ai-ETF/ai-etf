@@ -192,21 +192,18 @@ class WatchlistItem(BaseModel):
 
 
 class WatchlistAddRequest(BaseModel):
-    """添加自选股请求"""
-    user_id: str  # 用户ID
+    """添加自选股请求（user_id 从 JWT 中获取）"""
     fund_code: str  # 基金代码
     fund_name: Optional[str] = None  # 基金名称（可选，系统自动获取）
 
 
 class WatchlistRemoveRequest(BaseModel):
-    """移除自选股请求"""
-    user_id: str  # 用户ID
+    """移除自选股请求（user_id 从 JWT 中获取）"""
     fund_code: str  # 基金代码
 
 
 class WatchlistListRequest(BaseModel):
-    """查询自选股列表请求"""
-    user_id: str  # 用户ID
+    """查询自选股列表请求（user_id 从 JWT 中获取）"""
     include_quote: bool = True  # 是否包含实时行情
 
 
