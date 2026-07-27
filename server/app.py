@@ -53,11 +53,7 @@ except Exception as e:
 init_logging()
 
 # 导入路由模块（此时环境变量已加载，各模块初始化时能正确读取配置）
-from server.api.upload import router as upload_router  # 文档上传 & 处理
-from server.api.ask import router as ask_router  # [已弃用] 旧版问答接口，指向 /api/ask
-from server.api.test import router as test_router  # 健康检查 / 测试用端点
-from server.api.secure_chat import router as secure_chat_router  # 带 JWT 认证的 LLM 对话（登录、聊天、会话管理）
-from server.api.watchlist import router as watchlist_router  # 自选股管理（需 JWT 认证）
+from server.api import router as api_router  # 聚合路由（所有子模块通过 __init__.py 注册）
 from server.config.settings import SETTINGS  # 全局配置（环境变量集中管理）
 
 logger = logging.getLogger(__name__)
@@ -93,12 +89,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册API路由，并添加标签用于文档分类
-app.include_router(upload_router, prefix="/api", tags=["upload"])
-app.include_router(ask_router, prefix="/api", tags=["ask"])
-app.include_router(test_router, prefix="/api", tags=["test"])  # 重新添加test路由
-app.include_router(secure_chat_router, prefix="/api", tags=["secure-chat"])  # 添加secure_chat路由（JWT认证）
-app.include_router(watchlist_router, prefix="/api/watchlist", tags=["watchlist"])  # 自选股管理（JWT认证）
+# 注册聚合路由（所有子模块通过 server/api/__init__.py 统一注册）
+app.include_router(api_router, prefix="/api")
 
 @app.get("/")
 def read_root():

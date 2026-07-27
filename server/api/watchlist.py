@@ -19,7 +19,7 @@ from server.services.watchlist_service import WatchlistService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
 
 @router.post("/add", response_model=WatchlistActionResponse)
