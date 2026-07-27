@@ -72,8 +72,13 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(error_msg)
     logger.info("Supabase连接验证成功")
 
+    # 启动行情缓存调度器（交易时段每30秒拉取全量行情）
+    from server.services.spot_cache_scheduler import start_scheduler, shutdown_scheduler
+    start_scheduler()
+
     yield  # 应用在此处运行
 
+    shutdown_scheduler()
     logger.info("应用关闭")
 
 
