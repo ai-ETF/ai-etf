@@ -318,7 +318,8 @@ class FinanceApiService:
         logger.debug(f"返回 {len(results)} 条榜单数据（排序: {sort_by}, 升序: {ascending}）")
         return results
 
-    def _format_spot_data(self, row) -> Dict:
+    @staticmethod
+    def _format_spot_data(row) -> Dict:
         """
         格式化单行行情数据（支持 pandas Series 或 dict 输入）
 
