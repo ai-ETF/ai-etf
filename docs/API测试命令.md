@@ -1,8 +1,7 @@
 # AI-ETF 后端 API 测试命令清单
 
 > 后端地址：`http://47.113.220.182:8000`
-> 用户ID：`test-user-001`（自动转为UUID）
-> 测试时间：2026-07-17
+> 测试时间：2026-07-27
 
 ---
 
@@ -14,217 +13,22 @@ curl -X GET "http://47.113.220.182:8000/"
 ```
 
 ```bash
-# 市场模块健康检查
-curl -X GET "http://47.113.220.182:8000/api/market/health"
+# 上传模块健康检查
+curl -X GET "http://47.113.220.182:8000/api/upload/health"
+```
+
+```bash
+# 测试端点
+curl -X GET "http://47.113.220.182:8000/api/test/hello"
 ```
 
 ---
 
-## 二、实时行情查询
+## 二、已弃用的问答接口
 
-### 2.1 按代码查询实时行情
+> ⚠️ 以下 `/api/ask` 接口已弃用，建议迁移至 `/api/secure-chat` 或 `/api/simple-chat`。
 
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/spot/512890"
-```
-
-### 2.2 按名称查询实时行情
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/spot/name/华泰柏瑞红利低波ETF"
-```
-
-### 2.3 涨幅榜
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/ranking?top_n=10&order=desc"
-```
-
-### 2.4 跌幅榜
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/ranking?top_n=10&order=asc"
-```
-
----
-
-## 三、K线数据查询
-
-### 3.1 日K线（最近30天）
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/kline/512890?period=daily&limit=30"
-```
-
-### 3.2 周K线（最近10周）
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/kline/512890?period=weekly&limit=10"
-```
-
-### 3.3 月K线（全部）
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/kline/512890?period=monthly"
-```
-
-### 3.4 按名称查询K线
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/kline/name/华泰柏瑞红利低波ETF?period=daily&limit=10"
-```
-
----
-
-## 四、分时图数据
-
-### 4.1 按代码查询分时图
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/intraday/512890"
-```
-
-### 4.2 按名称查询分时图
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/intraday/name/华泰柏瑞红利低波ETF"
-```
-
----
-
-## 五、ETF详细信息
-
-### 5.1 按代码查询详情
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/detail/512890"
-```
-
-### 5.2 按名称查询详情
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/detail/name/华泰柏瑞红利低波ETF"
-```
-
----
-
-## 六、资金流向
-
-### 6.1 单只ETF资金流向
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/money-flow/512890"
-```
-
-### 6.2 按名称查询资金流向
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/money-flow/name/华泰柏瑞红利低波ETF"
-```
-
-### 6.3 资金流向排行榜（净流入榜）
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/money-flow/ranking?top_n=20&order=desc"
-```
-
-### 6.4 资金流出排行榜
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/money-flow/ranking?top_n=20&order=asc"
-```
-
----
-
-## 七、ETF搜索与筛选
-
-### 7.1 搜索ETF（按关键词）
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/search?keyword=红利&top_n=10"
-```
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/search?keyword=512890"
-```
-
-### 7.2 筛选ETF
-
-```bash
-curl -X POST "http://47.113.220.182:8000/api/market/filter" \
-  -H "Content-Type: application/json" \
-  -d '{"keyword": "红利", "min_return": 0.5, "top_n": 10, "sort_by": "涨跌幅", "sort_order": "desc"}'
-```
-
-### 7.3 获取分类列表
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/categories"
-```
-
-### 7.4 获取分类下基金
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/category/红利ETF?top_n=10"
-```
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/category/科技ETF?top_n=10"
-```
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/market/category/宽基ETF?top_n=10"
-```
-
----
-
-## 八、自选股管理
-
-### 8.1 添加自选股
-
-```bash
-curl -X POST "http://47.113.220.182:8000/api/watchlist/add" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "test-user-001", "fund_code": "512890", "fund_name": "红利低波ETF华泰柏瑞"}'
-```
-
-```bash
-curl -X POST "http://47.113.220.182:8000/api/watchlist/add" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "test-user-001", "fund_code": "510300", "fund_name": "沪深300ETF华泰柏瑞"}'
-```
-
-```bash
-curl -X POST "http://47.113.220.182:8000/api/watchlist/add" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "test-user-001", "fund_code": "159611", "fund_name": "电力ETF广发"}'
-```
-
-### 8.2 查询自选股列表（含实时行情）
-
-```bash
-curl -X GET "http://47.113.220.182:8000/api/watchlist/list/test-user-001?include_quote=true"
-```
-
-### 8.3 移除自选股
-
-```bash
-curl -X DELETE "http://47.113.220.182:8000/api/watchlist/remove" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "test-user-001", "fund_code": "510300"}'
-```
-
-### 8.4 清空自选股
-
-```bash
-curl -X DELETE "http://47.113.220.182:8000/api/watchlist/clear/test-user-001"
-```
-
----
-
-## 九、问答系统（原有功能）
-
-### 9.1 问费率
+### 2.1 问费率
 
 ```bash
 curl -X POST "http://47.113.220.182:8000/api/ask" \
@@ -232,7 +36,7 @@ curl -X POST "http://47.113.220.182:8000/api/ask" \
   -d '{"question": "华泰柏瑞红利低波ETF的管理费是多少"}'
 ```
 
-### 9.2 问行情
+### 2.2 问行情
 
 ```bash
 curl -X POST "http://47.113.220.182:8000/api/ask" \
@@ -240,7 +44,7 @@ curl -X POST "http://47.113.220.182:8000/api/ask" \
   -d '{"question": "华泰柏瑞红利低波ETF现在涨多少"}'
 ```
 
-### 9.3 问榜单
+### 2.3 问榜单
 
 ```bash
 curl -X POST "http://47.113.220.182:8000/api/ask" \
@@ -250,9 +54,132 @@ curl -X POST "http://47.113.220.182:8000/api/ask" \
 
 ---
 
+## 三、LLM 对话
+
+### 3.1 简单对话（无认证、无历史记录）
+
+```bash
+curl -X POST "http://47.113.220.182:8000/api/simple-chat" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "你好，请介绍一下自己"}'
+```
+
+### 3.2 登录获取 JWT Token
+
+```bash
+curl -X POST "http://47.113.220.182:8000/api/secure-chat/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "your_email@example.com", "password": "your_password"}'
+```
+
+### 3.3 流式对话（需 JWT 认证）
+
+将 `<TOKEN>` 替换为登录获取的 access_token。
+
+```bash
+curl -X POST "http://47.113.220.182:8000/api/secure-chat" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -d '{"question": "我想买沪深300ETF，怎么选？"}'
+```
+
+### 3.4 获取会话列表（需 JWT）
+
+```bash
+curl -X GET "http://47.113.220.182:8000/api/secure-chat/chats?limit=50" \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+### 3.5 查看会话消息（需 JWT）
+
+```bash
+curl -X GET "http://47.113.220.182:8000/api/secure-chat/chats/<CHAT_ID>/messages" \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+### 3.6 删除会话（需 JWT）
+
+```bash
+curl -X DELETE "http://47.113.220.182:8000/api/secure-chat/chats/<CHAT_ID>" \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+---
+
+## 四、文档上传
+
+### 4.1 上传文档
+
+```bash
+curl -X POST "http://47.113.220.182:8000/api/upload" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/document.pdf", "source": "test"}'
+```
+
+---
+
+## 五、自选股管理（需 JWT 认证）
+
+所有自选股接口需要在 Header 中携带 `Authorization: Bearer <TOKEN>`。
+user_id 从 JWT 中自动读取，**不要**在请求体中传 `user_id`。
+
+### 5.1 添加自选股
+
+```bash
+curl -X POST "http://47.113.220.182:8000/api/watchlist/add" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -d '{"fund_code": "512890", "fund_name": "红利低波ETF华泰柏瑞"}'
+```
+
+```bash
+curl -X POST "http://47.113.220.182:8000/api/watchlist/add" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -d '{"fund_code": "510300", "fund_name": "沪深300ETF华泰柏瑞"}'
+```
+
+```bash
+curl -X POST "http://47.113.220.182:8000/api/watchlist/add" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -d '{"fund_code": "159611", "fund_name": "电力ETF广发"}'
+```
+
+### 5.2 查询自选股列表（含实时行情）
+
+```bash
+curl -X GET "http://47.113.220.182:8000/api/watchlist/list?include_quote=true" \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+### 5.3 移除自选股
+
+```bash
+curl -X DELETE "http://47.113.220.182:8000/api/watchlist/remove" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -d '{"fund_code": "510300"}'
+```
+
+### 5.4 清空自选股
+
+```bash
+curl -X DELETE "http://47.113.220.182:8000/api/watchlist/clear" \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+### 5.5 健康检查（公开，无需认证）
+
+```bash
+curl -X GET "http://47.113.220.182:8000/api/watchlist/health"
+```
+
+---
+
 ## 快速验证脚本
 
-一键测试核心功能：
+一键测试核心公开接口（不含需 JWT 的接口）：
 
 ```bash
 #!/bin/bash
@@ -261,32 +188,25 @@ API="http://47.113.220.182:8000"
 echo "=== 1. 健康检查 ==="
 curl -s $API/
 
-echo -e "\n=== 2. 实时行情 ==="
-curl -s $API/api/market/spot/512890 | python3 -m json.tool 2>/dev/null | head -20
+echo -e "\n=== 2. 测试端点 ==="
+curl -s $API/api/test/hello | python3 -m json.tool 2>/dev/null
 
-echo -e "\n=== 3. K线数据 ==="
-curl -s "$API/api/market/kline/512890?limit=3" | python3 -m json.tool 2>/dev/null | head -20
+echo -e "\n=== 3. 上传健康检查 ==="
+curl -s $API/api/upload/health | python3 -m json.tool 2>/dev/null
 
-echo -e "\n=== 4. 涨幅榜 ==="
-curl -s "$API/api/market/ranking?top_n=3" | python3 -m json.tool 2>/dev/null | head -15
+echo -e "\n=== 4. 自选股健康检查 ==="
+curl -s $API/api/watchlist/health | python3 -m json.tool 2>/dev/null
 
-echo -e "\n=== 5. ETF详情 ==="
-curl -s $API/api/market/detail/512890 | python3 -m json.tool 2>/dev/null | head -20
-
-echo -e "\n=== 6. 资金流向 ==="
-curl -s $API/api/market/money-flow/512890 | python3 -m json.tool 2>/dev/null | head -15
-
-echo -e "\n=== 7. 搜索 ==="
-curl -s "$API/api/market/search?keyword=红利&top_n=3" | python3 -m json.tool 2>/dev/null | head -15
-
-echo -e "\n=== 8. 分类 ==="
-curl -s $API/api/market/categories | python3 -m json.tool 2>/dev/null | head -15
-
-echo -e "\n=== 9. 自选股 ==="
-curl -s -X POST $API/api/watchlist/add \
+echo -e "\n=== 5. 简单对话 ==="
+curl -s -X POST $API/api/simple-chat \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "test-user-001", "fund_code": "512890"}' | python3 -m json.tool 2>/dev/null
-curl -s $API/api/watchlist/list/test-user-001 | python3 -m json.tool 2>/dev/null | head -15
+  -d '{"question": "你好"}' | head -c 200
+echo
+
+echo -e "\n=== 6. 问答（已弃用）==="
+curl -s -X POST $API/api/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "华泰柏瑞红利低波ETF的管理费是多少"}' | python3 -m json.tool 2>/dev/null | head -20
 
 echo -e "\n✅ 测试完成"
 ```

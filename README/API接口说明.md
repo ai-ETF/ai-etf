@@ -3,56 +3,102 @@
 ## 基础信息
 
 - **服务地址**: `http://localhost:8000`
-- **全局前缀**: `/api`
+- **全局前缀**: `/api`（部分路由使用）
 - **文档地址**: `http://localhost:8000/docs` (Swagger UI)
 
 ---
 
-## 对话接口 `/chat`
+## 根路径
 
-### POST `/api/chat` — 同步对话
+### GET `/`
 
-适用于不支持 SSE 的客户端，一次性返回完整响应。
+简单验证服务是否启动，返回 `{"Hello": "World"}`。
+
+---
+
+## 测试接口 `/test`
+
+### GET `/api/test/hello`
+
+快速验证服务是否正常。
+
+**响应**:
+```json
+{
+  "message": "Hello World"
+}
+```
+
+---
+
+## 对话接口
+
+### POST `/api/secure-chat` — 流式对话（需 JWT 认证）
+
+带 JWT 认证的 LLM 对话，SSE 流式返回。user_id 从 JWT token 中自动读取，不从请求体获取。
 
 **请求体**:
 ```json
 {
-  "user_id": "user123",
-  "session_id": "可选，不传则创建新会话",
-  "message": "我想买沪深300ETF，怎么选？"
+  "question": "我想买沪深300ETF，怎么选？",
+  "chat_id": "可选，不传则自动创建新会话"
+}
+```
+
+**认证方式**: `Authorization: Bearer <access_token>`
+
+**SSE 事件**:
+- `token`: LLM 生成的 token
+- `done`: 生成结束，附带 `chat_id`
+- `error`: 错误
+
+### POST `/api/secure-chat/login` — 登录获取 JWT
+
+**请求体**:
+```json
+{
+  "email": "user@example.com",
+  "password": "your_password"
 }
 ```
 
 **响应**:
 ```json
 {
-  "session_id": "uuid",
-  "reply": "莱拉的回复内容",
-  "data_status": { "brief_ready": true, "detail_ready": false },
-  "should_end": false,
-  "waiting_for_input": false
+  "access_token": "eyJhbGci...",
+  "token_type": "bearer",
+  "user_id": "uuid",
+  "expires_in": 3600
 }
 ```
 
-### POST `/api/chat/stream` — SSE 流式对话
+### GET `/api/secure-chat/chats` — 获取会话列表（需 JWT）
 
-逐 token 实时返回 LLM 生成内容，体验更流畅。
+返回当前用户的所有会话。
 
-**请求体**: 同上
+### GET `/api/secure-chat/chats/{chat_id}/messages` — 获取会话消息（需 JWT）
 
-**响应**: Server-Sent Events 流，事件类型包括：
-- `start`: 会话开始
-- `response`: 逐 token 的响应片段
-- `data_status`: 数据收集状态更新
-- `end`: 会话结束
+返回指定会话的完整消息历史。
 
-### GET `/api/chat/{session_id}/history` — 获取对话历史
+### DELETE `/api/secure-chat/chats/{chat_id}` — 删除会话（需 JWT）
 
-返回指定会话的完整消息记录。
+删除会话及其所有消息。
 
-### DELETE `/api/chat/{session_id}` — 删除会话
+### POST `/api/simple-chat` — 简单对话（无认证、无历史）
 
-清除会话状态和历史记录。
+单轮对话，SSE 流式返回，无会话管理。
+
+**请求体**:
+```json
+{
+  "question": "你好，请介绍一下自己"
+}
+```
+
+**SSE 事件**:
+- `token`: LLM 生成的 token
+- `done`: 生成结束
+- `error`: 错误
 
 ---
 
@@ -60,7 +106,7 @@
 
 ### POST `/api/ask`
 
-> ⚠️ 此接口已弃用，请使用 `/api/chat` 或 `/api/chat/stream`。
+> ⚠️ 此接口已弃用，请使用 `/api/secure-chat` 或 `/api/simple-chat`。
 
 ---
 
@@ -105,16 +151,33 @@
 
 ---
 
-## 测试接口 `/test`
+## 自选股管理 `/api/watchlist`（需 JWT 认证）
 
-### GET `/api/test/hello`
+所有接口（除 `/health` 外）需在 Header 中携带 `Authorization: Bearer <token>`。
 
-简单测试接口，返回 `{"message": "Hello World"}`。
+### POST `/api/watchlist/add` — 添加自选股
 
----
+**请求体**:
+```json
+{
+  "fund_code": "512890",
+  "fund_name": "可选，不传则自动获取"
+}
+```
 
-## 根路径
+### DELETE `/api/watchlist/remove` — 移除自选股
 
-### GET `/`
+**请求体**:
+```json
+{
+  "fund_code": "512890"
+}
+```
 
-返回 `{"Hello": "World"}`，用于验证服务是否启动。
+### GET `/api/watchlist/list?include_quote=true` — 查询自选股列表
+
+`include_quote` 可选，默认为 `true`，是否包含实时行情。
+
+### DELETE `/api/watchlist/clear` — 清空自选股
+
+### GET `/api/watchlist/health` — 健康检查（公开，无需认证）
