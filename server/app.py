@@ -1,8 +1,13 @@
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import os
-import logging
+from contextlib import asynccontextmanager  # 用于定义应用生命周期（启动/关闭）
+from fastapi import FastAPI  # Web 框架核心
+from fastapi.middleware.cors import CORSMiddleware  # 跨域中间件
+import os  # 路径拼接、环境变量读取
+import logging  # 日志
+import warnings  # 抑制第三方库 deprecation warning
+
+# 抑制 langgraph-checkpoint 内部 deprecation warning（不影响功能）
+warnings.filterwarnings("ignore", message="The default value of `allowed_objects`",
+                        category=DeprecationWarning)
 
 def init_logging():
     """初始化日志系统"""
@@ -47,11 +52,12 @@ except Exception as e:
 # 初始化日志系统
 init_logging()
 
-# 现在导入其他模块，这时环境变量已经可用
-from server.api.upload import router as upload_router
-from server.api.ask import router as ask_router
-from server.api.test import router as test_router  # 添加test路由
-from server.config.settings import SETTINGS
+# 导入路由模块（此时环境变量已加载，各模块初始化时能正确读取配置）
+from server.api.upload import router as upload_router  # 文档上传 & 处理
+from server.api.ask import router as ask_router  # [已弃用] 旧版问答接口，指向 /api/ask
+from server.api.test import router as test_router  # 健康检查 / 测试用端点
+from server.api.secure_chat import router as secure_chat_router  # 带 JWT 认证的 LLM 对话（登录、聊天、会话管理）
+from server.config.settings import SETTINGS  # 全局配置（环境变量集中管理）
 
 logger = logging.getLogger(__name__)
 logger.setLevel(SETTINGS.LOG_LEVEL)
@@ -90,6 +96,7 @@ app.add_middleware(
 app.include_router(upload_router, prefix="/api", tags=["upload"])
 app.include_router(ask_router, prefix="/api", tags=["ask"])
 app.include_router(test_router, prefix="/api", tags=["test"])  # 重新添加test路由
+app.include_router(secure_chat_router, prefix="/api", tags=["secure-chat"])  # 添加secure_chat路由（JWT认证）
 
 @app.get("/")
 def read_root():
