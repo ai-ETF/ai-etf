@@ -1091,10 +1091,10 @@ class FinanceApiService:
         强制刷新全量ETF实时行情缓存（供定时任务调用）。
 
         交易时段（工作日 9:30-15:00）每30秒拉取一次最新数据。
-        非交易时段跳过实际拉取，保留现有缓存，避免无效网络请求。
+        非交易时段跳过实际拉取，但如果缓存为空则仍然加载一次（首次启动/重启后填充）。
         """
         import akshare as ak
-        if not _is_trading_time():
+        if not _is_trading_time() and cls._spot_dict is not None:
             logger.debug("[定时任务] 非交易时段，跳过刷新")
             return True  # 返回 True 表示缓存仍有效
 
