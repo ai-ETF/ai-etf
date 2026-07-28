@@ -299,16 +299,14 @@ class RiskService:
         return {
             "user_id": user_id,
             "risk_level": risk_level,
-            "risk_label": level_info["label"],
             "total_score": score_result["total_score"],
             "weighted_scores": score_result["weighted_scores"],
             "dimension_scores": score_result["dimension_scores"],
             "confidence_score": 1.0,
             "ai_summary": level_info["summary"],
-            "profile_source": "rule-based",
-            "model_version": "v1.0",
+            "source": "rule-based",
             "is_active": True,
-            "metadata": {"questionnaire_id": questionnaire_id},
+            "metadata": {"questionnaire_id": questionnaire_id, "risk_label": level_info["label"]},
             "expires_at": None,
             "created_at": now,
         }
