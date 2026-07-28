@@ -429,3 +429,72 @@ class MoneyFlowRankingResponse(BaseModel):
     """资金流向榜响应"""
     total: int
     items: List[MoneyFlowRankingItem]
+
+
+# ==================== 风险画像数据模型（新增） ====================
+
+
+class SubmitAnswerItem(BaseModel):
+    """提交答案单项"""
+    question_id: str  # 题目 ID（如 q1）
+    value: str  # 选项值（如 A、B、C）
+
+
+class SubmitRequest(BaseModel):
+    """提交问卷请求"""
+    questionnaire_id: str  # 问卷 ID
+    answers: List[SubmitAnswerItem]  # 答案列表
+
+
+class QuestionOption(BaseModel):
+    """题目选项（前端可见，不含内部评分）"""
+    text: str  # 选项文字
+    value: str  # 选项值
+
+
+class QuestionItem(BaseModel):
+    """问卷题目（前端可见）"""
+    id: str  # 题目 ID
+    question: str  # 题目文字
+    category: str  # 维度分类
+    options: List[QuestionOption]  # 选项列表
+
+
+class QuestionnaireResponse(BaseModel):
+    """问卷响应"""
+    id: str  # 问卷 ID
+    version: str  # 版本号
+    questions: List[QuestionItem]  # 题目列表
+    total_questions: int  # 题目总数
+
+
+class DimensionScores(BaseModel):
+    """各维度得分"""
+    investment_horizon: Optional[int] = None
+    drawdown_tolerance: Optional[int] = None
+    investment_experience: Optional[int] = None
+    goal_orientation: Optional[int] = None
+    knowledge_level: Optional[int] = None
+
+
+class ProfileResult(BaseModel):
+    """画像结果（前端可见）"""
+    risk_level: str  # conservative / moderate / aggressive
+    risk_label: str  # 保守型 / 稳健型 / 进取型
+    total_score: float  # 加权总分
+    dimension_scores: DimensionScores  # 各维度得分
+    summary: str  # 画像解读文字
+    created_at: Optional[str] = None  # 画像生成时间
+
+
+class SubmitResponse(BaseModel):
+    """提交问卷响应"""
+    success: bool
+    message: str
+    profile: Optional[ProfileResult] = None
+
+
+class ProfileResponse(BaseModel):
+    """查询画像响应"""
+    has_profile: bool
+    profile: Optional[ProfileResult] = None
