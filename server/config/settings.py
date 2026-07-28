@@ -37,7 +37,28 @@ class Settings:
         self.DB_PATH = os.getenv("ETFSERVER_DB_PATH", "server_data.db")
         # 嵌入向量维度，设置为768维以匹配数据库
         self.EMBED_DIM = int(os.getenv("ETFSERVER_EMBED_DIM", "768"))
-        
+
+        # === LangGraph / Lyra 配置 ===
+        # Anthropic API 密钥
+        self.ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+        # Lyra 使用的模型
+        self.LYRA_MODEL = os.getenv("LYRA_MODEL", "claude-sonnet-4-20250514")
+        # Lyra 最大 token 数
+        self.LYRA_MAX_TOKENS = int(os.getenv("LYRA_MAX_TOKENS", "4096"))
+
+        # === XiaoYan 配置 ===
+        # 数据缓存时间（秒），默认 1 天
+        self.XIAOYAN_CACHE_TTL = int(os.getenv("XIAOYAN_CACHE_TTL", "86400"))
+        # 数据收集超时（秒）
+        self.XIAOYAN_TIMEOUT = int(os.getenv("XIAOYAN_TIMEOUT", "30"))
+
+        # === JWT 认证配置（对接 Supabase Auth）===
+        # Supabase 项目的 JWT Secret，在 Supabase 控制台 Settings > API > JWT Secret 获取
+        self.SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+        # === 情绪检测配置 ===
+        self.EMOTION_DETECTION_ENABLED = os.getenv("EMOTION_DETECTION_ENABLED", "true").lower() == "true"
+
         logging.info(f"配置加载完成: DB_PATH={self.DB_PATH}, EMBED_DIM={self.EMBED_DIM}, LOG_LEVEL={log_level_str}")
 
 

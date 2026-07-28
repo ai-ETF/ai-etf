@@ -1,13 +1,10 @@
-from server.agents.question_agent import QuestionAgent
-from server.agents.document_agent import DocumentAgent
-from server.agents.output_format_agent import OutputFormatAgent
 from server.rag.embedder import Embedder
 from server.rag.retriever import Retriever
 from server.rag.prompt_builder import build_prompt
 from server.storage.embedding_repo import EmbeddingRepo
-from server.models.decision import DecisionResult
 from server.config.settings import SETTINGS
 from server.services.finance_api_service import FinanceApiService
+from server.graphs.qa.graph import run_qa_analysis
 import logging
 import re
 
@@ -31,12 +28,8 @@ class QAService:
     def __init__(self):
         """
         初始化问答服务
-        创建问题分析智能体、嵌入器、检索器和嵌入存储实例
         """
         logger.debug("初始化问答服务")
-        self.agent = QuestionAgent()
-        self.document_agent = DocumentAgent()
-        self.output_format_agent = OutputFormatAgent()
         self.finance_api = FinanceApiService()
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
         self.emb_repo = EmbeddingRepo()
@@ -189,6 +182,57 @@ class QAService:
                 lines.append(f"- {label}: {val}")
         lines.append(f"\n基金代码: {api_data.get('fund_code', '未知')}")
         lines.append("\n# 指令:\n请根据以上事实数据，用简洁自然的语言回答用户问题。直接给出准确数字，不要模糊表述。")
+        return "\n".join(lines)
+
+    def _build_market_prompt(self, question: str, data: dict) -> str:
+        """构建行情数据 prompt（新增）"""
+        return f"""# 问题:
+{question}
+
+# 实时行情数据（来自金融 API）:
+- 基金名称: {data.get('name', '')} ({data.get('code', '')})
+- 最新价: {data.get('price', 0)} 元
+- 涨跌幅: {data.get('change_pct', 0)}%
+- 涨跌额: {data.get('change', 0)} 元
+- 昨收: {data.get('prev_close', 0)} 元
+
+# 日内行情:
+- 今开: {data.get('open', 0)} 元
+- 最高: {data.get('high', 0)} 元
+- 最低: {data.get('low', 0)} 元
+- 振幅: {data.get('amplitude', 0)}%
+
+# 成交数据:
+- 成交量: {data.get('volume', 0):,.0f} 份
+- 成交额: {data.get('amount', 0):,.0f} 元
+- 换手率: {data.get('turnover_rate', 0)}%
+
+# 盘口:
+- 买一: {data.get('bid_price', 0)} 元
+- 卖一: {data.get('ask_price', 0)} 元
+- 委比: {data.get('order_ratio', 0)}%
+
+# 资金流向:
+- 主力净流入: {data.get('main_inflow', 0):,.0f} 元 ({data.get('main_inflow_pct', 0)}%)
+
+# 指令:
+请用简洁自然的语言回答用户问题。重点说明涨跌幅和价格变化。
+数据更新时间: {data.get('update_time', '')}
+"""
+
+    def _build_ranking_prompt(self, question: str, results: list) -> str:
+        """构建榜单 prompt（新增）"""
+        sort_label = "涨幅" if not any(k in question for k in ["跌", "跌幅"]) else "跌幅"
+        lines = [f"# 问题:\n{question}\n\n# ETF{sort_label}榜（来自金融 API）:", ""]
+        lines.append("| 排名 | 代码 | 名称 | 最新价 | 涨跌幅(%) | 成交额 |")
+        lines.append("|------|------|------|--------|-----------|--------|")
+        for i, item in enumerate(results, 1):
+            amount_str = f"{item.get('amount', 0) / 1e8:.2f}亿" if item.get('amount', 0) > 1e8 else f"{item.get('amount', 0) / 1e4:.2f}万"
+            lines.append(
+                f"| {i} | {item.get('code', '')} | {item.get('name', '')} | "
+                f"{item.get('price', 0):.3f} | {item.get('change_pct', 0):.2f} | {amount_str} |"
+            )
+        lines.append(f"\n# 指令:\n请根据以上{sort_label}榜数据，用简洁自然的语言回答用户问题。可以突出前3名的关键数据。")
         return "\n".join(lines)
 
     def _boost_by_doc_type(self, chunks: list, question: str) -> list:
@@ -375,7 +419,7 @@ class QAService:
         logger.debug(f"问题分析完成，结果: {decision}")
 
         # P2: 事实查询走 API（费率/净值/规模），不再让大模型从文档猜
-        if decision.intent == "factual_query" or self._is_fee_question(normalized_question):
+        if decision["intent"] == "factual_query" or self._is_fee_question(normalized_question):
             api_result = self.finance_api.query(normalized_question)
             if api_result:
                 logger.debug(f"API 查询成功: {api_result}")
@@ -388,6 +432,35 @@ class QAService:
                     "source": "api",
                 }
             logger.debug("API 查询失败，降级到 RAG")
+
+        # P2: 行情查询走 API（实时行情）（新增）
+        if decision.intent == "market_query":
+            api_result = self.finance_api.query(normalized_question)
+            if api_result:
+                logger.debug(f"行情API查询成功: {api_result.get('name', '')}")
+                return {
+                    "prompt": self._build_market_prompt(normalized_question, api_result),
+                    "decision": decision,
+                    "top_chunks": [],
+                    "format_analysis": {"primary_format": "text"},
+                    "fee_card": {"is_fee_question": False},
+                    "source": "api",
+                }
+            logger.debug("行情API查询失败，降级到 RAG")
+
+        # P2: 榜单查询（新增）
+        if decision.intent == "ranking_query":
+            # 解析排序方向：含"跌"字按跌幅排序，否则按涨幅排序
+            ascending = "跌" in normalized_question
+            results = self.finance_api.query_ranking(ascending=ascending, top_n=decision.top_k)
+            return {
+                "prompt": self._build_ranking_prompt(normalized_question, results),
+                "decision": decision,
+                "top_chunks": [],
+                "format_analysis": {"primary_format": "table"},
+                "fee_card": {"is_fee_question": False},
+                "source": "api",
+            }
 
         # 使用输出格式智能体分析输出格式
         logger.debug("使用输出格式智能体分析输出格式")
@@ -428,16 +501,16 @@ class QAService:
         candidate_chunks = self._boost_by_doc_type(candidate_chunks, normalized_question)
 
         # 交叉注意力重排序过滤
-        top = self._rerank_and_select(candidate_chunks, retrieval_query, decision.top_k)
+        top = self._rerank_and_select(candidate_chunks, retrieval_query, decision["top_k"])
 
         # 第一道防线：rerank 分数阈值拒识
-        rejected = self._check_rejection(top, decision.__dict__, format_analysis, normalized_question)
+        rejected = self._check_rejection(top, decision, format_analysis, normalized_question)
         if rejected:
             return rejected
 
         # 构建完整提示词
         logger.debug("开始构建提示词")
-        prompt = build_prompt(question, decision.__dict__, top, format_analysis)
+        prompt = build_prompt(question, decision, top, format_analysis)
         logger.debug(f"提示词构建完成，长度: {len(prompt)}")
 
         # 输出完整的prompt内容（限制为前1000个字符）
@@ -448,7 +521,7 @@ class QAService:
         fee_card = self._build_fee_card(question, top)
         result = {
             "prompt": prompt,
-            "decision": decision.__dict__,
+            "decision": decision,
             "top_chunks": top,
             "format_analysis": format_analysis,
             "fee_card": fee_card,

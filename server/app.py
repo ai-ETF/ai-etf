@@ -1,8 +1,13 @@
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import os
-import logging
+from contextlib import asynccontextmanager  # 用于定义应用生命周期（启动/关闭）
+from fastapi import FastAPI  # Web 框架核心
+from fastapi.middleware.cors import CORSMiddleware  # 跨域中间件
+import os  # 路径拼接、环境变量读取
+import logging  # 日志
+import warnings  # 抑制第三方库 deprecation warning
+
+# 抑制 langgraph-checkpoint 内部 deprecation warning（不影响功能）
+warnings.filterwarnings("ignore", message="The default value of `allowed_objects`",
+                        category=DeprecationWarning)
 
 def init_logging():
     """初始化日志系统"""
@@ -47,11 +52,9 @@ except Exception as e:
 # 初始化日志系统
 init_logging()
 
-# 现在导入其他模块，这时环境变量已经可用
-from server.api.upload import router as upload_router
-from server.api.ask import router as ask_router
-from server.api.test import router as test_router  # 添加test路由
-from server.config.settings import SETTINGS
+# 导入路由模块（此时环境变量已加载，各模块初始化时能正确读取配置）
+from server.api import router as api_router  # 聚合路由（所有子模块通过 __init__.py 注册）
+from server.config.settings import SETTINGS  # 全局配置（环境变量集中管理）
 
 logger = logging.getLogger(__name__)
 logger.setLevel(SETTINGS.LOG_LEVEL)
@@ -69,8 +72,13 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(error_msg)
     logger.info("Supabase连接验证成功")
 
+    # 启动行情缓存调度器（交易时段每30秒拉取全量行情）
+    from server.services.spot_cache_scheduler import start_scheduler, shutdown_scheduler
+    start_scheduler()
+
     yield  # 应用在此处运行
 
+    shutdown_scheduler()
     logger.info("应用关闭")
 
 
@@ -86,10 +94,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册API路由，并添加标签用于文档分类
-app.include_router(upload_router, prefix="/api", tags=["upload"])
-app.include_router(ask_router, prefix="/api", tags=["ask"])
-app.include_router(test_router, prefix="/api", tags=["test"])  # 重新添加test路由
+# 注册聚合路由（所有子模块通过 server/api/__init__.py 统一注册）
+app.include_router(api_router, prefix="/api")
 
 @app.get("/")
 def read_root():
