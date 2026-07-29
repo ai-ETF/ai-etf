@@ -429,3 +429,136 @@ class MoneyFlowRankingResponse(BaseModel):
     """资金流向榜响应"""
     total: int
     items: List[MoneyFlowRankingItem]
+
+
+# ==================== 模拟持仓交易数据模型（新增） ====================
+
+class TradeRequest(BaseModel):
+    """买卖请求"""
+    fund_code: str  # 基金代码
+    quantity: float  # 份额
+    price: Optional[float] = None  # 价格（不传则取当前市价）
+
+
+class TradeData(BaseModel):
+    """成交数据"""
+    fund_code: str
+    fund_name: str
+    price: float
+    quantity: float
+    amount: float
+    fee: float
+    total_cost: Optional[float] = None
+    net_amount: Optional[float] = None
+    trade_pnl: Optional[float] = None
+    hold_days: Optional[int] = None
+    position_qty: float
+    cost_price: Optional[float] = None
+    cash_remaining: float
+    trade_time: str
+
+
+class TradeResponse(BaseModel):
+    """买卖响应"""
+    success: bool
+    message: str
+    data: Optional[TradeData] = None
+
+
+class PositionItem(BaseModel):
+    """持仓单项"""
+    id: str
+    user_id: str
+    fund_code: str
+    fund_name: str
+    quantity: float
+    cost_price: float
+    cost_value: Optional[float] = None
+    market_price: Optional[float] = None
+    market_value: Optional[float] = None
+    pnl: Optional[float] = None
+    pnl_pct: Optional[float] = None
+    created_at: str
+    updated_at: str
+
+
+class PositionListResponse(BaseModel):
+    """持仓列表响应"""
+    total: int
+    items: List[PositionItem]
+    total_pnl: float
+    total_position_value: float
+
+
+class AccountSummaryResponse(BaseModel):
+    """账户概况响应"""
+    cash: float
+    position_value: float
+    total_assets: float
+    total_pnl: float
+    total_return_rate: float
+    position_count: int
+
+
+class TradeFlowItem(BaseModel):
+    """交易流水单项"""
+    id: str
+    user_id: str
+    fund_code: str
+    fund_name: str
+    direction: str
+    price: float
+    quantity: float
+    amount: float
+    fee: float
+    trade_time: str
+
+
+class TradeFlowResponse(BaseModel):
+    """交易流水分页响应"""
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    items: List[TradeFlowItem]
+
+
+class TradeFlowQueryParams(BaseModel):
+    """交易流水查询参数"""
+    fund_code: Optional[str] = None
+    direction: Optional[str] = None
+    page: int = 1
+    page_size: int = 20
+
+
+class SnapshotData(BaseModel):
+    """快照数据"""
+    snapshot_date: str
+    total_assets: float
+    cash: float
+    position_value: float
+    total_pnl: float
+    total_return_rate: float
+
+
+class SnapshotResponse(BaseModel):
+    """快照响应"""
+    success: bool
+    message: str
+    data: Optional[SnapshotData] = None
+
+
+class DailyReturnItem(BaseModel):
+    """每日收益率"""
+    date: str
+    total_assets: float
+    cash: float
+    position_value: float
+    total_pnl: float
+    total_return_rate: float
+    daily_return: float
+
+
+class DailyReturnResponse(BaseModel):
+    """每日收益率响应"""
+    items: List[DailyReturnItem]
