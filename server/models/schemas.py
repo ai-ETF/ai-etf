@@ -567,3 +567,39 @@ class DailyReturnItem(BaseModel):
 class DailyReturnResponse(BaseModel):
     """每日收益率响应"""
     items: List[DailyReturnItem]
+
+
+# ==================== ETF 预约交易数据模型 ====================
+
+class ReserveRequest(BaseModel):
+    """ETF 预约请求（复用 TradeRequest 结构，direction 由端点区分）"""
+    fund_code: str
+    quantity: float
+
+
+class ReservationItem(BaseModel):
+    """预约单项"""
+    id: str
+    user_id: str
+    fund_code: str
+    fund_name: str
+    fund_type: Optional[str] = None  # otf/etf
+    direction: str  # buy/sell
+    quantity: float
+    estimated_price: Optional[float] = None  # 提交预约时的参考价格
+    status: str  # reserved/cancelled/completed
+    created_at: str
+    updated_at: str
+
+
+class ReservationResponse(BaseModel):
+    """预约操作响应"""
+    success: bool
+    message: str
+    data: Optional[ReservationItem] = None
+
+
+class ReservationListResponse(BaseModel):
+    """预约列表响应"""
+    total: int
+    items: List[ReservationItem]

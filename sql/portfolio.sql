@@ -50,13 +50,14 @@ CREATE TABLE IF NOT EXISTS trade_orders (
   user_id UUID NOT NULL,
   fund_code VARCHAR(10) NOT NULL,
   fund_name VARCHAR(100) NOT NULL DEFAULT '',
+  fund_type VARCHAR(4) NOT NULL DEFAULT 'otf' CHECK (fund_type IN ('otf', 'etf')),
   direction VARCHAR(4) NOT NULL CHECK (direction IN ('buy', 'sell')),
   order_type VARCHAR(10) NOT NULL DEFAULT 'market' CHECK (order_type IN ('market', 'limit')),
-  price DECIMAL(18,4) NOT NULL,
+  price DECIMAL(18,4) NOT NULL DEFAULT 0,
   quantity DECIMAL(18,2) NOT NULL,
-  amount DECIMAL(18,2) NOT NULL,
+  amount DECIMAL(18,2) NOT NULL DEFAULT 0,
   fee DECIMAL(18,2) NOT NULL DEFAULT 0,
-  status VARCHAR(10) NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'cancelled', 'rejected')),
+  status VARCHAR(10) NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'cancelled', 'rejected', 'reserved')),
   reject_reason TEXT,
   confirm_date DATE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -65,11 +66,13 @@ CREATE TABLE IF NOT EXISTS trade_orders (
 
 COMMENT ON TABLE trade_orders IS '交易订单/委托记录';
 COMMENT ON COLUMN trade_orders.direction IS '方向：buy-买入, sell-卖出';
-COMMENT ON COLUMN trade_orders.status IS '状态：pending-待处理, completed-已完成, cancelled-已撤销, rejected-已拒绝';
+COMMENT ON COLUMN trade_orders.fund_type IS '基金类型: otf=场外基金, etf=场内ETF';
+COMMENT ON COLUMN trade_orders.status IS '状态：pending-待确认, completed-已完成, cancelled-已撤销, rejected-已拒绝, reserved-预约待执行';
 COMMENT ON COLUMN trade_orders.confirm_date IS '场外基金订单确认日期：交易日15:00前为当日，15:00后/非交易日为下一个交易日';
 
 CREATE INDEX IF NOT EXISTS idx_trade_orders_user ON trade_orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_trade_orders_created ON trade_orders(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trade_orders_status ON trade_orders(status);
 
 -- ============================================================
 -- 4. trade_flow 表：交易流水（成交明细）

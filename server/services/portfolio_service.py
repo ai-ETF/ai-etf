@@ -351,6 +351,7 @@ class PortfolioService:
                 user_id, fund_code, fund_name, "buy", price, quantity,
                 amount, fee, order_status,
                 confirm_date=confirm_date.isoformat() if is_pending else None,
+                fund_type=fund_type,
             )
             self._write_trade_flow(user_id, fund_code, fund_name, "buy", price, quantity, amount, fee)
 
@@ -511,6 +512,7 @@ class PortfolioService:
                 user_id, fund_code, fund_name, "sell", price, quantity,
                 amount, fee, order_status,
                 confirm_date=confirm_date.isoformat() if is_pending else None,
+                fund_type=fund_type,
             )
             self._write_trade_flow(user_id, fund_code, fund_name, "sell", price, quantity, amount, fee)
 
@@ -701,13 +703,15 @@ class PortfolioService:
                            direction: str, price: Decimal, quantity: Decimal,
                            amount: Decimal, fee: Decimal, status: str,
                            reject_reason: Optional[str] = None,
-                           confirm_date: Optional[str] = None) -> None:
+                           confirm_date: Optional[str] = None,
+                           fund_type: str = "otf") -> None:
         """写交易委托记录"""
         now = _now_iso()
         data = {
             "user_id": user_id,
             "fund_code": fund_code,
             "fund_name": fund_name,
+            "fund_type": fund_type,
             "direction": direction,
             "order_type": "market",
             "price": float(price),
@@ -913,3 +917,328 @@ class PortfolioService:
         except Exception as e:
             logger.error(f"查询每日收益率失败: {e}")
             return {"items": []}
+
+    # ==================== ETF 预约功能 ====================
+
+    def create_reservation(self, user_id: str, fund_code: str, quantity: Decimal,
+                           direction: str) -> dict:
+        """
+        创建 ETF 预约单（非交易时段提交，到下一交易时段自动成交）。
+
+        仅支持 ETF（fund_type=etf），场外基金不使用此功能。
+        不扣款、不更新持仓，仅写入 trade_orders (status='reserved')。
+
+        参数:
+            user_id: 用户 ID
+            fund_code: 基金代码
+            quantity: 份额
+            direction: 'buy' 或 'sell'
+        """
+        try:
+            # 0. 判断基金类型
+            fund_type = self._get_fund_type(fund_code)
+            if fund_type != 'etf':
+                return {
+                    "success": False,
+                    "message": "预约功能仅支持场内ETF，场外基金请使用普通买入/卖出",
+                    "data": None,
+                }
+
+            # 0a. 如果当前是交易时段，提示直接下单
+            now_beijing = _beijing_now()
+            from server.services.trading_calendar import is_etf_trading_time
+            if is_etf_trading_time(now_beijing):
+                return {
+                    "success": False,
+                    "message": "当前为ETF交易时段，请直接使用买入/卖出接口",
+                    "data": None,
+                }
+
+            # 0b. 数量校验：100 份整数倍
+            if int(quantity) % 100 != 0:
+                return {
+                    "success": False,
+                    "message": "ETF 必须以 100 份（1 手）的整数倍交易",
+                    "data": None,
+                }
+
+            fund_name = self._get_fund_name(fund_code)
+
+            # 1. 预校验（不扣款，只检查条件是否满足）
+            account = self._ensure_account(user_id)
+            cash = Decimal(str(account["cash"]))
+
+            if direction == 'buy':
+                # 获取参考价格，用于预校验现金是否充足
+                ref_price = self._get_current_price(fund_code, fund_type)
+                if ref_price and ref_price > 0:
+                    from server.services.fund_fee_service import FundFeeService
+                    fee_svc = FundFeeService()
+                    ref_amount = (quantity * ref_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    ref_fee_result = fee_svc.calc_fee_for_trade(fund_code, float(ref_amount), "buy")
+                    ref_total_cost = ref_amount + Decimal(str(ref_fee_result["fee"]))
+                    if cash < ref_total_cost:
+                        return {
+                            "success": False,
+                            "message": f"可用现金不足：预估需 {float(ref_total_cost):.2f} 元，实际可用 {float(cash):.2f} 元（实际成交金额以交易时段实时价为准）",
+                            "data": None,
+                        }
+                estimated_price = float(ref_price) if ref_price else None
+
+            else:  # sell
+                position = self._get_position(user_id, fund_code)
+                if not position:
+                    return {"success": False, "message": f"未持有基金 {fund_code}，无法预约卖出", "data": None}
+                current_qty = Decimal(str(position["quantity"]))
+                if quantity > current_qty:
+                    return {
+                        "success": False,
+                        "message": f"可卖份额不足：需 {float(quantity)} 份，实际持有 {float(current_qty)} 份",
+                        "data": None,
+                    }
+                ref_price = self._get_current_price(fund_code, fund_type)
+                estimated_price = float(ref_price) if ref_price else None
+
+            # 2. 写入预约单（status='reserved'）
+            now = _now_iso()
+            reservation_data = {
+                "user_id": user_id,
+                "fund_code": fund_code,
+                "fund_name": fund_name,
+                "fund_type": fund_type,
+                "direction": direction,
+                "order_type": "market",
+                "price": 0,  # 预约时价格未知，成交时填入
+                "quantity": float(quantity),
+                "amount": 0,
+                "fee": 0,
+                "status": "reserved",
+                "created_at": now,
+                "updated_at": now,
+            }
+
+            result = self.client.table("trade_orders").insert(reservation_data).execute()
+            if not result.data or len(result.data) == 0:
+                return {"success": False, "message": "预约单创建失败", "data": None}
+
+            order = result.data[0]
+            logger.info(f"预约创建: user={user_id}, code={fund_code}, direction={direction}, qty={quantity}, order_id={order['id']}")
+
+            return {
+                "success": True,
+                "message": "预约成功，将在下一交易时段自动成交",
+                "data": {
+                    "id": order["id"],
+                    "user_id": user_id,
+                    "fund_code": fund_code,
+                    "fund_name": fund_name,
+                    "fund_type": fund_type,
+                    "direction": direction,
+                    "quantity": float(quantity),
+                    "estimated_price": estimated_price,
+                    "status": "reserved",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            }
+
+        except Exception as e:
+            logger.error(f"创建预约失败: {e}", exc_info=True)
+            return {"success": False, "message": f"创建预约失败: {str(e)}", "data": None}
+
+    def cancel_reservation(self, order_id: str, user_id: str) -> dict:
+        """
+        取消预约单。
+
+        参数:
+            order_id: 订单 ID
+            user_id: 用户 ID（用于校验归属）
+        """
+        try:
+            # 1. 查询预约单
+            result = (
+                self.client.table("trade_orders")
+                .select("*")
+                .eq("id", order_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+            if not result.data or len(result.data) == 0:
+                return {"success": False, "message": "未找到该预约单", "data": None}
+
+            order = result.data[0]
+            if order["status"] != "reserved":
+                return {
+                    "success": False,
+                    "message": f"该订单状态为 {order['status']}，无法取消（仅 reserved 状态可取消）",
+                    "data": None,
+                }
+
+            # 2. 更新状态为 cancelled
+            now = _now_iso()
+            self.client.table("trade_orders").update({
+                "status": "cancelled",
+                "updated_at": now,
+            }).eq("id", order_id).execute()
+
+            logger.info(f"预约取消: user={user_id}, order_id={order_id}, code={order['fund_code']}")
+
+            return {
+                "success": True,
+                "message": "预约已取消",
+                "data": {
+                    "id": order["id"],
+                    "user_id": user_id,
+                    "fund_code": order["fund_code"],
+                    "fund_name": order["fund_name"],
+                    "fund_type": order.get("fund_type", "etf"),
+                    "direction": order["direction"],
+                    "quantity": float(order["quantity"]),
+                    "estimated_price": None,
+                    "status": "cancelled",
+                    "created_at": order["created_at"],
+                    "updated_at": now,
+                },
+            }
+
+        except Exception as e:
+            logger.error(f"取消预约失败: {e}", exc_info=True)
+            return {"success": False, "message": f"取消预约失败: {str(e)}", "data": None}
+
+    def list_reservations(self, user_id: str) -> dict:
+        """
+        查询用户的预约单列表（仅 status='reserved' 的订单）。
+
+        参数:
+            user_id: 用户 ID
+
+        返回:
+            {"total": int, "items": list}
+        """
+        try:
+            result = (
+                self.client.table("trade_orders")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("status", "reserved")
+                .order("created_at", desc=True)
+                .execute()
+            )
+            items = result.data or []
+            for item in items:
+                item["estimated_price"] = None  # 预约时无成交价
+
+            return {"total": len(items), "items": items}
+
+        except Exception as e:
+            logger.error(f"查询预约列表失败: {e}", exc_info=True)
+            return {"total": 0, "items": []}
+
+    def execute_reservations(self) -> dict:
+        """
+        执行所有待执行的预约单（由调度器在交易时段调用）。
+
+        查询所有 status='reserved' 的 ETF 预约单，逐笔执行：
+        - 获取实时价格
+        - 扣款/入账
+        - 更新持仓
+        - 写流水
+        - 更新订单状态
+
+        返回:
+            {"executed": int, "failed": int, "details": list}
+        """
+        if not self.client:
+            return {"executed": 0, "failed": 0, "details": []}
+
+        try:
+            # 1. 查询所有 reserved 订单
+            result = (
+                self.client.table("trade_orders")
+                .select("*")
+                .eq("status", "reserved")
+                .execute()
+            )
+            orders = result.data or []
+
+            if not orders:
+                return {"executed": 0, "failed": 0, "details": []}
+
+            executed = 0
+            failed = 0
+            details = []
+
+            for order in orders:
+                try:
+                    order_id = order["id"]
+                    user_id = order["user_id"]
+                    fund_code = order["fund_code"]
+                    direction = order["direction"]
+                    quantity = Decimal(str(order["quantity"]))
+
+                    if direction == "buy":
+                        trade_result = self.buy(
+                            user_id=user_id,
+                            fund_code=fund_code,
+                            quantity=quantity,
+                        )
+                    else:
+                        trade_result = self.sell(
+                            user_id=user_id,
+                            fund_code=fund_code,
+                            quantity=quantity,
+                        )
+
+                    if trade_result["success"]:
+                        # 买入/卖出成功后，把原来的 reserved 订单标记为 completed
+                        # 注意：buy/sell 内部会创建新的 trade_order (completed)，所以需要把原 reserved 订单更新
+                        self.client.table("trade_orders").update({
+                            "status": "completed",
+                            "price": float(trade_result["data"]["price"]),
+                            "amount": float(trade_result["data"]["amount"]),
+                            "fee": float(trade_result["data"]["fee"]),
+                            "updated_at": _now_iso(),
+                        }).eq("id", order_id).execute()
+
+                        executed += 1
+                        details.append({
+                            "order_id": order_id,
+                            "fund_code": fund_code,
+                            "direction": direction,
+                            "status": "completed",
+                        })
+                        logger.info(f"预约执行成功: order_id={order_id}, code={fund_code}, direction={direction}")
+                    else:
+                        # 执行失败，标记为 rejected
+                        self.client.table("trade_orders").update({
+                            "status": "rejected",
+                            "reject_reason": trade_result["message"],
+                            "updated_at": _now_iso(),
+                        }).eq("id", order_id).execute()
+
+                        failed += 1
+                        details.append({
+                            "order_id": order_id,
+                            "fund_code": fund_code,
+                            "direction": direction,
+                            "status": "rejected",
+                            "reason": trade_result["message"],
+                        })
+                        logger.warning(f"预约执行失败: order_id={order_id}, reason={trade_result['message']}")
+
+                except Exception as e:
+                    failed += 1
+                    details.append({
+                        "order_id": order.get("id", "unknown"),
+                        "fund_code": order.get("fund_code", ""),
+                        "direction": order.get("direction", ""),
+                        "status": "error",
+                        "reason": str(e),
+                    })
+                    logger.error(f"预约执行异常: order_id={order.get('id')}, error={e}")
+
+            return {"executed": executed, "failed": failed, "details": details}
+
+        except Exception as e:
+            logger.error(f"执行预约单失败: {e}", exc_info=True)
+            return {"executed": 0, "failed": 0, "details": []}

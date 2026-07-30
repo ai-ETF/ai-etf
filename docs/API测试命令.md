@@ -314,6 +314,51 @@ curl -s "http://47.113.220.182:8000/api/portfolio/daily-returns?days=30" \
 curl -s "http://47.113.220.182:8000/api/portfolio/health"
 ```
 
+### 6.9 ETF 预约买入（非交易时段）
+
+非交易时段（盘前盘后、午休、非交易日）可提交预约，到下一交易时段自动成交。
+
+```bash
+# 预约买入 100 份 512890（红利低波ETF）
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/reserve-buy" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":100}' | python3 -m json.tool
+```
+
+返回：预约单 ID、基金信息、status="reserved"。
+
+注意：
+- 仅支持场内 ETF，场外基金请用普通买入
+- 交易时段内会提示直接使用 /buy
+- 预约时不扣款，成交时按实时价执行
+- 100 份整数倍
+
+### 6.10 ETF 预约卖出（非交易时段）
+
+```bash
+# 预约卖出 100 份 512890
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/reserve-sell" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":100}' | python3 -m json.tool
+```
+
+### 6.11 查询预约单列表
+
+```bash
+curl -s "http://47.113.220.182:8000/api/portfolio/reservations" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+### 6.12 取消预约
+
+```bash
+# 将 <ORDER_ID> 替换为预约单 ID
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/cancel-reservation/<ORDER_ID>" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
 ---
 
 ## 六、场内外基金对比测试（fund_type 分支）

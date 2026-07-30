@@ -34,6 +34,10 @@ from server.models.schemas import (
     SnapshotData,
     DailyReturnResponse,
     DailyReturnItem,
+    ReserveRequest,
+    ReservationResponse,
+    ReservationItem,
+    ReservationListResponse,
 )
 from server.services.portfolio_service import PortfolioService
 
@@ -235,6 +239,105 @@ async def get_daily_returns(
 async def health_check():
     """健康检查（公开）"""
     return {"status": "ok", "service": "portfolio"}
+
+
+# ==================== ETF 预约端点（需 JWT） ====================
+
+
+@router.post("/reserve-buy", response_model=ReservationResponse)
+async def reserve_buy(
+    req: ReserveRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    预约买入 ETF（非交易时段提交，到下一交易时段自动成交）
+
+    仅支持场内 ETF，非交易时段可用。交易时段请直接使用 /buy。
+    - 预约时不扣款，成交时按实时价执行
+    - 100 份整数倍
+    - 可通过 /reservations 查看预约状态
+    - 可通过 /cancel-reservation/{order_id} 取消
+    """
+    svc = PortfolioService()
+    result = svc.create_reservation(
+        user_id=current_user,
+        fund_code=req.fund_code,
+        quantity=Decimal(str(req.quantity)),
+        direction="buy",
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return ReservationResponse(
+        success=True,
+        message=result["message"],
+        data=ReservationItem(**result["data"]) if result["data"] else None,
+    )
+
+
+@router.post("/reserve-sell", response_model=ReservationResponse)
+async def reserve_sell(
+    req: ReserveRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    预约卖出 ETF（非交易时段提交，到下一交易时段自动成交）
+
+    仅支持场内 ETF，非交易时段可用。交易时段请直接使用 /sell。
+    - 预约时不入账，成交时按实时价执行
+    - 100 份整数倍
+    - 可通过 /reservations 查看预约状态
+    - 可通过 /cancel-reservation/{order_id} 取消
+    """
+    svc = PortfolioService()
+    result = svc.create_reservation(
+        user_id=current_user,
+        fund_code=req.fund_code,
+        quantity=Decimal(str(req.quantity)),
+        direction="sell",
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return ReservationResponse(
+        success=True,
+        message=result["message"],
+        data=ReservationItem(**result["data"]) if result["data"] else None,
+    )
+
+
+@router.get("/reservations", response_model=ReservationListResponse)
+async def list_reservations(
+    current_user: str = Depends(get_current_user),
+):
+    """
+    查询预约单列表（需 JWT 认证）
+
+    返回所有 status='reserved' 的预约单。
+    """
+    svc = PortfolioService()
+    result = svc.list_reservations(user_id=current_user)
+    items = [ReservationItem(**item) for item in result["items"]]
+    return ReservationListResponse(total=result["total"], items=items)
+
+
+@router.post("/cancel-reservation/{order_id}", response_model=ReservationResponse)
+async def cancel_reservation(
+    order_id: str,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    取消预约单（需 JWT 认证）
+
+    仅 status='reserved' 的预约单可取消。
+    """
+    svc = PortfolioService()
+    result = svc.cancel_reservation(order_id=order_id, user_id=current_user)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return ReservationResponse(
+        success=True,
+        message=result["message"],
+        data=ReservationItem(**result["data"]) if result["data"] else None,
+    )
 
 
 # ==================== 开发测试端点（免 JWT，用 X-User-Id header） ====================
