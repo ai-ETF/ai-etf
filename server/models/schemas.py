@@ -444,6 +444,7 @@ class TradeData(BaseModel):
     """成交数据"""
     fund_code: str
     fund_name: str
+    fund_type: Optional[str] = None  # otf=场外基金, etf=场内ETF
     price: float
     quantity: float
     amount: float
@@ -456,6 +457,8 @@ class TradeData(BaseModel):
     cost_price: Optional[float] = None
     cash_remaining: float
     trade_time: str
+    status: str = "completed"  # completed / pending
+    confirm_date: Optional[str] = None  # 确认日期（pending 时为下一个交易日）
 
 
 class TradeResponse(BaseModel):
@@ -471,6 +474,7 @@ class PositionItem(BaseModel):
     user_id: str
     fund_code: str
     fund_name: str
+    fund_type: Optional[str] = None  # otf=场外基金, etf=场内ETF
     quantity: float
     cost_price: float
     cost_value: Optional[float] = None
@@ -506,6 +510,7 @@ class TradeFlowItem(BaseModel):
     user_id: str
     fund_code: str
     fund_name: str
+    fund_type: Optional[str] = None  # otf=场外基金, etf=场内ETF
     direction: str
     price: float
     quantity: float

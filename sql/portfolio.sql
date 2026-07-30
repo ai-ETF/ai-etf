@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS positions (
   fund_name VARCHAR(100) NOT NULL DEFAULT '',
   quantity DECIMAL(18,2) NOT NULL DEFAULT 0,
   cost_price DECIMAL(18,4) NOT NULL DEFAULT 0,
+  confirm_date DATE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(user_id, fund_code)
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS positions (
 COMMENT ON TABLE positions IS '用户基金持仓';
 COMMENT ON COLUMN positions.quantity IS '持有份额';
 COMMENT ON COLUMN positions.cost_price IS '加权平均成本价（元/份）';
+COMMENT ON COLUMN positions.confirm_date IS '申购确认日期（交易日15:00前为当日，否则为下一交易日）';
 
 CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id);
 CREATE INDEX IF NOT EXISTS idx_positions_code ON positions(fund_code);
@@ -56,6 +58,7 @@ CREATE TABLE IF NOT EXISTS trade_orders (
   fee DECIMAL(18,2) NOT NULL DEFAULT 0,
   status VARCHAR(10) NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'cancelled', 'rejected')),
   reject_reason TEXT,
+  confirm_date DATE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -63,6 +66,7 @@ CREATE TABLE IF NOT EXISTS trade_orders (
 COMMENT ON TABLE trade_orders IS '交易订单/委托记录';
 COMMENT ON COLUMN trade_orders.direction IS '方向：buy-买入, sell-卖出';
 COMMENT ON COLUMN trade_orders.status IS '状态：pending-待处理, completed-已完成, cancelled-已撤销, rejected-已拒绝';
+COMMENT ON COLUMN trade_orders.confirm_date IS '场外基金订单确认日期：交易日15:00前为当日，15:00后/非交易日为下一个交易日';
 
 CREATE INDEX IF NOT EXISTS idx_trade_orders_user ON trade_orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_trade_orders_created ON trade_orders(created_at DESC);
@@ -117,6 +121,8 @@ CREATE TABLE IF NOT EXISTS fund_fee_rules (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   fund_code VARCHAR(10) NOT NULL UNIQUE,
   fund_name VARCHAR(100) NOT NULL,
+  -- 基金类型
+  fund_type VARCHAR(4) NOT NULL DEFAULT 'otf' CHECK (fund_type IN ('otf', 'etf')),
   -- 申购费率
   purchase_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.0015,
   -- 赎回费率（持有<7天）
@@ -131,15 +137,19 @@ CREATE TABLE IF NOT EXISTS fund_fee_rules (
   management_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.015,
   -- 托管费率（年化）
   custody_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.0025,
+  -- ETF 券商佣金费率
+  commission_rate DECIMAL(6,4) NOT NULL DEFAULT 0.00025,
   -- 最低申购金额
   min_purchase_amount DECIMAL(18,2) NOT NULL DEFAULT 1.00,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-COMMENT ON TABLE fund_fee_rules IS '基金手续费规则（覆盖20只常用场外基金）';
+COMMENT ON TABLE fund_fee_rules IS '基金手续费规则（覆盖20只常用场外基金+ETF）';
+COMMENT ON COLUMN fund_fee_rules.fund_type IS '基金类型: otf=场外基金, etf=场内ETF';
 COMMENT ON COLUMN fund_fee_rules.purchase_fee_rate IS '申购费率（如0.0015=0.15%）';
 COMMENT ON COLUMN fund_fee_rules.redemption_fee_rate_7d IS '赎回费率 持有<7天';
 COMMENT ON COLUMN fund_fee_rules.redemption_fee_rate_30d IS '赎回费率 持有7-30天';
 COMMENT ON COLUMN fund_fee_rules.redemption_fee_rate_1y IS '赎回费率 持有30-365天';
 COMMENT ON COLUMN fund_fee_rules.redemption_fee_rate_over1y IS '赎回费率 持有>365天';
+COMMENT ON COLUMN fund_fee_rules.commission_rate IS 'ETF券商佣金费率 (如 0.00025=万2.5), 最低5元';

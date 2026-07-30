@@ -10,7 +10,7 @@
 - 每日资产快照（支撑日收益率计算）
 """
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, List, Dict, Any
 
@@ -18,6 +18,33 @@ logger = logging.getLogger(__name__)
 
 # 初始资金
 INITIAL_CASH = Decimal("100000.00")
+
+# 北京时间时区
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _beijing_now() -> datetime:
+    """返回当前北京时间"""
+    return datetime.now(BEIJING_TZ)
+
+
+def _now_iso() -> str:
+    """返回当前北京时间 ISO 字符串（用于数据库写入和 API 返回）"""
+    return _beijing_now().isoformat()
+
+
+def _now_utc_iso() -> str:
+    """返回当前 UTC 时间 ISO 字符串（Supabase 兼容）"""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_time(ts: str) -> datetime:
+    """解析时间字符串为北京时间 datetime"""
+    ts = ts.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(BEIJING_TZ)
+    return dt.replace(tzinfo=None)
 
 
 class PortfolioService:
@@ -54,7 +81,7 @@ class PortfolioService:
             return result.data[0]
 
         # 创建新账户
-        now = datetime.now(timezone.utc).isoformat()
+        now = _now_iso()
         insert_data = {
             "user_id": user_id,
             "cash": float(INITIAL_CASH),
@@ -87,20 +114,49 @@ class PortfolioService:
 
     # ==================== 市场行情/价格获取 ====================
 
-    def _get_current_price(self, fund_code: str) -> Optional[Decimal]:
+    def _get_fund_type(self, fund_code: str) -> str:
+        """获取基金类型（otf=场外基金, etf=场内ETF）"""
+        from server.services.fund_fee_service import FundFeeService
+        svc = FundFeeService()
+        return svc.get_fund_type(fund_code)
+
+    def _get_current_price(self, fund_code: str, fund_type: str = None) -> Optional[Decimal]:
         """
         获取基金当前交易价格。
 
-        优先从实时行情缓存取（ETF），取不到则查最新净值（场外基金）。
+        按 fund_type 区分：
+        - ETF：从实时行情缓存取（盘中实时价）
+        - 场外基金：从 akshare 取最新净值
         """
-        from server.services.finance_api_service import FinanceApiService
+        if fund_type is None:
+            fund_type = self._get_fund_type(fund_code)
 
+        if fund_type == 'etf':
+            # ETF：实时行情价
+            from server.services.finance_api_service import FinanceApiService
+            svc = FinanceApiService()
+            spot = svc.query_spot(fund_code)
+            if spot and spot.get("price"):
+                return Decimal(str(spot["price"]))
+            # ETF 行情也取不到时降级到净值
+            return self._get_fund_nav(fund_code)
+
+        # 场外基金：净值
+        price = self._get_fund_nav(fund_code)
+        if price is not None:
+            return price
+
+        # 场外基金净值也取不到时降级到行情缓存
+        from server.services.finance_api_service import FinanceApiService
         svc = FinanceApiService()
         spot = svc.query_spot(fund_code)
         if spot and spot.get("price"):
             return Decimal(str(spot["price"]))
 
-        # 场外基金：查最新净值
+        return None
+
+    def _get_fund_nav(self, fund_code: str) -> Optional[Decimal]:
+        """获取场外基金最新净值"""
         try:
             import akshare as ak
             df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
@@ -111,53 +167,109 @@ class PortfolioService:
                     return Decimal(str(float(nav)))
         except Exception as e:
             logger.warning(f"查询基金净值失败 ({fund_code}): {e}")
-
         return None
 
     def _get_fund_name(self, fund_code: str) -> str:
-        """获取基金名称"""
-        from server.services.finance_api_service import FinanceApiService
-        svc = FinanceApiService()
-        spot = svc.query_spot(fund_code)
-        if spot and spot.get("name"):
-            return spot["name"]
+        """获取基金名称（优先从费率表取，其次行情缓存，最后返回 code）"""
+        # 1. 优先从 fund_fee_rules 表取
+        try:
+            from server.services.fund_fee_service import FundFeeService
+            fee_svc = FundFeeService()
+            rule = fee_svc.get_fee_rule(fund_code)
+            if rule and rule.get("fund_name"):
+                return rule["fund_name"]
+        except Exception:
+            pass
+
+        # 2. 尝试从行情缓存取
+        try:
+            from server.services.finance_api_service import FinanceApiService
+            svc = FinanceApiService()
+            spot = svc.query_spot(fund_code)
+            if spot and spot.get("name"):
+                return spot["name"]
+        except Exception:
+            pass
+
+        # 3. 都取不到返回 code
         return fund_code
 
     # ==================== 手续费计算 ====================
 
-    def _calc_purchase_fee(self, fund_code: str, amount: Decimal) -> Decimal:
-        """计算申购费"""
-        from server.services.fund_fee_service import FundFeeService
-        svc = FundFeeService()
-        fee = svc.calc_purchase_fee(fund_code, float(amount))
-        return Decimal(str(fee))
+    def _calc_trade_fee(self, fund_code: str, amount: Decimal, direction: str, hold_days: int = 0) -> dict:
+        """
+        统一费用计算，按 fund_type 自动选择模型。
 
-    def _calc_redemption_fee(self, fund_code: str, amount: Decimal, hold_days: int) -> Decimal:
-        """计算赎回费"""
+        返回: {"fee": Decimal, "fee_type": str, "fund_type": str}
+        """
         from server.services.fund_fee_service import FundFeeService
         svc = FundFeeService()
-        fee = svc.calc_redemption_fee(fund_code, float(amount), hold_days)
-        return Decimal(str(fee))
+        result = svc.calc_fee_for_trade(fund_code, float(amount), direction, hold_days)
+        return {
+            "fee": Decimal(str(result["fee"])),
+            "fee_type": result["fee_type"],
+            "fund_type": result["fund_type"],
+        }
 
     # ==================== 买入 ====================
 
     def buy(self, user_id: str, fund_code: str, quantity: Decimal, price: Optional[Decimal] = None) -> dict:
         """
-        买入建仓/加仓。
+        买入建仓/加仓（按 fund_type 自动选择场外/场内规则）。
+
+        场外基金 (otf)：
+        - 全天可提交，15:00 为界，15:00 后 pending
+        - 成交价格为当日净值
+        - 申购费（外扣法）
+
+        场内 ETF (etf)：
+        - 仅 9:30-11:30、13:00-15:00 可交易，非交易时段直接拒绝
+        - 成交价格为盘中实时价
+        - 100 份整数倍
+        - 券商佣金（万2.5，最低5元）
 
         参数:
             user_id: 用户 ID
             fund_code: 基金代码
-            quantity: 申购份额
-            price: 成交单价（不传则取当前市价）
-
-        返回:
-            {"success": bool, "message": str, "data": dict}
+            quantity: 份额
+            price: 成交单价（不传则自动取价）
         """
         try:
+            now_beijing = _beijing_now()
+
+            # 0. 判断基金类型
+            fund_type = self._get_fund_type(fund_code)
+
+            # 0a. ETF 交易时间校验（非交易时段直接拒绝）
+            if fund_type == 'etf':
+                from server.services.trading_calendar import is_etf_trading_time
+                if not is_etf_trading_time(now_beijing):
+                    return {
+                        "success": False,
+                        "message": "ETF 仅限交易日 9:30-11:30 和 13:00-15:00 交易",
+                        "data": None,
+                    }
+                # ETF 数量校验：100 份整数倍
+                if int(quantity) % 100 != 0:
+                    return {
+                        "success": False,
+                        "message": "ETF 必须以 100 份（1 手）的整数倍交易",
+                        "data": None,
+                    }
+                is_pending = False
+                confirm_date = now_beijing.date()
+
+            # 0b. 场外基金交易时间（15:00 截止，非交易时段 pending）
+            else:
+                from server.services.trading_calendar import is_trading_day, is_before_cutoff, get_confirmation_date
+                is_trade_day = is_trading_day(now_beijing.date())
+                before_cutoff = is_before_cutoff(now_beijing)
+                confirm_date = get_confirmation_date(now_beijing)
+                is_pending = not (is_trade_day and before_cutoff)
+
             # 1. 获取价格
             if price is None:
-                price = self._get_current_price(fund_code)
+                price = self._get_current_price(fund_code, fund_type)
             if price is None or price <= 0:
                 return {"success": False, "message": f"无法获取基金 {fund_code} 的当前价格", "data": None}
 
@@ -165,19 +277,21 @@ class PortfolioService:
 
             # 2. 计算金额与手续费
             amount = (quantity * price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            fee = self._calc_purchase_fee(fund_code, amount)
+            fee_result = self._calc_trade_fee(fund_code, amount, "buy")
+            fee = fee_result["fee"]
             total_cost = amount + fee
 
-            # 3. 校验最低申购金额
-            from server.services.fund_fee_service import FundFeeService
-            fee_svc = FundFeeService()
-            min_amount = Decimal(str(fee_svc.get_min_purchase_amount(fund_code)))
-            if amount < min_amount:
-                return {
-                    "success": False,
-                    "message": f"申购金额 {float(amount):.2f} 元低于最低申购金额 {float(min_amount):.2f} 元",
-                    "data": None,
-                }
+            # 3. 校验最低申购金额（仅场外基金）
+            if fund_type != 'etf':
+                from server.services.fund_fee_service import FundFeeService
+                fee_svc = FundFeeService()
+                min_amount = Decimal(str(fee_svc.get_min_purchase_amount(fund_code)))
+                if amount < min_amount:
+                    return {
+                        "success": False,
+                        "message": f"申购金额 {float(amount):.2f} 元低于最低申购金额 {float(min_amount):.2f} 元",
+                        "data": None,
+                    }
 
             # 4. 校验可用现金
             account = self._ensure_account(user_id)
@@ -192,21 +306,21 @@ class PortfolioService:
             # 5. 扣款
             new_cash = cash - total_cost
 
-            # 6. 更新持仓（加权平均成本）
+            # 6. 更新持仓（加权平均成本，含手续费）
             position = self._get_position(user_id, fund_code)
             if position:
                 old_qty = Decimal(str(position["quantity"]))
                 old_cost_price = Decimal(str(position["cost_price"]))
-                total_cost_basis = old_qty * old_cost_price + amount + fee  # 成本含手续费
+                total_cost_basis = old_qty * old_cost_price + amount + fee
                 new_qty = old_qty + quantity
                 new_cost_price = (total_cost_basis / new_qty).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP) if new_qty > 0 else price
             else:
                 new_qty = quantity
                 new_cost_price = ((amount + fee) / quantity).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
-            now = datetime.now(timezone.utc).isoformat()
+            now = _now_iso()
 
-            # 7. 写数据库（事务模拟：顺序执行，任一失败回滚语义由调用方处理）
+            # 7. 写数据库
             self.client.table("accounts").update({
                 "cash": float(new_cash),
                 "updated_at": now,
@@ -216,6 +330,7 @@ class PortfolioService:
                 self.client.table("positions").update({
                     "quantity": float(new_qty),
                     "cost_price": float(new_cost_price),
+                    "confirm_date": confirm_date.isoformat(),
                     "updated_at": now,
                 }).eq("id", position["id"]).execute()
             else:
@@ -225,26 +340,39 @@ class PortfolioService:
                     "fund_name": fund_name,
                     "quantity": float(new_qty),
                     "cost_price": float(new_cost_price),
+                    "confirm_date": confirm_date.isoformat(),
                     "created_at": now,
                     "updated_at": now,
                 }).execute()
 
             # 8. 写交易委托与流水
-            self._write_trade_order(user_id, fund_code, fund_name, "buy", price, quantity, amount, fee, "completed")
+            order_status = "pending" if is_pending else "completed"
+            self._write_trade_order(
+                user_id, fund_code, fund_name, "buy", price, quantity,
+                amount, fee, order_status,
+                confirm_date=confirm_date.isoformat() if is_pending else None,
+            )
             self._write_trade_flow(user_id, fund_code, fund_name, "buy", price, quantity, amount, fee)
 
+            # 9. 构造返回消息
+            if is_pending:
+                message = f"买入申请已提交，将于 {confirm_date.isoformat()}（下一交易日）按当日净值确认"
+            else:
+                message = "买入成功"
+
             logger.info(
-                f"买入成功: user={user_id}, code={fund_code}, "
+                f"买入: user={user_id}, code={fund_code}, type={fund_type}, "
                 f"price={price}, qty={quantity}, amount={amount}, fee={fee}, "
-                f"new_qty={new_qty}, new_cost_price={new_cost_price}"
+                f"new_qty={new_qty}, new_cost_price={new_cost_price}, status={order_status}"
             )
 
             return {
                 "success": True,
-                "message": "买入成功",
+                "message": message,
                 "data": {
                     "fund_code": fund_code,
                     "fund_name": fund_name,
+                    "fund_type": fund_type,
                     "price": float(price),
                     "quantity": float(quantity),
                     "amount": float(amount),
@@ -254,6 +382,8 @@ class PortfolioService:
                     "cost_price": float(new_cost_price),
                     "cash_remaining": float(new_cash),
                     "trade_time": now,
+                    "status": order_status,
+                    "confirm_date": confirm_date.isoformat() if is_pending else now_beijing.date().isoformat(),
                 },
             }
 
@@ -265,21 +395,49 @@ class PortfolioService:
 
     def sell(self, user_id: str, fund_code: str, quantity: Decimal, price: Optional[Decimal] = None) -> dict:
         """
-        卖出减仓/清仓。
+        卖出减仓/清仓（按 fund_type 自动选择场外/场内规则）。
 
         参数:
             user_id: 用户 ID
             fund_code: 基金代码
-            quantity: 赎回份额
-            price: 成交单价（不传则取当前市价）
-
-        返回:
-            {"success": bool, "message": str, "data": dict}
+            quantity: 份额
+            price: 成交单价（不传则自动取价）
         """
         try:
+            now_beijing = _beijing_now()
+
+            # 0. 判断基金类型
+            fund_type = self._get_fund_type(fund_code)
+
+            # 0a. ETF 交易时间校验
+            if fund_type == 'etf':
+                from server.services.trading_calendar import is_etf_trading_time
+                if not is_etf_trading_time(now_beijing):
+                    return {
+                        "success": False,
+                        "message": "ETF 仅限交易日 9:30-11:30 和 13:00-15:00 交易",
+                        "data": None,
+                    }
+                if int(quantity) % 100 != 0:
+                    return {
+                        "success": False,
+                        "message": "ETF 必须以 100 份（1 手）的整数倍交易",
+                        "data": None,
+                    }
+                is_pending = False
+                confirm_date = now_beijing.date()
+
+            # 0b. 场外基金 15:00 截止
+            else:
+                from server.services.trading_calendar import is_trading_day, is_before_cutoff, get_confirmation_date
+                is_trade_day = is_trading_day(now_beijing.date())
+                before_cutoff = is_before_cutoff(now_beijing)
+                confirm_date = get_confirmation_date(now_beijing)
+                is_pending = not (is_trade_day and before_cutoff)
+
             # 1. 获取价格
             if price is None:
-                price = self._get_current_price(fund_code)
+                price = self._get_current_price(fund_code, fund_type)
             if price is None or price <= 0:
                 return {"success": False, "message": f"无法获取基金 {fund_code} 的当前价格", "data": None}
 
@@ -298,26 +456,36 @@ class PortfolioService:
                     "data": None,
                 }
 
-            # 3. 计算赎回费（持有天数从建仓日起算）
+            # 3. 计算费用
             cost_price = Decimal(str(position["cost_price"]))
             amount = (quantity * price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-            created_at = position.get("created_at", "")
-            if created_at:
-                try:
-                    hold_start = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                    hold_days = (datetime.now(timezone.utc) - hold_start).days
-                except Exception:
-                    hold_days = 0
-            else:
-                hold_days = 0
+            # ETF 无持有天数概念，场外基金按确认日算持有天数
+            hold_days = 0
+            if fund_type != 'etf':
+                confirm_date_str = position.get("confirm_date", "")
+                if confirm_date_str:
+                    try:
+                        hold_start = date.fromisoformat(str(confirm_date_str))
+                        hold_days = (now_beijing.date() - hold_start).days
+                    except Exception:
+                        hold_days = 0
+                else:
+                    created_at = position.get("created_at", "")
+                    if created_at:
+                        try:
+                            hold_start = _parse_time(created_at)
+                            hold_days = (_beijing_now() - hold_start).days
+                        except Exception:
+                            hold_days = 0
 
-            fee = self._calc_redemption_fee(fund_code, amount, max(hold_days, 0))
+            fee_result = self._calc_trade_fee(fund_code, amount, "sell", max(hold_days, 0))
+            fee = fee_result["fee"]
             net_amount = amount - fee
 
             # 4. 更新持仓
             new_qty = current_qty - quantity
-            now = datetime.now(timezone.utc).isoformat()
+            now = _now_iso()
 
             # 5. 入账
             account = self._ensure_account(user_id)
@@ -330,48 +498,57 @@ class PortfolioService:
             }).eq("user_id", user_id).execute()
 
             if new_qty == 0:
-                # 清仓：删除持仓记录
                 self.client.table("positions").delete().eq("id", position["id"]).execute()
             else:
-                # 减仓：成本价不变
                 self.client.table("positions").update({
                     "quantity": float(new_qty),
                     "updated_at": now,
                 }).eq("id", position["id"]).execute()
 
             # 6. 写流水
-            self._write_trade_order(user_id, fund_code, fund_name, "sell", price, quantity, amount, fee, "completed")
+            order_status = "pending" if is_pending else "completed"
+            self._write_trade_order(
+                user_id, fund_code, fund_name, "sell", price, quantity,
+                amount, fee, order_status,
+                confirm_date=confirm_date.isoformat() if is_pending else None,
+            )
             self._write_trade_flow(user_id, fund_code, fund_name, "sell", price, quantity, amount, fee)
 
-            # 7. 计算该笔盈亏（成本包含申购时摊入的手续费）
-            # 用(amount + 该笔对应买入手续费)算实际成本，这样盈亏就是净结果
-            # 简化处理：用 cost_price * quantity 作为持仓成本，再减去赎回费
+            # 7. 计算盈亏
             cost_of_sold = (cost_price * quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             trade_pnl = (net_amount - cost_of_sold).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
 
+            if is_pending:
+                message = f"卖出申请已提交，将于 {confirm_date.isoformat()}（下一交易日）按当日净值确认"
+            else:
+                message = "卖出成功"
+
             logger.info(
-                f"卖出成功: user={user_id}, code={fund_code}, "
+                f"卖出: user={user_id}, code={fund_code}, type={fund_type}, "
                 f"price={price}, qty={quantity}, amount={amount}, fee={fee}, "
-                f"net={net_amount}, trade_pnl={trade_pnl}, new_qty={new_qty}"
+                f"net={net_amount}, trade_pnl={trade_pnl}, new_qty={new_qty}, status={order_status}"
             )
 
             return {
                 "success": True,
-                "message": "卖出成功",
+                "message": message,
                 "data": {
                     "fund_code": fund_code,
                     "fund_name": fund_name,
+                    "fund_type": fund_type,
                     "price": float(price),
                     "quantity": float(quantity),
                     "amount": float(amount),
                     "fee": float(fee),
                     "net_amount": float(net_amount),
                     "trade_pnl": float(trade_pnl),
-                    "hold_days": max(hold_days, 0),
+                    "hold_days": max(hold_days, 0) if fund_type != 'etf' else 0,
                     "position_qty": float(new_qty),
                     "cost_price": float(cost_price) if new_qty > 0 else None,
                     "cash_remaining": float(new_cash),
                     "trade_time": now,
+                    "status": order_status,
+                    "confirm_date": confirm_date.isoformat() if is_pending else now_beijing.date().isoformat(),
                 },
             }
 
@@ -426,9 +603,11 @@ class PortfolioService:
                 qty = Decimal(str(item.get("quantity", 0)))
                 cost_price = Decimal(str(item.get("cost_price", 0)))
                 cost_value = qty * cost_price
+                fund_type = self._get_fund_type(item["fund_code"])
+                item["fund_type"] = fund_type
 
                 if include_quote:
-                    market_price = self._get_current_price(item["fund_code"])
+                    market_price = self._get_current_price(item["fund_code"], fund_type)
                     if market_price and market_price > 0:
                         market_value = (qty * market_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                         item["market_price"] = float(market_price)
@@ -521,9 +700,10 @@ class PortfolioService:
     def _write_trade_order(self, user_id: str, fund_code: str, fund_name: str,
                            direction: str, price: Decimal, quantity: Decimal,
                            amount: Decimal, fee: Decimal, status: str,
-                           reject_reason: Optional[str] = None) -> None:
+                           reject_reason: Optional[str] = None,
+                           confirm_date: Optional[str] = None) -> None:
         """写交易委托记录"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = _now_iso()
         data = {
             "user_id": user_id,
             "fund_code": fund_code,
@@ -535,7 +715,7 @@ class PortfolioService:
             "amount": float(amount),
             "fee": float(fee),
             "status": status,
-            "reject_reason": reject_reason,
+            "reject_reason": reject_reason or (f"确认日期: {confirm_date}" if confirm_date else None),
             "created_at": now,
             "updated_at": now,
         }
@@ -548,7 +728,7 @@ class PortfolioService:
                           direction: str, price: Decimal, quantity: Decimal,
                           amount: Decimal, fee: Decimal) -> None:
         """写交易流水"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = _now_iso()
         data = {
             "user_id": user_id,
             "fund_code": fund_code,
@@ -606,6 +786,10 @@ class PortfolioService:
             total = result.count if hasattr(result, 'count') and result.count is not None else len(items)
             total_pages = max(1, (total + page_size - 1) // page_size)
 
+            # 给每条流水加 fund_type
+            for item in items:
+                item["fund_type"] = self._get_fund_type(item["fund_code"])
+
             return {
                 "total": total,
                 "page": page,
@@ -644,7 +828,7 @@ class PortfolioService:
                 "position_value": summary["position_value"],
                 "total_pnl": summary["total_pnl"],
                 "total_return_rate": summary["total_return_rate"],
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": _now_iso(),
             }
 
             # UPSERT：同一天存在则更新

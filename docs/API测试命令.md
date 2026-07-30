@@ -199,7 +199,7 @@ curl -s "http://47.113.220.182:8000/api/portfolio/account" \
 不传 price 则自动获取当前市价。
 
 ```bash
-# 买入 100 份 512890（红利低波ETF）
+# 买入 100 份 512890（场内ETF，红利低波ETF）
 curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
@@ -207,22 +207,31 @@ curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
 ```
 
 ```bash
-# 买入 200 份 510300（沪深300ETF）
+# 买入 200 份 510300（场内ETF，沪深300ETF）
 curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"fund_code":"510300","quantity":200}' | python3 -m json.tool
 ```
 
+```bash
+# 买入场外基金 110003（易方达上证50增强A，申购费 0.15%）
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"110003","quantity":100}' | python3 -m json.tool
+```
+
 校验规则：
-- 可用现金必须 ≥ 成交金额 + 申购费
-- 申购金额不低于最低申购金额
+- 可用现金必须 ≥ 成交金额 + 费用
+- ETF：券商佣金（万2.5，最低5元），100份整数倍，仅交易时段可交易
+- 场外基金：申购费（外扣法），申购金额不低于最低申购金额，15:00 后 pending
 - 成本价按加权平均重算（含手续费）
 
 ### 6.3 卖出基金
 
 ```bash
-# 卖出 50 份 512890
+# 卖出 50 份 512890（场内ETF）
 curl -s -X POST "http://47.113.220.182:8000/api/portfolio/sell" \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
@@ -230,16 +239,16 @@ curl -s -X POST "http://47.113.220.182:8000/api/portfolio/sell" \
 ```
 
 ```bash
-# 全部清仓
+# 卖出场外基金 110003（易方达上证50增强A）
 curl -s -X POST "http://47.113.220.182:8000/api/portfolio/sell" \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"fund_code":"512890","quantity":50}' | python3 -m json.tool
+  -d '{"fund_code":"110003","quantity":100}' | python3 -m json.tool
 ```
 
 校验规则：
 - 卖出份额不超过持仓量
-- 按持有天数计算赎回费
+- 按持有天数计算赎回费（场外基金）
 - 全部卖出后持仓自动清空
 
 ### 6.4 持仓列表
@@ -303,6 +312,143 @@ curl -s "http://47.113.220.182:8000/api/portfolio/daily-returns?days=30" \
 
 ```bash
 curl -s "http://47.113.220.182:8000/api/portfolio/health"
+```
+
+---
+
+## 六、场内外基金对比测试（fund_type 分支）
+
+> 以下测试验证 `fund_type` 字段在买卖流程中的区分逻辑。
+> 场外基金 (otf) 与场内ETF (etf) 的手续费模型、交易时间规则不同。
+
+### 6.9 买入 — 场外基金 vs 场内ETF
+
+**场外基金特点**：申购费（外扣法），最低申购金额 1 元，15:00 后 pending
+
+```bash
+# 买入场外基金 110003（易方达上证50增强A）
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"110003","quantity":100}' | python3 -m json.tool
+# 返回 data.fund_type = "otf", data.fee_type = "purchase"
+```
+
+**场内ETF特点**：券商佣金（万2.5，最低5元），100份整数倍，仅交易时段可交易
+
+```bash
+# 买入场内ETF 512890（红利低波ETF）
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":100}' | python3 -m json.tool
+# 返回 data.fund_type = "etf", data.fee_type = "commission"
+```
+
+**ETF 非交易时段拒绝**：
+
+```bash
+# 非交易时段（如周末或盘后）尝试买入ETF
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":100}' | python3 -m json.tool
+# 预期: success=false, message="ETF 仅限交易日 9:30-11:30 和 13:00-15:00 交易"
+```
+
+**ETF 非100份整数倍拒绝**：
+
+```bash
+# 买入 150 份（不是100的整数倍）
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":150}' | python3 -m json.tool
+# 预期: success=false, message="ETF 必须以 100 份（1 手）的整数倍交易"
+```
+
+### 6.10 卖出 — 场外基金 vs 场内ETF
+
+**场外基金卖出**：按持有天数计算赎回费
+
+```bash
+# 卖出场外基金 110003
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/sell" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"110003","quantity":50}' | python3 -m json.tool
+# 返回 data.fund_type = "otf", data.hold_days > 0, data.fee_type = "redemption"
+```
+
+**场内ETF卖出**：无持有天数概念，佣金计费
+
+```bash
+# 卖出场内ETF 512890
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/sell" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":50}' | python3 -m json.tool
+# 返回 data.fund_type = "etf", data.hold_days = 0, data.fee_type = "commission"
+```
+
+### 6.11 持仓查询 — fund_type 字段
+
+```bash
+# 查询持仓，每项包含 fund_type
+curl -s "http://47.113.220.182:8000/api/portfolio/positions?include_quote=true" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+# 每个 item 有 fund_type: "otf" 或 "etf"
+```
+
+### 6.12 交易流水 — fund_type 字段
+
+```bash
+# 查询交易流水，每条含 fund_type
+curl -s "http://47.113.220.182:8000/api/portfolio/trade-flow?page=1&page_size=20" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+# 每个 item 有 fund_type: "otf" 或 "etf"
+```
+
+### 6.13 场内外基金完整对比脚本
+
+一键测试场内外基金全流程对比：
+
+```bash
+#!/bin/bash
+API="http://47.113.220.182:8000"
+TOKEN="<YOUR_JWT_TOKEN>"
+
+echo "=== 场外基金 OTF 测试 ==="
+echo "--- 买入 110003（场外基金）---"
+curl -s -X POST "$API/api/portfolio/buy" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"110003","quantity":100}' | python3 -m json.tool
+
+echo -e "\n--- 卖出 110003（场外基金）---"
+curl -s -X POST "$API/api/portfolio/sell" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"110003","quantity":100}' | python3 -m json.tool
+
+echo -e "\n=== 场内ETF ETF 测试 ==="
+echo "--- 买入 512890（场内ETF）---"
+curl -s -X POST "$API/api/portfolio/buy" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":100}' | python3 -m json.tool
+
+echo -e "\n--- 卖出 512890（场内ETF）---"
+curl -s -X POST "$API/api/portfolio/sell" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":100}' | python3 -m json.tool
+
+echo -e "\n=== 持仓与流水 ===\"
+curl -s "$API/api/portfolio/positions?include_quote=true" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+curl -s "$API/api/portfolio/trade-flow?page=1&page_size=20" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+echo -e "\n✅ 场内外基金对比测试完成"
 ```
 
 ---
