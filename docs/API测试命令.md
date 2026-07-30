@@ -177,7 +177,183 @@ curl -X GET "http://47.113.220.182:8000/api/watchlist/health"
 
 ---
 
-## 快速验证脚本
+## 六、模拟持仓交易（需 JWT 认证）
+
+所有持仓接口需要在 Header 中携带 `Authorization: Bearer <TOKEN>`。
+user_id 从 JWT 中自动读取，**不要**在请求体中传 `user_id`。
+
+> **先登录获取 Token**（见 3.2），然后将 `<TOKEN>` 替换为 `access_token`。
+
+### 6.1 查询账户概况
+
+```bash
+curl -s "http://47.113.220.182:8000/api/portfolio/account" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+返回：现金、持仓市值、总资产、总盈亏、总收益率、持仓数量。
+初始资金 10 万，首次买入时自动创建账户。
+
+### 6.2 买入基金
+
+不传 price 则自动获取当前市价。
+
+```bash
+# 买入 100 份 512890（红利低波ETF）
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":100}' | python3 -m json.tool
+```
+
+```bash
+# 买入 200 份 510300（沪深300ETF）
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/buy" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"510300","quantity":200}' | python3 -m json.tool
+```
+
+校验规则：
+- 可用现金必须 ≥ 成交金额 + 申购费
+- 申购金额不低于最低申购金额
+- 成本价按加权平均重算（含手续费）
+
+### 6.3 卖出基金
+
+```bash
+# 卖出 50 份 512890
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/sell" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":50}' | python3 -m json.tool
+```
+
+```bash
+# 全部清仓
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/sell" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":50}' | python3 -m json.tool
+```
+
+校验规则：
+- 卖出份额不超过持仓量
+- 按持有天数计算赎回费
+- 全部卖出后持仓自动清空
+
+### 6.4 持仓列表
+
+```bash
+# 含实时行情和盈亏
+curl -s "http://47.113.220.182:8000/api/portfolio/positions?include_quote=true" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+```bash
+# 仅持仓数量，不计算行情
+curl -s "http://47.113.220.182:8000/api/portfolio/positions?include_quote=false" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+返回：每只持仓的成本价、市价、市值、盈亏金额、盈亏百分比。
+
+### 6.5 交易流水（分页）
+
+```bash
+# 全部流水，第 1 页
+curl -s "http://47.113.220.182:8000/api/portfolio/trade-flow?page=1&page_size=10" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+```bash
+# 按基金代码过滤
+curl -s "http://47.113.220.182:8000/api/portfolio/trade-flow?fund_code=512890&page=1&page_size=10" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+```bash
+# 只看买入
+curl -s "http://47.113.220.182:8000/api/portfolio/trade-flow?direction=buy&page=1&page_size=10" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+返回：每笔成交的时间、代码、方向、价格、数量、成交金额、手续费，按时间倒序。
+
+### 6.6 创建每日快照
+
+```bash
+curl -s -X POST "http://47.113.220.182:8000/api/portfolio/snapshot" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+同一天重复调用会覆盖更新。日终定时任务调用此接口。
+
+### 6.7 每日收益率
+
+```bash
+# 最近 30 天
+curl -s "http://47.113.220.182:8000/api/portfolio/daily-returns?days=30" \
+  -H "Authorization: Bearer <TOKEN>" | python3 -m json.tool
+```
+
+日收益率 = (今日总资产 − 昨日总资产) / 昨日总资产。
+
+### 6.8 健康检查（公开）
+
+```bash
+curl -s "http://47.113.220.182:8000/api/portfolio/health"
+```
+
+---
+
+## 七、持仓交易快速验证脚本
+
+一键测试持仓全流程（需要先登录获取 TOKEN）：
+
+```bash
+#!/bin/bash
+API="http://47.113.220.182:8000"
+
+# 替换为你的 JWT token（通过 /api/secure-chat/login 获取）
+TOKEN="<YOUR_JWT_TOKEN>"
+
+echo "=== 1. 账户概况 ==="
+curl -s "$API/api/portfolio/account" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+echo -e "\n=== 2. 买入 100 份 512890 ==="
+curl -s -X POST "$API/api/portfolio/buy" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":100}' | python3 -m json.tool
+
+echo -e "\n=== 3. 持仓查询 ==="
+curl -s "$API/api/portfolio/positions?include_quote=true" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+echo -e "\n=== 4. 卖出 50 份 ==="
+curl -s -X POST "$API/api/portfolio/sell" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fund_code":"512890","quantity":50}' | python3 -m json.tool
+
+echo -e "\n=== 5. 交易流水 ==="
+curl -s "$API/api/portfolio/trade-flow?page=1&page_size=10" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+echo -e "\n=== 6. 交易后账户概况 ==="
+curl -s "$API/api/portfolio/account" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+echo -e "\n=== 7. 创建快照 ==="
+curl -s -X POST "$API/api/portfolio/snapshot" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+echo -e "\n=== 8. 每日收益率 ==="
+curl -s "$API/api/portfolio/daily-returns" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+echo -e "\n✅ 持仓交易测试完成"
+```
+
+---
+
+## 快速验证脚本（公开接口）
 
 一键测试核心公开接口（不含需 JWT 的接口）：
 

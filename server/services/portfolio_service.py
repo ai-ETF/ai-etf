@@ -197,12 +197,12 @@ class PortfolioService:
             if position:
                 old_qty = Decimal(str(position["quantity"]))
                 old_cost_price = Decimal(str(position["cost_price"]))
-                total_cost_basis = old_qty * old_cost_price + amount  # 成本不含手续费
+                total_cost_basis = old_qty * old_cost_price + amount + fee  # 成本含手续费
                 new_qty = old_qty + quantity
                 new_cost_price = (total_cost_basis / new_qty).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP) if new_qty > 0 else price
             else:
                 new_qty = quantity
-                new_cost_price = price.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                new_cost_price = ((amount + fee) / quantity).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
             now = datetime.now(timezone.utc).isoformat()
 
@@ -343,7 +343,9 @@ class PortfolioService:
             self._write_trade_order(user_id, fund_code, fund_name, "sell", price, quantity, amount, fee, "completed")
             self._write_trade_flow(user_id, fund_code, fund_name, "sell", price, quantity, amount, fee)
 
-            # 7. 计算该笔盈亏
+            # 7. 计算该笔盈亏（成本包含申购时摊入的手续费）
+            # 用(amount + 该笔对应买入手续费)算实际成本，这样盈亏就是净结果
+            # 简化处理：用 cost_price * quantity 作为持仓成本，再减去赎回费
             cost_of_sold = (cost_price * quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             trade_pnl = (net_amount - cost_of_sold).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
 
@@ -367,6 +369,7 @@ class PortfolioService:
                     "trade_pnl": float(trade_pnl),
                     "hold_days": max(hold_days, 0),
                     "position_qty": float(new_qty),
+                    "cost_price": float(cost_price) if new_qty > 0 else None,
                     "cash_remaining": float(new_cash),
                     "trade_time": now,
                 },
