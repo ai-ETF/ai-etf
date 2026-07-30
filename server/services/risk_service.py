@@ -105,16 +105,25 @@ class RiskService:
         )
 
         # 5. 存入 user_risk_answers
+        logger.debug(f"开始保存答题记录: user={user_id}, questionnaire={questionnaire_id}")
         answer_record = self._save_answers(user_id, questionnaire_id, answers)
         if not answer_record:
+            logger.error(f"答题记录保存失败: user={user_id}")
             return {"success": False, "message": "保存答题记录失败"}
 
         # 6. 关联 answer_id 并存入 user_risk_profiles
         profile_data["answer_id"] = answer_record["id"]
+        logger.debug(
+            f"开始保存画像记录: user={user_id}, answer_id={answer_record['id']}, "
+            f"profile_data keys={list(profile_data.keys())}"
+        )
         profile_record = self._save_profile(user_id, profile_data)
         if not profile_record:
             # 答案已保存，但画像保存失败，仍可接受
-            logger.error("画像保存失败，但答题记录已保存")
+            logger.error(
+                f"画像保存失败，但答题记录已保存: user={user_id}, "
+                f"answer_id={answer_record['id']}"
+            )
 
         logger.info(
             f"用户画像计算完成: user={user_id}, "
@@ -304,7 +313,8 @@ class RiskService:
             "dimension_scores": score_result["dimension_scores"],
             "confidence_score": 1.0,
             "ai_summary": level_info["summary"],
-            "source": "rule-based",
+            "source": "questionnaire",
+            "model_version": "risk-v1",
             "is_active": True,
             "metadata": {"questionnaire_id": questionnaire_id, "risk_label": level_info["label"]},
             "expires_at": None,
@@ -366,6 +376,18 @@ class RiskService:
     def _save_profile(self, user_id: str, profile_data: dict) -> Optional[dict]:
         """保存画像记录，存在则覆盖"""
         try:
+            logger.debug(
+                f"准备写入画像: user_id={user_id}, table={self.PROFILE_TABLE}, "
+                f"fields={list(profile_data.keys())}"
+            )
+            logger.debug(
+                f"画像数据详情: risk_level={profile_data.get('risk_level')}, "
+                f"source={profile_data.get('source')}, "
+                f"model_version={profile_data.get('model_version')}, "
+                f"total_score={profile_data.get('total_score')}, "
+                f"is_active={profile_data.get('is_active')}"
+            )
+
             # 先查询是否已有该用户的活跃画像
             existing = (
                 self._client.table(self.PROFILE_TABLE)
@@ -375,10 +397,12 @@ class RiskService:
                 .limit(1)
                 .execute()
             )
+            logger.debug(f"查询已有画像结果: data_count={len(existing.data) if existing.data else 0}")
 
             if existing.data:
                 # 更新已有画像
                 record_id = existing.data[0]["id"]
+                logger.debug(f"更新已有画像: id={record_id}")
                 result = (
                     self._client.table(self.PROFILE_TABLE)
                     .update(profile_data)
@@ -386,19 +410,31 @@ class RiskService:
                     .execute()
                 )
                 if result.data:
+                    logger.info(f"画像更新成功: id={record_id}")
                     return result.data[0]
-                logger.error(f"更新画像记录失败: {record_id}")
+                logger.error(
+                    f"更新画像记录失败: id={record_id}, "
+                    f"error_details={getattr(result, 'error', 'unknown')}"
+                )
                 return None
             else:
                 # 插入新画像
+                logger.debug(f"插入新画像: user_id={user_id}")
                 result = self._client.table(self.PROFILE_TABLE).insert(profile_data).execute()
                 if result.data:
+                    logger.info(f"画像插入成功: id={result.data[0].get('id')}")
                     return result.data[0]
-                logger.error("插入画像记录失败")
+                logger.error(
+                    f"插入画像记录失败: user_id={user_id}, "
+                    f"error_details={getattr(result, 'error', 'unknown')}"
+                )
                 return None
 
         except Exception as e:
-            logger.error(f"保存画像记录异常: {e}")
+            logger.error(
+                f"保存画像记录异常: user_id={user_id}, "
+                f"error_type={type(e).__name__}, error={e}"
+            )
             return None
 
     def _format_profile_result(self, profile: dict) -> dict:
