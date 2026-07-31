@@ -1,19 +1,21 @@
 """
-基金手续费规则服务
+场外基金手续费规则服务
 
-从 fund_fee_rules 表读取费率规则，支持两种基金类型：
-- 场外基金 (fund_type=otf)：申购费（外扣法）+ 赎回费（持有天数阶梯）
-- 场内ETF (fund_type=etf)：券商佣金（万2.5，最低5元）
+仅支持 fund_fee_rules 表中已配置的场外开放式基金，查不到规则直接拒绝交易。
+不支持默认费率兜底 —— 交易规则不能靠猜。
+
+白名单机制：从 fund_fee_rules 表查询，表中有记录才允许交易。
+赎回费按 JSON 档位计算，每只基金档位可不同。
 """
+import json
 import logging
-from datetime import datetime, date
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 class FundFeeService:
-    """基金手续费规则服务"""
+    """场外基金手续费规则服务"""
 
     def __init__(self):
         self._client = None
@@ -25,16 +27,29 @@ class FundFeeService:
             self._client = get_supabase()
         return self._client
 
+    # ==================== 白名单校验 ====================
+
+    def is_supported(self, fund_code: str) -> bool:
+        """
+        检查基金是否支持交易。
+
+        白名单 = fund_fee_rules 表中有记录的基金。
+        查不到 = 不支持，返回 False。
+        """
+        return self.get_fee_rule(fund_code) is not None
+
+    # ==================== 费率查询 ====================
+
     def get_fee_rule(self, fund_code: str) -> Optional[dict]:
         """
         查询基金的费率规则。
 
         返回:
-            fee_rule dict（含 fund_type 和 commission_rate）
+            fee_rule dict，或 None（表示不支持该基金交易）
         """
         if not self.client:
-            logger.warning("数据库不可用，使用默认费率")
-            return self._default_rule(fund_code)
+            logger.error("数据库不可用")
+            return None
 
         try:
             result = (
@@ -45,169 +60,114 @@ class FundFeeService:
             )
             if result.data and len(result.data) > 0:
                 return result.data[0]
-            logger.warning(f"未找到基金费率规则: {fund_code}，使用默认费率")
-            return self._default_rule(fund_code)
+
+            logger.warning(f"未找到基金费率规则: {fund_code}")
+            return None
         except Exception as e:
             logger.error(f"查询费率规则失败: {e}")
-            return self._default_rule(fund_code)
+            return None
 
-    @staticmethod
-    def _default_rule(fund_code: str) -> dict:
-        """提供默认费率规则（按2025年证监会新规）"""
-        # 根据 ETF 代码前缀自动判断类型
-        fund_type = 'etf' if fund_code[:2] in ('51', '15', '16', '58') else 'otf'
-        return {
-            "fund_code": fund_code,
-            "fund_name": "",
-            "fund_type": fund_type,
-            "purchase_fee_rate": 0.0015,          # 申购费率 0.15%（互联网渠道1折）
-            "redemption_fee_rate_7d": 0.0150,     # <7天 1.5%（惩罚性）
-            "redemption_fee_rate_30d": 0.0100,    # 7-30天 1.0%
-            "redemption_fee_rate_1y": 0.0050,     # 30-180天 0.5%
-            "redemption_fee_rate_over1y": 0.0,    # ≥180天 0%（多数基金）
-            "redemption_fee_rate_180d": 0.0025,   # 180-365天 0.25%（部分基金）
-            "management_fee_rate": 0.015,
-            "custody_fee_rate": 0.0025,
-            "commission_rate": 0.00025,           # ETF券商佣金 万2.5
-            "min_purchase_amount": 1.0,
-        }
+    # ==================== 申购费（外扣法） ====================
 
-    # ==================== 基金类型 ====================
-
-    def get_fund_type(self, fund_code: str) -> str:
+    def calc_purchase_fee(self, fund_code: str, amount: float) -> Optional[dict]:
         """
-        获取基金类型。
-
-        返回:
-            'otf' (场外基金) 或 'etf' (场内ETF)
-        """
-        rule = self.get_fee_rule(fund_code)
-        return rule.get("fund_type", "otf") if rule else "otf"
-
-    # ==================== 佣金（ETF专用） ====================
-
-    def calc_commission(self, fund_code: str, amount: float) -> float:
-        """
-        计算券商佣金（场内ETF专用）。
-
-        佣金 = max(amount * commission_rate, 5.0)
-        最低佣金 5 元（行业惯例）。
-
-        参数:
-            fund_code: 基金代码
-            amount: 成交金额（元）
-
-        返回:
-            佣金（元）
-        """
-        rule = self.get_fee_rule(fund_code)
-        rate = rule.get("commission_rate", 0.00025)
-        fee = amount * rate
-        return round(max(fee, 5.0), 2)
-
-    # ==================== 申购费（场外基金专用） ====================
-
-    def calc_purchase_fee(self, fund_code: str, amount: float) -> float:
-        """
-        计算申购费（场外基金，前端收费，外扣法）。
-
-        ETF 返回 0（ETF 不使用申购费，用佣金）。
+        计算申购费（外扣法）。
 
         外扣法：
             净申购金额 = 申购金额 / (1 + 申购费率)
             申购费用 = 申购金额 - 净申购金额
+
+        参数:
+            fund_code: 基金代码
+            amount: 申购金额（元）
+
+        返回:
+            {"fee": float, "net_amount": float} 或 None（不支持该基金）
         """
         rule = self.get_fee_rule(fund_code)
-        fund_type = rule.get("fund_type", "otf")
-        if fund_type == 'etf':
-            return 0.0
-        rate = rule.get("purchase_fee_rate", 0.0015)
+        if rule is None:
+            return None
+
+        rate = float(rule.get("purchase_fee_rate", 0.0015))
         if rate == 0:
-            return 0.0
-        net_amount = amount / (1 + rate)
+            return {"fee": 0.0, "net_amount": amount}
+
+        net_amount = amount / (1.0 + rate)
         fee = amount - net_amount
-        return round(fee, 2)
+        return {"fee": round(fee, 2), "net_amount": round(net_amount, 2)}
 
-    # ==================== 赎回费（场外基金专用） ====================
+    # ==================== 赎回费（JSON 档位） ====================
 
-    def calc_redemption_fee(
-        self,
-        fund_code: str,
-        amount: float,
-        hold_days: int,
-    ) -> float:
+    def calc_redemption_fee(self, fund_code: str, amount: float, hold_days: int) -> Optional[float]:
         """
-        计算赎回费（场外基金，按2025年证监会新规）。
+        计算赎回费（按 JSON 档位匹配）。
 
-        ETF 返回 0（ETF 不使用赎回费，用佣金）。
+        参数:
+            fund_code: 基金代码
+            amount: 赎回金额（元）
+            hold_days: 持有天数
 
-        持有天数档位：
-        - < 7天：1.5%（惩罚性）
-        - 7天 ~ < 30天：1.0%
-        - 30天 ~ < 180天：0.5%
-        - ≥ 180天：0%（多数基金）
+        返回:
+            赎回费（元），或 None（不支持该基金）
         """
         rule = self.get_fee_rule(fund_code)
-        fund_type = rule.get("fund_type", "otf")
-        if fund_type == 'etf':
+        if rule is None:
+            return None
+
+        tiers_data = rule.get("redemption_fee_tiers")
+        if tiers_data is None:
             return 0.0
 
-        if hold_days < 7:
-            rate = rule.get("redemption_fee_rate_7d", 0.015)
-        elif hold_days < 30:
-            rate = rule.get("redemption_fee_rate_30d", 0.01)
-        elif hold_days < 180:
-            rate = rule.get("redemption_fee_rate_1y", 0.005)
+        # 解析 JSON 档位
+        if isinstance(tiers_data, str):
+            tiers_data = json.loads(tiers_data)
+        if isinstance(tiers_data, dict):
+            tiers = tiers_data.get("tiers", [])
+        elif isinstance(tiers_data, list):
+            tiers = tiers_data
         else:
-            rate = rule.get("redemption_fee_rate_over1y", 0.0)
+            tiers = []
+
+        if not tiers:
+            return 0.0
+
+        # 从小到大排序，找到第一个 days > hold_days 的档位
+        tiers_sorted = sorted(tiers, key=lambda t: t["days"])
+        rate = 0.0
+        for tier in tiers_sorted:
+            if hold_days < tier["days"]:
+                rate = tier["rate"]
+                break
 
         fee = amount * rate
         return round(fee, 2)
 
-    # ==================== 统一费用入口 ====================
-
-    def calc_fee_for_trade(
-        self,
-        fund_code: str,
-        amount: float,
-        direction: str,
-        hold_days: int = 0,
-    ) -> dict:
-        """
-        统一费用计算入口，按 fund_type 自动选择费用模型。
-
-        参数:
-            fund_code: 基金代码
-            amount: 成交金额（元）
-            direction: 'buy' 或 'sell'
-            hold_days: 持有天数（仅场外基金卖出时使用）
-
-        返回:
-            {"fee": float, "fee_type": str, "fund_type": str}
-            fee_type: "commission" / "purchase" / "redemption"
-        """
-        rule = self.get_fee_rule(fund_code)
-        fund_type = rule.get("fund_type", "otf")
-
-        if fund_type == 'etf':
-            fee = self.calc_commission(fund_code, amount)
-            return {"fee": fee, "fee_type": "commission", "fund_type": "etf"}
-        else:
-            if direction == 'buy':
-                fee = self.calc_purchase_fee(fund_code, amount)
-                return {"fee": fee, "fee_type": "purchase", "fund_type": "otf"}
-            else:
-                fee = self.calc_redemption_fee(fund_code, amount, hold_days)
-                return {"fee": fee, "fee_type": "redemption", "fund_type": "otf"}
-
     # ==================== 简单查询 ====================
 
-    def get_min_purchase_amount(self, fund_code: str) -> float:
-        """获取最低申购金额"""
+    def get_min_purchase_amount(self, fund_code: str) -> Optional[float]:
+        """获取最低申购金额（元）"""
         rule = self.get_fee_rule(fund_code)
-        return float(rule.get("min_purchase_amount", 1.0))
+        if rule is None:
+            return None
+        return float(rule.get("min_purchase_amount", 10.0))
 
-    def get_purchase_fee_rate(self, fund_code: str) -> float:
-        """获取申购费率"""
+    def get_confirm_delay(self, fund_code: str) -> int:
+        """获取申购确认延迟天数（T+N）"""
         rule = self.get_fee_rule(fund_code)
-        return float(rule.get("purchase_fee_rate", 0.0015))
+        if rule is None:
+            return 1
+        return int(rule.get("confirm_delay", 1))
+
+    def get_redeem_settle_delay(self, fund_code: str) -> int:
+        """获取赎回到账延迟天数（T+N）"""
+        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            return 3
+        return int(rule.get("redeem_settle_delay", 3))
+
+    def get_fund_name(self, fund_code: str) -> Optional[str]:
+        """获取基金名称"""
+        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            return None
+        return rule.get("fund_name")

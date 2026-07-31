@@ -1,14 +1,16 @@
 """
-行情缓存定时刷新调度器
+行情缓存定时刷新调度器 + Pending 订单确认
 
-独立管理全量ETF行情的定时拉取，与 API 接口逻辑解耦。
-API 请求只读缓存，不会触发全量拉取。
+独立管理：
+1. 全量 ETF 行情的定时拉取（交易时段 30s）
+2. Pending 订单确认（每个交易日 15:30）
 """
 import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +41,23 @@ async def _warmup_cache():
         logger.warning("[预热] 全量行情加载失败，将等待定时任务重试")
 
 
+async def _confirm_pending_orders_job():
+    """Pending 订单确认任务（每个交易日 15:30 执行）"""
+    from server.services.portfolio_service import PortfolioService
+    logger.info("[确认] 开始检查 pending 订单...")
+    svc = PortfolioService()
+    result = svc.confirm_pending_orders()
+    logger.info(f"[确认] Pending 订单确认完成: {result}")
+
+
 def start_scheduler() -> AsyncIOScheduler:
-    """启动定时刷新调度器，返回 scheduler 实例"""
+    """启动定时刷新调度器 + Pending 确认调度器，返回 scheduler 实例"""
     global _scheduler
     from server.services.finance_api_service import FinanceApiService
 
     _scheduler = AsyncIOScheduler()
 
+    # 任务1：ETF 行情缓存刷新（交易时段每30秒）
     _scheduler.add_job(
         FinanceApiService.refresh_spot_cache,
         trigger=IntervalTrigger(seconds=30),
@@ -54,6 +66,16 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
     logger.info("ETF行情定时刷新任务已注册（每30秒检测一次）")
+
+    # 任务2：Pending 订单确认（每个交易日 15:30）
+    _scheduler.add_job(
+        _confirm_pending_orders_job,
+        trigger=CronTrigger(hour=15, minute=37, day_of_week="mon-fri"),
+        id="confirm_pending_orders",
+        name="确认pending订单（每个交易日15:37）",
+        replace_existing=True,
+    )
+    logger.info("Pending订单确认任务已注册（每个交易日15:37）")
 
     _scheduler.start()
 
@@ -68,5 +90,5 @@ def shutdown_scheduler():
     global _scheduler
     if _scheduler:
         _scheduler.shutdown(wait=False)
-        logger.info("ETF行情定时刷新任务已停止")
+        logger.info("定时任务已停止")
         _scheduler = None

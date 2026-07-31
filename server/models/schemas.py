@@ -431,41 +431,93 @@ class MoneyFlowRankingResponse(BaseModel):
     items: List[MoneyFlowRankingItem]
 
 
-# ==================== 模拟持仓交易数据模型（新增） ====================
+# ==================== 场外基金持仓交易数据模型（旧版，兼容保留） ====================
 
-class TradeRequest(BaseModel):
-    """买卖请求"""
+class BuyRequest(BaseModel):
+    """场外基金申购请求（按金额）- 旧版兼容"""
     fund_code: str  # 基金代码
-    quantity: float  # 份额
-    price: Optional[float] = None  # 价格（不传则取当前市价）
+    amount: float   # 申购金额（元）
+    price: Optional[float] = None  # 净值（不传则自动获取）
+
+
+class SellRequest(BaseModel):
+    """场外基金赎回请求（按份额）- 旧版兼容"""
+    fund_code: str  # 基金代码
+    quantity: float  # 赎回份额
+    price: Optional[float] = None  # 净值（不传则自动获取）
 
 
 class TradeData(BaseModel):
-    """成交数据"""
+    """成交数据 - 旧版兼容"""
     fund_code: str
     fund_name: str
-    fund_type: Optional[str] = None  # otf=场外基金, etf=场内ETF
-    price: float
-    quantity: float
-    amount: float
+    amount: float  # 申购金额/赎回金额
     fee: float
-    total_cost: Optional[float] = None
-    net_amount: Optional[float] = None
-    trade_pnl: Optional[float] = None
+    net_amount: Optional[float] = None  # 净申购金额/净赎回金额
+    price: float  # 净值
+    quantity: Optional[float] = None  # 份额（确认后填入）
     hold_days: Optional[int] = None
-    position_qty: float
+    trade_pnl: Optional[float] = None
+    position_qty: Optional[float] = None
     cost_price: Optional[float] = None
-    cash_remaining: float
-    trade_time: str
-    status: str = "completed"  # completed / pending
-    confirm_date: Optional[str] = None  # 确认日期（pending 时为下一个交易日）
+    confirm_date: Optional[str] = None
+    available_date: Optional[str] = None
+    cash_remaining: Optional[float] = None
+    frozen_cash: Optional[float] = None
+    status: str = "completed"
+    trade_time: Optional[str] = None
 
 
 class TradeResponse(BaseModel):
-    """买卖响应"""
+    """买卖响应 - 旧版兼容"""
     success: bool
     message: str
     data: Optional[TradeData] = None
+
+
+# ==================== 场外基金交易数据模型（新版，申购/赎回术语） ====================
+
+class PurchaseRequest(BaseModel):
+    """场外基金申购请求（按金额申购）"""
+    fund_code: str  # 基金代码
+    amount: float   # 申购金额（元）
+    price: Optional[float] = None  # 净值（不传则自动获取）
+
+
+class RedeemRequest(BaseModel):
+    """场外基金赎回请求（按份额赎回）"""
+    fund_code: str  # 基金代码
+    quantity: float  # 赎回份额
+    price: Optional[float] = None  # 净值（不传则自动获取）
+
+
+class OrderResult(BaseModel):
+    """申购/赎回订单结果"""
+    fund_code: str
+    fund_name: str
+    amount: float  # 申购金额/赎回金额
+    fee: float
+    net_amount: Optional[float] = None  # 净申购金额/净赎回金额
+    price: float  # 净值
+    quantity: Optional[float] = None  # 份额（确认后填入）
+    hold_days: Optional[int] = None
+    trade_pnl: Optional[float] = None
+    position_qty: Optional[float] = None
+    cost_price: Optional[float] = None
+    confirm_date: Optional[str] = None
+    available_date: Optional[str] = None
+    settle_date: Optional[str] = None  # 赎回到账日期
+    cash_remaining: Optional[float] = None
+    frozen_cash: Optional[float] = None
+    status: str = "completed"
+    trade_time: Optional[str] = None
+
+
+class OrderResponse(BaseModel):
+    """申购/赎回订单响应"""
+    success: bool
+    message: str
+    data: Optional[OrderResult] = None
 
 
 class PositionItem(BaseModel):
@@ -474,7 +526,6 @@ class PositionItem(BaseModel):
     user_id: str
     fund_code: str
     fund_name: str
-    fund_type: Optional[str] = None  # otf=场外基金, etf=场内ETF
     quantity: float
     cost_price: float
     cost_value: Optional[float] = None
@@ -482,6 +533,8 @@ class PositionItem(BaseModel):
     market_value: Optional[float] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
+    confirm_date: Optional[str] = None
+    available_date: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -497,6 +550,7 @@ class PositionListResponse(BaseModel):
 class AccountSummaryResponse(BaseModel):
     """账户概况响应"""
     cash: float
+    frozen_cash: float
     position_value: float
     total_assets: float
     total_pnl: float
@@ -510,11 +564,10 @@ class TradeFlowItem(BaseModel):
     user_id: str
     fund_code: str
     fund_name: str
-    fund_type: Optional[str] = None  # otf=场外基金, etf=场内ETF
     direction: str
+    amount: float
     price: float
     quantity: float
-    amount: float
     fee: float
     trade_time: str
 
@@ -567,39 +620,3 @@ class DailyReturnItem(BaseModel):
 class DailyReturnResponse(BaseModel):
     """每日收益率响应"""
     items: List[DailyReturnItem]
-
-
-# ==================== ETF 预约交易数据模型 ====================
-
-class ReserveRequest(BaseModel):
-    """ETF 预约请求（复用 TradeRequest 结构，direction 由端点区分）"""
-    fund_code: str
-    quantity: float
-
-
-class ReservationItem(BaseModel):
-    """预约单项"""
-    id: str
-    user_id: str
-    fund_code: str
-    fund_name: str
-    fund_type: Optional[str] = None  # otf/etf
-    direction: str  # buy/sell
-    quantity: float
-    estimated_price: Optional[float] = None  # 提交预约时的参考价格
-    status: str  # reserved/cancelled/completed
-    created_at: str
-    updated_at: str
-
-
-class ReservationResponse(BaseModel):
-    """预约操作响应"""
-    success: bool
-    message: str
-    data: Optional[ReservationItem] = None
-
-
-class ReservationListResponse(BaseModel):
-    """预约列表响应"""
-    total: int
-    items: List[ReservationItem]

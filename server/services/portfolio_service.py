@@ -1,45 +1,42 @@
 """
-持仓交易核心服务
+场外基金持仓交易服务
 
 实现：
-- 账户初始化（开仓时自动创建，初始资金 10 万）
-- 买入建仓（校验现金→扣款→持仓加权平均成本→写流水）
-- 卖出减仓（校验持仓→扣份额→算赎回费→入账→写流水）
+- 按金额申购（外扣法），按份额赎回
+- 15:00 截止，非交易时段 pending，资金冻结不建仓
+- 份额确认（T+N）后正式扣款建仓
+- 加权平均成本价
 - 交易流水分页查询
 - 账户概况（现金/持仓市值/总资产/总盈亏/总收益率）
-- 每日资产快照（支撑日收益率计算）
+- 每日资产快照
+
+仅支持 fund_fee_rules 表中已配置的场外开放式基金（fund_type='of'），查不到规则直接拒绝。
+场内 ETF（fund_type='etf'）交易直接拦截。
 """
 import logging
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional, List, Dict, Any
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 初始资金
 INITIAL_CASH = Decimal("100000.00")
-
-# 北京时间时区
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 def _beijing_now() -> datetime:
-    """返回当前北京时间"""
     return datetime.now(BEIJING_TZ)
 
 
 def _now_iso() -> str:
-    """返回当前北京时间 ISO 字符串（用于数据库写入和 API 返回）"""
     return _beijing_now().isoformat()
 
 
-def _now_utc_iso() -> str:
-    """返回当前 UTC 时间 ISO 字符串（Supabase 兼容）"""
-    return datetime.now(timezone.utc).isoformat()
+def _beijing_date() -> date:
+    return _beijing_now().date()
 
 
 def _parse_time(ts: str) -> datetime:
-    """解析时间字符串为北京时间 datetime"""
     ts = ts.replace("Z", "+00:00")
     dt = datetime.fromisoformat(ts)
     if dt.tzinfo is not None:
@@ -48,7 +45,7 @@ def _parse_time(ts: str) -> datetime:
 
 
 class PortfolioService:
-    """持仓交易服务"""
+    """场外基金持仓交易服务"""
 
     def __init__(self):
         self._client = None
@@ -63,14 +60,8 @@ class PortfolioService:
     # ==================== 账户管理 ====================
 
     def _ensure_account(self, user_id: str) -> dict:
-        """
-        确保用户有资金账户，不存在则自动创建（初始 10 万）。
-
-        返回 accounts 表行。
-        """
         if not self.client:
             raise RuntimeError("数据库不可用")
-
         result = (
             self.client.table("accounts")
             .select("*")
@@ -79,12 +70,11 @@ class PortfolioService:
         )
         if result.data and len(result.data) > 0:
             return result.data[0]
-
-        # 创建新账户
         now = _now_iso()
         insert_data = {
             "user_id": user_id,
             "cash": float(INITIAL_CASH),
+            "frozen_cash": 0,
             "created_at": now,
             "updated_at": now,
         }
@@ -95,7 +85,6 @@ class PortfolioService:
         raise RuntimeError("账户创建失败")
 
     def get_account(self, user_id: str) -> Optional[dict]:
-        """获取用户资金账户"""
         if not self.client:
             return None
         try:
@@ -112,50 +101,9 @@ class PortfolioService:
             logger.error(f"查询账户失败: {e}")
             return None
 
-    # ==================== 市场行情/价格获取 ====================
+    # ==================== 净值获取 ====================
 
-    def _get_fund_type(self, fund_code: str) -> str:
-        """获取基金类型（otf=场外基金, etf=场内ETF）"""
-        from server.services.fund_fee_service import FundFeeService
-        svc = FundFeeService()
-        return svc.get_fund_type(fund_code)
-
-    def _get_current_price(self, fund_code: str, fund_type: str = None) -> Optional[Decimal]:
-        """
-        获取基金当前交易价格。
-
-        按 fund_type 区分：
-        - ETF：从实时行情缓存取（盘中实时价）
-        - 场外基金：从 akshare 取最新净值
-        """
-        if fund_type is None:
-            fund_type = self._get_fund_type(fund_code)
-
-        if fund_type == 'etf':
-            # ETF：实时行情价
-            from server.services.finance_api_service import FinanceApiService
-            svc = FinanceApiService()
-            spot = svc.query_spot(fund_code)
-            if spot and spot.get("price"):
-                return Decimal(str(spot["price"]))
-            # ETF 行情也取不到时降级到净值
-            return self._get_fund_nav(fund_code)
-
-        # 场外基金：净值
-        price = self._get_fund_nav(fund_code)
-        if price is not None:
-            return price
-
-        # 场外基金净值也取不到时降级到行情缓存
-        from server.services.finance_api_service import FinanceApiService
-        svc = FinanceApiService()
-        spot = svc.query_spot(fund_code)
-        if spot and spot.get("price"):
-            return Decimal(str(spot["price"]))
-
-        return None
-
-    def _get_fund_nav(self, fund_code: str) -> Optional[Decimal]:
+    def _get_nav(self, fund_code: str) -> Optional[Decimal]:
         """获取场外基金最新净值"""
         try:
             import akshare as ak
@@ -170,201 +118,179 @@ class PortfolioService:
         return None
 
     def _get_fund_name(self, fund_code: str) -> str:
-        """获取基金名称（优先从费率表取，其次行情缓存，最后返回 code）"""
-        # 1. 优先从 fund_fee_rules 表取
-        try:
-            from server.services.fund_fee_service import FundFeeService
-            fee_svc = FundFeeService()
-            rule = fee_svc.get_fee_rule(fund_code)
-            if rule and rule.get("fund_name"):
-                return rule["fund_name"]
-        except Exception:
-            pass
-
-        # 2. 尝试从行情缓存取
+        """获取基金名称"""
+        from server.services.fund_fee_service import FundFeeService
+        svc = FundFeeService()
+        name = svc.get_fund_name(fund_code)
+        if name:
+            return name
         try:
             from server.services.finance_api_service import FinanceApiService
-            svc = FinanceApiService()
-            spot = svc.query_spot(fund_code)
+            spot = FinanceApiService().query_spot(fund_code)
             if spot and spot.get("name"):
                 return spot["name"]
         except Exception:
             pass
-
-        # 3. 都取不到返回 code
         return fund_code
+
+    # ==================== 交易时间判断 ====================
+
+    @staticmethod
+    def _is_trading_day(d: date) -> bool:
+        """判断是否为 A 股交易日"""
+        try:
+            import akshare as ak
+            df = ak.tool_trade_date_hist_sina()
+            for _, row in df.iterrows():
+                try:
+                    if date.fromisoformat(str(row['trade_date'])) == d:
+                        return True
+                except ValueError:
+                    pass
+            return False
+        except Exception:
+            return d.weekday() < 5
+
+    @staticmethod
+    def _is_before_cutoff(dt: datetime) -> bool:
+        """判断是否在 15:00 截止前"""
+        return dt.hour < 15
+
+    @staticmethod
+    def _next_trading_day(d: date) -> date:
+        """获取下一个交易日"""
+        for i in range(1, 15):
+            nd = d + timedelta(days=i)
+            if PortfolioService._is_trading_day(nd):
+                return nd
+        return d + timedelta(days=1)
 
     # ==================== 手续费计算 ====================
 
-    def _calc_trade_fee(self, fund_code: str, amount: Decimal, direction: str, hold_days: int = 0) -> dict:
-        """
-        统一费用计算，按 fund_type 自动选择模型。
-
-        返回: {"fee": Decimal, "fee_type": str, "fund_type": str}
-        """
+    def _calc_purchase_fee(self, fund_code: str, amount: Decimal) -> Optional[dict]:
+        """计算申购费，返回 None 表示不支持该基金"""
         from server.services.fund_fee_service import FundFeeService
         svc = FundFeeService()
-        result = svc.calc_fee_for_trade(fund_code, float(amount), direction, hold_days)
+        result = svc.calc_purchase_fee(fund_code, float(amount))
+        if result is None:
+            return None
         return {
             "fee": Decimal(str(result["fee"])),
-            "fee_type": result["fee_type"],
-            "fund_type": result["fund_type"],
+            "net_amount": Decimal(str(result["net_amount"])),
         }
 
-    # ==================== 买入 ====================
+    def _calc_redemption_fee(self, fund_code: str, amount: Decimal, hold_days: int) -> Optional[Decimal]:
+        """计算赎回费，返回 None 表示不支持该基金"""
+        from server.services.fund_fee_service import FundFeeService
+        svc = FundFeeService()
+        fee = svc.calc_redemption_fee(fund_code, float(amount), hold_days)
+        if fee is None:
+            return None
+        return Decimal(str(fee))
 
-    def buy(self, user_id: str, fund_code: str, quantity: Decimal, price: Optional[Decimal] = None) -> dict:
+    # ==================== 申购 ====================
+
+    def apply_purchase(self, user_id: str, fund_code: str, amount: Decimal,
+            price: Optional[Decimal] = None) -> dict:
         """
-        买入建仓/加仓（按 fund_type 自动选择场外/场内规则）。
-
-        场外基金 (otf)：
-        - 全天可提交，15:00 为界，15:00 后 pending
-        - 成交价格为当日净值
-        - 申购费（外扣法）
-
-        场内 ETF (etf)：
-        - 仅 9:30-11:30、13:00-15:00 可交易，非交易时段直接拒绝
-        - 成交价格为盘中实时价
-        - 100 份整数倍
-        - 券商佣金（万2.5，最低5元）
+        场外基金按金额申购。
 
         参数:
             user_id: 用户 ID
             fund_code: 基金代码
-            quantity: 份额
-            price: 成交单价（不传则自动取价）
+            amount: 申购金额（元）
+            price: 净值（不传则自动获取）
         """
         try:
+            # 0. 校验基金白名单 + ETF 拦截
+            from server.services.fund_fee_service import FundFeeService
+            fee_svc = FundFeeService()
+            rule = fee_svc.get_fee_rule(fund_code)
+            if rule is None:
+                return {
+                    "success": False,
+                    "message": f"暂不支持基金 {fund_code} 的交易",
+                    "data": None,
+                }
+            # ETF 拦截：场内 ETF 不通过场外渠道交易
+            if rule.get("fund_type") == "etf":
+                return {
+                    "success": False,
+                    "message": "场内 ETF 暂不支持交易，请使用场外开放式基金",
+                    "data": None,
+                }
+
             now_beijing = _beijing_now()
 
-            # 0. 判断基金类型
-            fund_type = self._get_fund_type(fund_code)
-
-            # 0a. ETF 交易时间校验（非交易时段直接拒绝）
-            if fund_type == 'etf':
-                from server.services.trading_calendar import is_etf_trading_time
-                if not is_etf_trading_time(now_beijing):
-                    return {
-                        "success": False,
-                        "message": "ETF 仅限交易日 9:30-11:30 和 13:00-15:00 交易",
-                        "data": None,
-                    }
-                # ETF 数量校验：100 份整数倍
-                if int(quantity) % 100 != 0:
-                    return {
-                        "success": False,
-                        "message": "ETF 必须以 100 份（1 手）的整数倍交易",
-                        "data": None,
-                    }
-                is_pending = False
+            # 1. 计算确认日
+            if is_trade_day and before_cutoff:
                 confirm_date = now_beijing.date()
-
-            # 0b. 场外基金交易时间（15:00 截止，非交易时段 pending）
+                day_label = "当日"
             else:
-                from server.services.trading_calendar import is_trading_day, is_before_cutoff, get_confirmation_date
-                is_trade_day = is_trading_day(now_beijing.date())
-                before_cutoff = is_before_cutoff(now_beijing)
-                confirm_date = get_confirmation_date(now_beijing)
-                is_pending = not (is_trade_day and before_cutoff)
+                confirm_date = self._next_trading_day(now_beijing.date())
+                day_label = "下一交易日"
 
-            # 1. 获取价格
-            if price is None:
-                price = self._get_current_price(fund_code, fund_type)
-            if price is None or price <= 0:
-                return {"success": False, "message": f"无法获取基金 {fund_code} 的当前价格", "data": None}
+            # T + confirm_delay 后确认
+            confirm_delay = int(rule.get("confirm_delay", 1))
+            actual_confirm = confirm_date
+            for _ in range(confirm_delay):
+                actual_confirm = self._next_trading_day(actual_confirm)
+
+            # 2. 校验最低申购金额
+            min_amount = Decimal(str(rule.get("min_purchase_amount", 10.0)))
+            if amount < min_amount:
+                return {
+                    "success": False,
+                    "message": f"申购金额 {float(amount):.2f} 元低于最低申购金额 {float(min_amount):.2f} 元",
+                    "data": None,
+                }
+
+            # 3. 计算申购费（确认时才真正扣费，这里先预估）
+            fee_result = self._calc_purchase_fee(fund_code, amount)
+            if fee_result is None:
+                return {"success": False, "message": f"暂不支持基金 {fund_code} 的交易", "data": None}
+            fee = fee_result["fee"]
+            net_amount = fee_result["net_amount"]
 
             fund_name = self._get_fund_name(fund_code)
-
-            # 2. 计算金额与手续费
-            amount = (quantity * price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            fee_result = self._calc_trade_fee(fund_code, amount, "buy")
-            fee = fee_result["fee"]
-            total_cost = amount + fee
-
-            # 3. 校验最低申购金额（仅场外基金）
-            if fund_type != 'etf':
-                from server.services.fund_fee_service import FundFeeService
-                fee_svc = FundFeeService()
-                min_amount = Decimal(str(fee_svc.get_min_purchase_amount(fund_code)))
-                if amount < min_amount:
-                    return {
-                        "success": False,
-                        "message": f"申购金额 {float(amount):.2f} 元低于最低申购金额 {float(min_amount):.2f} 元",
-                        "data": None,
-                    }
 
             # 4. 校验可用现金
             account = self._ensure_account(user_id)
             cash = Decimal(str(account["cash"]))
-            if cash < total_cost:
+            frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
+
+            if cash < amount:
                 return {
                     "success": False,
-                    "message": f"可用现金不足：需 {float(total_cost):.2f} 元（含手续费 {float(fee):.2f} 元），实际可用 {float(cash):.2f} 元",
+                    "message": f"可用现金不足：需 {float(amount):.2f} 元，实际可用 {float(cash):.2f} 元",
                     "data": None,
                 }
 
-            # 5. 扣款
-            new_cash = cash - total_cost
-
-            # 6. 更新持仓（加权平均成本，含手续费）
-            position = self._get_position(user_id, fund_code)
-            if position:
-                old_qty = Decimal(str(position["quantity"]))
-                old_cost_price = Decimal(str(position["cost_price"]))
-                total_cost_basis = old_qty * old_cost_price + amount + fee
-                new_qty = old_qty + quantity
-                new_cost_price = (total_cost_basis / new_qty).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP) if new_qty > 0 else price
-            else:
-                new_qty = quantity
-                new_cost_price = ((amount + fee) / quantity).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-
             now = _now_iso()
 
-            # 7. 写数据库
+            # 场外基金统一走 pending 流程：冻结资金，不立即建仓
+            # T+1 确认时由 confirm_pending_orders() 按确认日净值计算精确份额
             self.client.table("accounts").update({
-                "cash": float(new_cash),
+                "cash": float(cash - amount),
+                "frozen_cash": float(frozen_cash + amount),
                 "updated_at": now,
             }).eq("user_id", user_id).execute()
 
-            if position:
-                self.client.table("positions").update({
-                    "quantity": float(new_qty),
-                    "cost_price": float(new_cost_price),
-                    "confirm_date": confirm_date.isoformat(),
-                    "updated_at": now,
-                }).eq("id", position["id"]).execute()
-            else:
-                self.client.table("positions").insert({
-                    "user_id": user_id,
-                    "fund_code": fund_code,
-                    "fund_name": fund_name,
-                    "quantity": float(new_qty),
-                    "cost_price": float(new_cost_price),
-                    "confirm_date": confirm_date.isoformat(),
-                    "created_at": now,
-                    "updated_at": now,
-                }).execute()
-
-            # 8. 写交易委托与流水
-            order_status = "pending" if is_pending else "completed"
+            # 写委托记录（pending，份额待确认后填入）
             self._write_trade_order(
-                user_id, fund_code, fund_name, "buy", price, quantity,
-                amount, fee, order_status,
-                confirm_date=confirm_date.isoformat() if is_pending else None,
-                fund_type=fund_type,
+                user_id, fund_code, fund_name, "buy", amount,
+                Decimal("0"), Decimal("0"), fee, "pending",
+                confirm_date=actual_confirm.isoformat(),
             )
-            self._write_trade_flow(user_id, fund_code, fund_name, "buy", price, quantity, amount, fee)
 
-            # 9. 构造返回消息
-            if is_pending:
-                message = f"买入申请已提交，将于 {confirm_date.isoformat()}（下一交易日）按当日净值确认"
-            else:
-                message = "买入成功"
+            message = (
+                f"申购申请已提交（{day_label}受理），"
+                f"将于 {actual_confirm.isoformat()} 确认份额（T+{confirm_delay}），资金已冻结"
+            )
 
             logger.info(
-                f"买入: user={user_id}, code={fund_code}, type={fund_type}, "
-                f"price={price}, qty={quantity}, amount={amount}, fee={fee}, "
-                f"new_qty={new_qty}, new_cost_price={new_cost_price}, status={order_status}"
+                f"申购pending: user={user_id}, code={fund_code}, "
+                f"amount={amount}, fee={fee}, confirm={actual_confirm.isoformat()}"
             )
 
             return {
@@ -373,162 +299,131 @@ class PortfolioService:
                 "data": {
                     "fund_code": fund_code,
                     "fund_name": fund_name,
-                    "fund_type": fund_type,
-                    "price": float(price),
-                    "quantity": float(quantity),
                     "amount": float(amount),
                     "fee": float(fee),
-                    "total_cost": float(total_cost),
-                    "position_qty": float(new_qty),
-                    "cost_price": float(new_cost_price),
-                    "cash_remaining": float(new_cash),
+                    "net_amount": float(net_amount),
+                    "confirm_date": actual_confirm.isoformat(),
+                    "cash_remaining": float(cash - amount),
+                    "frozen_cash": float(frozen_cash + amount),
+                    "status": "pending",
                     "trade_time": now,
-                    "status": order_status,
-                    "confirm_date": confirm_date.isoformat() if is_pending else now_beijing.date().isoformat(),
                 },
             }
 
         except Exception as e:
-            logger.error(f"买入失败: {e}", exc_info=True)
-            return {"success": False, "message": f"买入失败: {str(e)}", "data": None}
+            logger.error(f"申购失败: {e}", exc_info=True)
+            return {"success": False, "message": f"申购失败: {str(e)}", "data": None}
 
-    # ==================== 卖出 ====================
+    # ==================== 赎回 ====================
 
-    def sell(self, user_id: str, fund_code: str, quantity: Decimal, price: Optional[Decimal] = None) -> dict:
+    def apply_redeem(self, user_id: str, fund_code: str, quantity: Decimal,
+             price: Optional[Decimal] = None) -> dict:
         """
-        卖出减仓/清仓（按 fund_type 自动选择场外/场内规则）。
+        场外基金按份额赎回。
 
         参数:
             user_id: 用户 ID
             fund_code: 基金代码
-            quantity: 份额
-            price: 成交单价（不传则自动取价）
+            quantity: 赎回份额
+            price: 净值（不传则自动获取）
         """
         try:
+            # 0. 校验基金白名单 + ETF 拦截
+            from server.services.fund_fee_service import FundFeeService
+            fee_svc = FundFeeService()
+            rule = fee_svc.get_fee_rule(fund_code)
+            if rule is None:
+                return {
+                    "success": False,
+                    "message": f"暂不支持基金 {fund_code} 的交易",
+                    "data": None,
+                }
+            # ETF 拦截
+            if rule.get("fund_type") == "etf":
+                return {
+                    "success": False,
+                    "message": "场内 ETF 暂不支持交易，请使用场外开放式基金",
+                    "data": None,
+                }
+
             now_beijing = _beijing_now()
 
-            # 0. 判断基金类型
-            fund_type = self._get_fund_type(fund_code)
-
-            # 0a. ETF 交易时间校验
-            if fund_type == 'etf':
-                from server.services.trading_calendar import is_etf_trading_time
-                if not is_etf_trading_time(now_beijing):
-                    return {
-                        "success": False,
-                        "message": "ETF 仅限交易日 9:30-11:30 和 13:00-15:00 交易",
-                        "data": None,
-                    }
-                if int(quantity) % 100 != 0:
-                    return {
-                        "success": False,
-                        "message": "ETF 必须以 100 份（1 手）的整数倍交易",
-                        "data": None,
-                    }
-                is_pending = False
+            # 1. 计算确认日
+            if is_trade_day and before_cutoff:
                 confirm_date = now_beijing.date()
-
-            # 0b. 场外基金 15:00 截止
             else:
-                from server.services.trading_calendar import is_trading_day, is_before_cutoff, get_confirmation_date
-                is_trade_day = is_trading_day(now_beijing.date())
-                before_cutoff = is_before_cutoff(now_beijing)
-                confirm_date = get_confirmation_date(now_beijing)
-                is_pending = not (is_trade_day and before_cutoff)
-
-            # 1. 获取价格
-            if price is None:
-                price = self._get_current_price(fund_code, fund_type)
-            if price is None or price <= 0:
-                return {"success": False, "message": f"无法获取基金 {fund_code} 的当前价格", "data": None}
-
-            fund_name = self._get_fund_name(fund_code)
+                confirm_date = self._next_trading_day(now_beijing.date())
 
             # 2. 校验持仓
             position = self._get_position(user_id, fund_code)
             if not position:
-                return {"success": False, "message": f"未持有基金 {fund_code}，无法卖出", "data": None}
+                return {"success": False, "message": f"未持有基金 {fund_code}，无法赎回", "data": None}
 
-            current_qty = Decimal(str(position["quantity"]))
-            if quantity > current_qty:
+            # 2a. 检查是否存在 pending 申购（份额未确认前不可赎回）
+            pending_buys = (
+                self.client.table("trade_orders")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("fund_code", fund_code)
+                .eq("direction", "buy")
+                .eq("status", "pending")
+                .execute()
+            )
+            if pending_buys.data:
                 return {
                     "success": False,
-                    "message": f"可卖份额不足：需 {float(quantity)} 份，实际持有 {float(current_qty)} 份",
+                    "message": f"基金 {fund_code} 存在待确认的申购订单，份额确认前无法赎回",
                     "data": None,
                 }
 
-            # 3. 计算费用
-            cost_price = Decimal(str(position["cost_price"]))
-            amount = (quantity * price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            # 2b. 计算可用份额（扣除已有 pending 赎回订单）
+            current_qty = Decimal(str(position["quantity"]))
+            pending_sells = (
+                self.client.table("trade_orders")
+                .select("quantity")
+                .eq("user_id", user_id)
+                .eq("fund_code", fund_code)
+                .eq("direction", "sell")
+                .eq("status", "pending")
+                .execute()
+            )
+            pending_qty = Decimal("0")
+            if pending_sells.data:
+                for ps in pending_sells.data:
+                    pending_qty += Decimal(str(ps.get("quantity", 0)))
 
-            # ETF 无持有天数概念，场外基金按确认日算持有天数
-            hold_days = 0
-            if fund_type != 'etf':
-                confirm_date_str = position.get("confirm_date", "")
-                if confirm_date_str:
-                    try:
-                        hold_start = date.fromisoformat(str(confirm_date_str))
-                        hold_days = (now_beijing.date() - hold_start).days
-                    except Exception:
-                        hold_days = 0
-                else:
-                    created_at = position.get("created_at", "")
-                    if created_at:
-                        try:
-                            hold_start = _parse_time(created_at)
-                            hold_days = (_beijing_now() - hold_start).days
-                        except Exception:
-                            hold_days = 0
+            available_qty = current_qty - pending_qty
+            if quantity > available_qty:
+                return {
+                    "success": False,
+                    "message": f"可赎份额不足：需 {float(quantity)} 份，实际可用 {float(available_qty)} 份"
+                               + (f"（{float(pending_qty)} 份在待确认赎回订单中）" if pending_qty > 0 else ""),
+                    "data": None,
+                }
 
-            fee_result = self._calc_trade_fee(fund_code, amount, "sell", max(hold_days, 0))
-            fee = fee_result["fee"]
-            net_amount = amount - fee
+            fund_name = self._get_fund_name(fund_code)
 
-            # 4. 更新持仓
-            new_qty = current_qty - quantity
+            # 场外基金统一走 pending 流程：不立即入账，T+1 确认后由 confirm_pending_orders() 处理
+            # 赎回费在确认时按确认日净值和持有天数计算
+            redeem_delay = int(rule.get("redeem_settle_delay", 3))
+            settle_date = confirm_date
+            for _ in range(redeem_delay):
+                settle_date = self._next_trading_day(settle_date)
+
             now = _now_iso()
 
-            # 5. 入账
-            account = self._ensure_account(user_id)
-            cash = Decimal(str(account["cash"]))
-            new_cash = cash + net_amount
-
-            self.client.table("accounts").update({
-                "cash": float(new_cash),
-                "updated_at": now,
-            }).eq("user_id", user_id).execute()
-
-            if new_qty == 0:
-                self.client.table("positions").delete().eq("id", position["id"]).execute()
-            else:
-                self.client.table("positions").update({
-                    "quantity": float(new_qty),
-                    "updated_at": now,
-                }).eq("id", position["id"]).execute()
-
-            # 6. 写流水
-            order_status = "pending" if is_pending else "completed"
             self._write_trade_order(
-                user_id, fund_code, fund_name, "sell", price, quantity,
-                amount, fee, order_status,
-                confirm_date=confirm_date.isoformat() if is_pending else None,
-                fund_type=fund_type,
+                user_id, fund_code, fund_name, "sell",
+                Decimal("0"), Decimal("0"),  # 金额和净值确认时按确认日填入
+                quantity, Decimal("0"), "pending",
+                confirm_date=confirm_date.isoformat(),
             )
-            self._write_trade_flow(user_id, fund_code, fund_name, "sell", price, quantity, amount, fee)
 
-            # 7. 计算盈亏
-            cost_of_sold = (cost_price * quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            trade_pnl = (net_amount - cost_of_sold).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
-
-            if is_pending:
-                message = f"卖出申请已提交，将于 {confirm_date.isoformat()}（下一交易日）按当日净值确认"
-            else:
-                message = "卖出成功"
+            message = f"赎回申请已提交，将于 {settle_date.isoformat()} 到账（T+{redeem_delay}）"
 
             logger.info(
-                f"卖出: user={user_id}, code={fund_code}, type={fund_type}, "
-                f"price={price}, qty={quantity}, amount={amount}, fee={fee}, "
-                f"net={net_amount}, trade_pnl={trade_pnl}, new_qty={new_qty}, status={order_status}"
+                f"赎回pending: user={user_id}, code={fund_code}, "
+                f"qty={quantity}, confirm={confirm_date.isoformat()}, settle={settle_date.isoformat()}"
             )
 
             return {
@@ -537,31 +432,21 @@ class PortfolioService:
                 "data": {
                     "fund_code": fund_code,
                     "fund_name": fund_name,
-                    "fund_type": fund_type,
-                    "price": float(price),
                     "quantity": float(quantity),
-                    "amount": float(amount),
-                    "fee": float(fee),
-                    "net_amount": float(net_amount),
-                    "trade_pnl": float(trade_pnl),
-                    "hold_days": max(hold_days, 0) if fund_type != 'etf' else 0,
-                    "position_qty": float(new_qty),
-                    "cost_price": float(cost_price) if new_qty > 0 else None,
-                    "cash_remaining": float(new_cash),
+                    "confirm_date": confirm_date.isoformat(),
+                    "settle_date": settle_date.isoformat(),
+                    "status": "pending",
                     "trade_time": now,
-                    "status": order_status,
-                    "confirm_date": confirm_date.isoformat() if is_pending else now_beijing.date().isoformat(),
                 },
             }
 
         except Exception as e:
-            logger.error(f"卖出失败: {e}", exc_info=True)
-            return {"success": False, "message": f"卖出失败: {str(e)}", "data": None}
+            logger.error(f"赎回失败: {e}", exc_info=True)
+            return {"success": False, "message": f"赎回失败: {str(e)}", "data": None}
 
     # ==================== 持仓查询 ====================
 
     def _get_position(self, user_id: str, fund_code: str) -> Optional[dict]:
-        """查询单只基金持仓"""
         if not self.client:
             return None
         result = (
@@ -576,16 +461,6 @@ class PortfolioService:
         return None
 
     def list_positions(self, user_id: str, include_quote: bool = True) -> dict:
-        """
-        查询用户所有持仓（含市值、盈亏）。
-
-        参数:
-            user_id: 用户 ID
-            include_quote: 是否计算实时市值和盈亏
-
-        返回:
-            {"total": int, "items": list, "total_pnl": float, "total_position_value": float}
-        """
         if not self.client:
             return {"total": 0, "items": [], "total_pnl": 0, "total_position_value": 0}
 
@@ -605,11 +480,9 @@ class PortfolioService:
                 qty = Decimal(str(item.get("quantity", 0)))
                 cost_price = Decimal(str(item.get("cost_price", 0)))
                 cost_value = qty * cost_price
-                fund_type = self._get_fund_type(item["fund_code"])
-                item["fund_type"] = fund_type
 
                 if include_quote:
-                    market_price = self._get_current_price(item["fund_code"], fund_type)
+                    market_price = self._get_nav(item["fund_code"])
                     if market_price and market_price > 0:
                         market_value = (qty * market_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                         item["market_price"] = float(market_price)
@@ -651,25 +524,12 @@ class PortfolioService:
     # ==================== 账户概况 ====================
 
     def account_summary(self, user_id: str) -> dict:
-        """
-        获取账户概况。
-
-        返回:
-            {
-                "cash": float,          # 可用现金
-                "position_value": float, # 持仓市值
-                "total_assets": float,   # 总资产 = 现金 + 持仓市值
-                "total_pnl": float,      # 总盈亏 = 总资产 - 初始资金
-                "total_return_rate": float, # 总收益率
-                "position_count": int,   # 持仓基金数
-            }
-        """
         try:
             account = self.get_account(user_id)
             if not account:
-                # 未创建账户 = 无交易
                 return {
                     "cash": float(INITIAL_CASH),
+                    "frozen_cash": 0,
                     "position_value": 0,
                     "total_assets": float(INITIAL_CASH),
                     "total_pnl": 0,
@@ -678,14 +538,16 @@ class PortfolioService:
                 }
 
             cash = Decimal(str(account["cash"]))
+            frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
             positions_data = self.list_positions(user_id, include_quote=True)
             position_value = Decimal(str(positions_data["total_position_value"]))
-            total_assets = cash + position_value
+            total_assets = cash + frozen_cash + position_value
             total_pnl = total_assets - INITIAL_CASH
             total_return_rate = (total_pnl / INITIAL_CASH) if INITIAL_CASH > 0 else Decimal("0")
 
             return {
                 "cash": float(cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+                "frozen_cash": float(frozen_cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
                 "position_value": float(position_value.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
                 "total_assets": float(total_assets.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
                 "total_pnl": float(total_pnl.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
@@ -695,31 +557,290 @@ class PortfolioService:
 
         except Exception as e:
             logger.error(f"账户概况查询失败: {e}", exc_info=True)
-            return {"cash": 0, "position_value": 0, "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0}
+            return {"cash": 0, "frozen_cash": 0, "position_value": 0, "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0}
 
-    # ==================== 交易流水 ====================
+    # ==================== Pending 订单确认 ====================
+
+    def confirm_pending_orders(self) -> dict:
+        """
+        扫描 trade_orders 中 status='pending' 且 confirm_date <= today 的订单，
+        执行资金扣款/入账、持仓创建/更新、写流水。
+
+        由定时调度器在每个交易日调用。
+        """
+        if not self.client:
+            return {"status": "error", "message": "数据库不可用"}
+
+        today = _beijing_date()
+        if not self._is_trading_day(today):
+            return {"status": "skipped", "message": f"{today} 非交易日，跳过确认", "processed": 0}
+
+        try:
+            result = (
+                self.client.table("trade_orders")
+                .select("*")
+                .eq("status", "pending")
+                .lte("confirm_date", today.isoformat())
+                .execute()
+            )
+
+            orders = result.data or []
+            if not orders:
+                return {"status": "ok", "message": "无待确认订单", "processed": 0}
+
+            confirmed = 0
+            failed = 0
+            for order in orders:
+                try:
+                    self._confirm_one_order(order, today)
+                    confirmed += 1
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"确认订单失败 {order.get('id')}: {e}", exc_info=True)
+                    try:
+                        self.client.table("trade_orders").update({
+                            "status": "failed",
+                            "reject_reason": str(e)[:200],
+                            "updated_at": _now_iso(),
+                        }).eq("id", order["id"]).execute()
+                    except Exception:
+                        pass
+
+            logger.info(f"Pending 订单确认完成: 成功 {confirmed}, 失败 {failed}")
+            return {
+                "status": "ok",
+                "message": f"确认完成: 成功 {confirmed}, 失败 {failed}",
+                "processed": confirmed + failed,
+            }
+
+        except Exception as e:
+            logger.error(f"确认 pending 订单失败: {e}", exc_info=True)
+            return {"status": "error", "message": str(e), "processed": 0}
+
+    def _confirm_one_order(self, order: dict, today: date) -> None:
+        """确认单笔 pending 订单"""
+        order_id = order["id"]
+        user_id = order["user_id"]
+        fund_code = order["fund_code"]
+        fund_name = order["fund_name"]
+        direction = order["direction"]
+        amount = Decimal(str(order["amount"]))
+        price = Decimal(str(order["price"]))
+        quantity = Decimal(str(order["quantity"]))
+        fee = Decimal(str(order["fee"]))
+        now = _now_iso()
+
+        from server.services.fund_fee_service import FundFeeService
+        fee_svc = FundFeeService()
+
+        if direction == "buy":
+            # --- 申购确认 ---
+            # 1. 获取当日净值
+            nav = self._get_nav(fund_code)
+            if nav is None or nav <= 0:
+                nav = price  # 回退到订单中的价格
+
+            # 2. 计算申购费和净金额
+            fee_result = self._calc_purchase_fee(fund_code, amount)
+            if fee_result:
+                actual_fee = fee_result["fee"]
+                net_amount = fee_result["net_amount"]
+            else:
+                actual_fee = fee
+                net_amount = amount - fee
+
+            # 3. 计算实际份额
+            actual_qty = (net_amount / nav).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+            # 4. 解冻资金（扣减 frozen_cash）
+            account_result = (
+                self.client.table("accounts")
+                .select("*")
+                .eq("user_id", user_id)
+                .execute()
+            )
+            if not account_result.data:
+                raise RuntimeError(f"用户 {user_id} 账户不存在")
+            account = account_result.data[0]
+            frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
+            new_frozen = frozen_cash - amount
+            if new_frozen < 0:
+                new_frozen = Decimal("0")
+
+            self.client.table("accounts").update({
+                "frozen_cash": float(new_frozen),
+                "updated_at": now,
+            }).eq("user_id", user_id).execute()
+
+            # 5. 建仓（加权平均成本）
+            pos_result = (
+                self.client.table("positions")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("fund_code", fund_code)
+                .execute()
+            )
+            if pos_result.data and len(pos_result.data) > 0:
+                position = pos_result.data[0]
+                old_qty = Decimal(str(position["quantity"]))
+                old_cost_price = Decimal(str(position["cost_price"]))
+                total_cost_basis = old_qty * old_cost_price + net_amount
+                new_qty = old_qty + actual_qty
+                new_cost_price = (total_cost_basis / new_qty).quantize(
+                    Decimal("0.0001"), rounding=ROUND_HALF_UP
+                ) if new_qty > 0 else nav
+            else:
+                position = None
+                new_qty = actual_qty
+                new_cost_price = (net_amount / actual_qty).quantize(
+                    Decimal("0.0001"), rounding=ROUND_HALF_UP
+                ) if actual_qty > 0 else nav
+
+            # 份额可赎回日（T+2）
+            available_date = today
+            for _ in range(2):
+                available_date = self._next_trading_day(available_date)
+
+            if position:
+                self.client.table("positions").update({
+                    "quantity": float(new_qty),
+                    "cost_price": float(new_cost_price),
+                    "confirm_date": today.isoformat(),
+                    "available_date": available_date.isoformat(),
+                    "updated_at": now,
+                }).eq("id", position["id"]).execute()
+            else:
+                self.client.table("positions").insert({
+                    "user_id": user_id,
+                    "fund_code": fund_code,
+                    "fund_name": fund_name,
+                    "quantity": float(new_qty),
+                    "cost_price": float(new_cost_price),
+                    "confirm_date": today.isoformat(),
+                    "available_date": available_date.isoformat(),
+                    "created_at": now,
+                    "updated_at": now,
+                }).execute()
+
+            # 6. 写流水
+            self._write_trade_flow(user_id, fund_code, fund_name, "buy",
+                                   amount, nav, actual_qty, actual_fee)
+
+            # 7. 更新订单状态
+            self.client.table("trade_orders").update({
+                "status": "completed",
+                "quantity": float(actual_qty),
+                "price": float(nav),
+                "fee": float(actual_fee),
+                "updated_at": now,
+            }).eq("id", order_id).execute()
+
+            logger.info(f"申购确认: user={user_id}, code={fund_code}, "
+                        f"qty={actual_qty}, nav={nav}, amount={amount}")
+
+        elif direction == "sell":
+            # --- 赎回确认 ---
+            # 1. 获取持仓
+            pos_result = (
+                self.client.table("positions")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("fund_code", fund_code)
+                .execute()
+            )
+            if not pos_result.data:
+                raise RuntimeError(f"用户 {user_id} 持仓 {fund_code} 不存在")
+            position = pos_result.data[0]
+            current_qty = Decimal(str(position["quantity"]))
+            cost_price = Decimal(str(position["cost_price"]))
+
+            # 2. 计算赎回费（按确认日净值）
+            nav = self._get_nav(fund_code)
+            if nav is None or nav <= 0:
+                nav = price
+            redeem_amount = (quantity * nav).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+            # 持有天数
+            confirm_date_str = position.get("confirm_date", "")
+            hold_days = 0
+            if confirm_date_str:
+                try:
+                    hold_start = date.fromisoformat(str(confirm_date_str))
+                    hold_days = (today - hold_start).days
+                except Exception:
+                    hold_days = 0
+
+            actual_fee = self._calc_redemption_fee(fund_code, redeem_amount, max(hold_days, 0))
+            if actual_fee is None:
+                actual_fee = Decimal("0")
+            net_amount = redeem_amount - actual_fee
+
+            # 3. 更新持仓
+            new_qty = current_qty - quantity
+
+            # 4. 现金入账
+            account_result = (
+                self.client.table("accounts")
+                .select("*")
+                .eq("user_id", user_id)
+                .execute()
+            )
+            account = account_result.data[0]
+            current_cash = Decimal(str(account["cash"]))
+            new_cash = current_cash + net_amount
+
+            self.client.table("accounts").update({
+                "cash": float(new_cash),
+                "updated_at": now,
+            }).eq("user_id", user_id).execute()
+
+            if new_qty <= 0:
+                self.client.table("positions").delete().eq("id", position["id"]).execute()
+            else:
+                self.client.table("positions").update({
+                    "quantity": float(new_qty),
+                    "updated_at": now,
+                }).eq("id", position["id"]).execute()
+
+            # 5. 写流水
+            self._write_trade_flow(user_id, fund_code, fund_name, "sell",
+                                   redeem_amount, nav, quantity, actual_fee)
+
+            # 6. 更新订单状态
+            cost_of_sold = (cost_price * quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            trade_pnl = (net_amount - cost_of_sold).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
+
+            self.client.table("trade_orders").update({
+                "status": "completed",
+                "amount": float(redeem_amount),
+                "price": float(nav),
+                "fee": float(actual_fee),
+                "updated_at": now,
+            }).eq("id", order_id).execute()
+
+            logger.info(f"赎回确认: user={user_id}, code={fund_code}, "
+                        f"qty={quantity}, amount={redeem_amount}, fee={actual_fee}, pnl={trade_pnl}")
+
+    # ==================== 交易委托 ====================
 
     def _write_trade_order(self, user_id: str, fund_code: str, fund_name: str,
-                           direction: str, price: Decimal, quantity: Decimal,
-                           amount: Decimal, fee: Decimal, status: str,
-                           reject_reason: Optional[str] = None,
-                           confirm_date: Optional[str] = None,
-                           fund_type: str = "otf") -> None:
-        """写交易委托记录"""
+                           direction: str, amount: Decimal, price: Decimal,
+                           quantity: Decimal, fee: Decimal, status: str,
+                           confirm_date: Optional[str] = None) -> None:
         now = _now_iso()
         data = {
             "user_id": user_id,
             "fund_code": fund_code,
             "fund_name": fund_name,
-            "fund_type": fund_type,
             "direction": direction,
             "order_type": "market",
+            "amount": float(amount),
             "price": float(price),
             "quantity": float(quantity),
-            "amount": float(amount),
             "fee": float(fee),
             "status": status,
-            "reject_reason": reject_reason or (f"确认日期: {confirm_date}" if confirm_date else None),
+            "reject_reason": f"确认日期: {confirm_date}" if confirm_date and status == "pending" else None,
+            "confirm_date": confirm_date,
             "created_at": now,
             "updated_at": now,
         }
@@ -729,18 +850,17 @@ class PortfolioService:
             logger.error(f"写交易委托失败: {e}")
 
     def _write_trade_flow(self, user_id: str, fund_code: str, fund_name: str,
-                          direction: str, price: Decimal, quantity: Decimal,
-                          amount: Decimal, fee: Decimal) -> None:
-        """写交易流水"""
+                          direction: str, amount: Decimal, price: Decimal,
+                          quantity: Decimal, fee: Decimal) -> None:
         now = _now_iso()
         data = {
             "user_id": user_id,
             "fund_code": fund_code,
             "fund_name": fund_name,
             "direction": direction,
+            "amount": float(amount),
             "price": float(price),
             "quantity": float(quantity),
-            "amount": float(amount),
             "fee": float(fee),
             "trade_time": now,
         }
@@ -752,19 +872,6 @@ class PortfolioService:
     def query_trade_flow(self, user_id: str, fund_code: Optional[str] = None,
                          direction: Optional[str] = None,
                          page: int = 1, page_size: int = 20) -> dict:
-        """
-        分页查询交易流水。
-
-        参数:
-            user_id: 用户 ID
-            fund_code: 基金代码（可选，过滤）
-            direction: 方向 buy/sell（可选，过滤）
-            page: 页码（从 1 开始）
-            page_size: 每页条数
-
-        返回:
-            {"total": int, "page": int, "page_size": int, "total_pages": int, "items": list}
-        """
         if not self.client:
             return {"total": 0, "page": page, "page_size": page_size, "total_pages": 0, "items": []}
 
@@ -790,10 +897,6 @@ class PortfolioService:
             total = result.count if hasattr(result, 'count') and result.count is not None else len(items)
             total_pages = max(1, (total + page_size - 1) // page_size)
 
-            # 给每条流水加 fund_type
-            for item in items:
-                item["fund_type"] = self._get_fund_type(item["fund_code"])
-
             return {
                 "total": total,
                 "page": page,
@@ -809,18 +912,8 @@ class PortfolioService:
     # ==================== 每日快照 ====================
 
     def take_snapshot(self, user_id: str, snapshot_date: Optional[date] = None) -> dict:
-        """
-        对指定用户生成当日资产快照（幂等：同一天已存在则更新）。
-
-        参数:
-            user_id: 用户 ID
-            snapshot_date: 快照日期（默认今天）
-
-        返回:
-            {"success": bool, "message": str, "data": dict}
-        """
         if snapshot_date is None:
-            snapshot_date = date.today()
+            snapshot_date = _beijing_date()
 
         try:
             summary = self.account_summary(user_id)
@@ -835,7 +928,6 @@ class PortfolioService:
                 "created_at": _now_iso(),
             }
 
-            # UPSERT：同一天存在则更新
             existing = (
                 self.client.table("account_snapshots")
                 .select("*")
@@ -871,12 +963,6 @@ class PortfolioService:
             return {"success": False, "message": f"快照保存失败: {str(e)}", "data": None}
 
     def get_daily_returns(self, user_id: str, days: int = 30) -> dict:
-        """
-        查询最近 N 天的每日收益率。
-
-        返回:
-            {"items": [{"date": str, "total_assets": float, "daily_return": float}, ...]}
-        """
         if not self.client:
             return {"items": []}
 
@@ -917,328 +1003,3 @@ class PortfolioService:
         except Exception as e:
             logger.error(f"查询每日收益率失败: {e}")
             return {"items": []}
-
-    # ==================== ETF 预约功能 ====================
-
-    def create_reservation(self, user_id: str, fund_code: str, quantity: Decimal,
-                           direction: str) -> dict:
-        """
-        创建 ETF 预约单（非交易时段提交，到下一交易时段自动成交）。
-
-        仅支持 ETF（fund_type=etf），场外基金不使用此功能。
-        不扣款、不更新持仓，仅写入 trade_orders (status='reserved')。
-
-        参数:
-            user_id: 用户 ID
-            fund_code: 基金代码
-            quantity: 份额
-            direction: 'buy' 或 'sell'
-        """
-        try:
-            # 0. 判断基金类型
-            fund_type = self._get_fund_type(fund_code)
-            if fund_type != 'etf':
-                return {
-                    "success": False,
-                    "message": "预约功能仅支持场内ETF，场外基金请使用普通买入/卖出",
-                    "data": None,
-                }
-
-            # 0a. 如果当前是交易时段，提示直接下单
-            now_beijing = _beijing_now()
-            from server.services.trading_calendar import is_etf_trading_time
-            if is_etf_trading_time(now_beijing):
-                return {
-                    "success": False,
-                    "message": "当前为ETF交易时段，请直接使用买入/卖出接口",
-                    "data": None,
-                }
-
-            # 0b. 数量校验：100 份整数倍
-            if int(quantity) % 100 != 0:
-                return {
-                    "success": False,
-                    "message": "ETF 必须以 100 份（1 手）的整数倍交易",
-                    "data": None,
-                }
-
-            fund_name = self._get_fund_name(fund_code)
-
-            # 1. 预校验（不扣款，只检查条件是否满足）
-            account = self._ensure_account(user_id)
-            cash = Decimal(str(account["cash"]))
-
-            if direction == 'buy':
-                # 获取参考价格，用于预校验现金是否充足
-                ref_price = self._get_current_price(fund_code, fund_type)
-                if ref_price and ref_price > 0:
-                    from server.services.fund_fee_service import FundFeeService
-                    fee_svc = FundFeeService()
-                    ref_amount = (quantity * ref_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                    ref_fee_result = fee_svc.calc_fee_for_trade(fund_code, float(ref_amount), "buy")
-                    ref_total_cost = ref_amount + Decimal(str(ref_fee_result["fee"]))
-                    if cash < ref_total_cost:
-                        return {
-                            "success": False,
-                            "message": f"可用现金不足：预估需 {float(ref_total_cost):.2f} 元，实际可用 {float(cash):.2f} 元（实际成交金额以交易时段实时价为准）",
-                            "data": None,
-                        }
-                estimated_price = float(ref_price) if ref_price else None
-
-            else:  # sell
-                position = self._get_position(user_id, fund_code)
-                if not position:
-                    return {"success": False, "message": f"未持有基金 {fund_code}，无法预约卖出", "data": None}
-                current_qty = Decimal(str(position["quantity"]))
-                if quantity > current_qty:
-                    return {
-                        "success": False,
-                        "message": f"可卖份额不足：需 {float(quantity)} 份，实际持有 {float(current_qty)} 份",
-                        "data": None,
-                    }
-                ref_price = self._get_current_price(fund_code, fund_type)
-                estimated_price = float(ref_price) if ref_price else None
-
-            # 2. 写入预约单（status='reserved'）
-            now = _now_iso()
-            reservation_data = {
-                "user_id": user_id,
-                "fund_code": fund_code,
-                "fund_name": fund_name,
-                "fund_type": fund_type,
-                "direction": direction,
-                "order_type": "market",
-                "price": 0,  # 预约时价格未知，成交时填入
-                "quantity": float(quantity),
-                "amount": 0,
-                "fee": 0,
-                "status": "reserved",
-                "created_at": now,
-                "updated_at": now,
-            }
-
-            result = self.client.table("trade_orders").insert(reservation_data).execute()
-            if not result.data or len(result.data) == 0:
-                return {"success": False, "message": "预约单创建失败", "data": None}
-
-            order = result.data[0]
-            logger.info(f"预约创建: user={user_id}, code={fund_code}, direction={direction}, qty={quantity}, order_id={order['id']}")
-
-            return {
-                "success": True,
-                "message": "预约成功，将在下一交易时段自动成交",
-                "data": {
-                    "id": order["id"],
-                    "user_id": user_id,
-                    "fund_code": fund_code,
-                    "fund_name": fund_name,
-                    "fund_type": fund_type,
-                    "direction": direction,
-                    "quantity": float(quantity),
-                    "estimated_price": estimated_price,
-                    "status": "reserved",
-                    "created_at": now,
-                    "updated_at": now,
-                },
-            }
-
-        except Exception as e:
-            logger.error(f"创建预约失败: {e}", exc_info=True)
-            return {"success": False, "message": f"创建预约失败: {str(e)}", "data": None}
-
-    def cancel_reservation(self, order_id: str, user_id: str) -> dict:
-        """
-        取消预约单。
-
-        参数:
-            order_id: 订单 ID
-            user_id: 用户 ID（用于校验归属）
-        """
-        try:
-            # 1. 查询预约单
-            result = (
-                self.client.table("trade_orders")
-                .select("*")
-                .eq("id", order_id)
-                .eq("user_id", user_id)
-                .execute()
-            )
-            if not result.data or len(result.data) == 0:
-                return {"success": False, "message": "未找到该预约单", "data": None}
-
-            order = result.data[0]
-            if order["status"] != "reserved":
-                return {
-                    "success": False,
-                    "message": f"该订单状态为 {order['status']}，无法取消（仅 reserved 状态可取消）",
-                    "data": None,
-                }
-
-            # 2. 更新状态为 cancelled
-            now = _now_iso()
-            self.client.table("trade_orders").update({
-                "status": "cancelled",
-                "updated_at": now,
-            }).eq("id", order_id).execute()
-
-            logger.info(f"预约取消: user={user_id}, order_id={order_id}, code={order['fund_code']}")
-
-            return {
-                "success": True,
-                "message": "预约已取消",
-                "data": {
-                    "id": order["id"],
-                    "user_id": user_id,
-                    "fund_code": order["fund_code"],
-                    "fund_name": order["fund_name"],
-                    "fund_type": order.get("fund_type", "etf"),
-                    "direction": order["direction"],
-                    "quantity": float(order["quantity"]),
-                    "estimated_price": None,
-                    "status": "cancelled",
-                    "created_at": order["created_at"],
-                    "updated_at": now,
-                },
-            }
-
-        except Exception as e:
-            logger.error(f"取消预约失败: {e}", exc_info=True)
-            return {"success": False, "message": f"取消预约失败: {str(e)}", "data": None}
-
-    def list_reservations(self, user_id: str) -> dict:
-        """
-        查询用户的预约单列表（仅 status='reserved' 的订单）。
-
-        参数:
-            user_id: 用户 ID
-
-        返回:
-            {"total": int, "items": list}
-        """
-        try:
-            result = (
-                self.client.table("trade_orders")
-                .select("*")
-                .eq("user_id", user_id)
-                .eq("status", "reserved")
-                .order("created_at", desc=True)
-                .execute()
-            )
-            items = result.data or []
-            for item in items:
-                item["estimated_price"] = None  # 预约时无成交价
-
-            return {"total": len(items), "items": items}
-
-        except Exception as e:
-            logger.error(f"查询预约列表失败: {e}", exc_info=True)
-            return {"total": 0, "items": []}
-
-    def execute_reservations(self) -> dict:
-        """
-        执行所有待执行的预约单（由调度器在交易时段调用）。
-
-        查询所有 status='reserved' 的 ETF 预约单，逐笔执行：
-        - 获取实时价格
-        - 扣款/入账
-        - 更新持仓
-        - 写流水
-        - 更新订单状态
-
-        返回:
-            {"executed": int, "failed": int, "details": list}
-        """
-        if not self.client:
-            return {"executed": 0, "failed": 0, "details": []}
-
-        try:
-            # 1. 查询所有 reserved 订单
-            result = (
-                self.client.table("trade_orders")
-                .select("*")
-                .eq("status", "reserved")
-                .execute()
-            )
-            orders = result.data or []
-
-            if not orders:
-                return {"executed": 0, "failed": 0, "details": []}
-
-            executed = 0
-            failed = 0
-            details = []
-
-            for order in orders:
-                try:
-                    order_id = order["id"]
-                    user_id = order["user_id"]
-                    fund_code = order["fund_code"]
-                    direction = order["direction"]
-                    quantity = Decimal(str(order["quantity"]))
-
-                    if direction == "buy":
-                        trade_result = self.buy(
-                            user_id=user_id,
-                            fund_code=fund_code,
-                            quantity=quantity,
-                        )
-                    else:
-                        trade_result = self.sell(
-                            user_id=user_id,
-                            fund_code=fund_code,
-                            quantity=quantity,
-                        )
-
-                    if trade_result["success"]:
-                        # 买入/卖出成功后，把原来的 reserved 订单标记为 completed
-                        # 注意：buy/sell 内部会创建新的 trade_order (completed)，所以需要把原 reserved 订单更新
-                        self.client.table("trade_orders").update({
-                            "status": "completed",
-                            "price": float(trade_result["data"]["price"]),
-                            "amount": float(trade_result["data"]["amount"]),
-                            "fee": float(trade_result["data"]["fee"]),
-                            "updated_at": _now_iso(),
-                        }).eq("id", order_id).execute()
-
-                        executed += 1
-                        details.append({
-                            "order_id": order_id,
-                            "fund_code": fund_code,
-                            "direction": direction,
-                            "status": "completed",
-                        })
-                        logger.info(f"预约执行成功: order_id={order_id}, code={fund_code}, direction={direction}")
-                    else:
-                        # 执行失败，标记为 rejected
-                        self.client.table("trade_orders").update({
-                            "status": "rejected",
-                            "reject_reason": trade_result["message"],
-                            "updated_at": _now_iso(),
-                        }).eq("id", order_id).execute()
-
-                        failed += 1
-                        details.append({
-                            "order_id": order_id,
-                            "fund_code": fund_code,
-                            "direction": direction,
-                            "status": "rejected",
-                            "reason": trade_result["message"],
-                        })
-                        logger.warning(f"预约执行失败: order_id={order_id}, reason={trade_result['message']}")
-
-                except Exception as e:
-                    failed += 1
-                    details.append({
-                        "order_id": order.get("id", "unknown"),
-                        "fund_code": order.get("fund_code", ""),
-                        "direction": order.get("direction", ""),
-                        "status": "error",
-                        "reason": str(e),
-                    })
-                    logger.error(f"预约执行异常: order_id={order.get('id')}, error={e}")
-
-            return {"executed": executed, "failed": failed, "details": details}
-
-        except Exception as e:
-            logger.error(f"执行预约单失败: {e}", exc_info=True)
-            return {"executed": 0, "failed": 0, "details": []}
