@@ -223,7 +223,7 @@ class PortfolioService:
             now_beijing = _beijing_now()
 
             # 1. 计算确认日
-            if is_trade_day and before_cutoff:
+            if self._is_trading_day(now_beijing.date()) and self._is_before_cutoff(now_beijing):
                 confirm_date = now_beijing.date()
                 day_label = "当日"
             else:
@@ -349,7 +349,7 @@ class PortfolioService:
             now_beijing = _beijing_now()
 
             # 1. 计算确认日
-            if is_trade_day and before_cutoff:
+            if self._is_trading_day(now_beijing.date()) and self._is_before_cutoff(now_beijing):
                 confirm_date = now_beijing.date()
             else:
                 confirm_date = self._next_trading_day(now_beijing.date())
