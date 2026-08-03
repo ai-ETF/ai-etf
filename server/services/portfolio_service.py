@@ -245,7 +245,13 @@ class PortfolioService:
                     "data": None,
                 }
 
-            # 3. 计算申购费（确认时才真正扣费，这里先预估）
+            # 3. 获取净值（必须在冻结资金之前）
+            if price is None:
+                price = self._get_nav(fund_code)
+            if price is None or price <= 0:
+                return {"success": False, "message": f"无法获取基金 {fund_code} 的净值", "data": None}
+
+            # 4. 计算申购费（确认时才真正扣费，这里先预估）
             fee_result = self._calc_purchase_fee(fund_code, amount)
             if fee_result is None:
                 return {"success": False, "message": f"暂不支持基金 {fund_code} 的交易", "data": None}
@@ -254,7 +260,7 @@ class PortfolioService:
 
             fund_name = self._get_fund_name(fund_code)
 
-            # 4. 校验可用现金
+            # 5. 校验可用现金
             account = self._ensure_account(user_id)
             cash = Decimal(str(account["cash"]))
             frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
