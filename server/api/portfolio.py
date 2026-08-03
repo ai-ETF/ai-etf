@@ -182,6 +182,14 @@ async def take_snapshot(
     )
 
 
+@router.post("/confirm-pending", response_model=dict)
+async def confirm_pending():
+    """手动触发 pending 订单确认（公开，供定时任务/手动调用）"""
+    svc = PortfolioService()
+    result = svc.confirm_pending_orders()
+    return result
+
+
 @router.get("/daily-returns", response_model=DailyReturnResponse)
 async def get_daily_returns(
     days: int = Query(30, ge=1, le=365, description="查询最近多少天"),
