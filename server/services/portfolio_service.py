@@ -300,6 +300,7 @@ class PortfolioService:
                     "fund_code": fund_code,
                     "fund_name": fund_name,
                     "amount": float(amount),
+                    "price": float(price),
                     "fee": float(fee),
                     "net_amount": float(net_amount),
                     "confirm_date": actual_confirm.isoformat(),
@@ -432,6 +433,9 @@ class PortfolioService:
                 "data": {
                     "fund_code": fund_code,
                     "fund_name": fund_name,
+                    "amount": 0.0,
+                    "price": 0.0,
+                    "fee": 0.0,
                     "quantity": float(quantity),
                     "confirm_date": confirm_date.isoformat(),
                     "settle_date": settle_date.isoformat(),
