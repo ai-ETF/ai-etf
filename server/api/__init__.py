@@ -8,6 +8,16 @@ API 路由聚合器
 """
 import logging
 
+"""
+API 路由聚合器
+
+将各子模块的路由聚合为一个统一的 router，供 app.py 注册。
+每个子路由已自带 prefix，此处不再重复添加。
+
+新增模块只需在 __init__.py 中添加 import + include_router，app.py 无需改动。
+"""
+import logging
+
 from fastapi import APIRouter
 
 from . import upload, test, secure_chat, watchlist
