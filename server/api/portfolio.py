@@ -184,9 +184,10 @@ async def take_snapshot(
 
 @router.post("/confirm-pending", response_model=dict)
 async def confirm_pending():
-    """手动触发 pending 订单确认（公开，供定时任务/手动调用）"""
+    """手动触发 pending 订单确认（公开，供定时任务/手动调用）。
+    跳过交易日检查，直接处理所有 overdue 订单。"""
     svc = PortfolioService()
-    result = svc.confirm_pending_orders()
+    result = svc.confirm_pending_orders(skip_trading_day_check=True)
     return result
 
 

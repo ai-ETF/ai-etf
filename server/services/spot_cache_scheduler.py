@@ -3,7 +3,8 @@
 
 独立管理：
 1. 全量 ETF 行情的定时拉取（交易时段 30s）
-2. Pending 订单确认（每个交易日 15:30）
+2. Pending 订单确认（每个交易日 15:37）
+3. 启动时补偿：检查遗漏的 pending 订单并立即确认
 """
 import asyncio
 import logging
@@ -42,12 +43,21 @@ async def _warmup_cache():
 
 
 async def _confirm_pending_orders_job():
-    """Pending 订单确认任务（每个交易日 15:30 执行）"""
+    """Pending 订单确认任务（每个交易日 15:37 执行）"""
     from server.services.portfolio_service import PortfolioService
     logger.info("[确认] 开始检查 pending 订单...")
     svc = PortfolioService()
-    result = svc.confirm_pending_orders()
+    result = svc.confirm_pending_orders(skip_trading_day_check=False)
     logger.info(f"[确认] Pending 订单确认完成: {result}")
+
+
+async def _startup_pending_compensation():
+    """启动补偿：确认所有遗漏的 pending 订单（不检查交易日）"""
+    from server.services.portfolio_service import PortfolioService
+    logger.info("[启动补偿] 检查遗漏的 pending 订单...")
+    svc = PortfolioService()
+    result = svc.confirm_pending_orders(skip_trading_day_check=True)
+    logger.info(f"[启动补偿] 遗漏订单确认完成: {result}")
 
 
 def start_scheduler() -> AsyncIOScheduler:
@@ -67,20 +77,23 @@ def start_scheduler() -> AsyncIOScheduler:
     )
     logger.info("ETF行情定时刷新任务已注册（每30秒检测一次）")
 
-    # 任务2：Pending 订单确认（每个交易日 15:30）
+    # 任务2：Pending 订单确认（每个交易日 15:37）
     _scheduler.add_job(
         _confirm_pending_orders_job,
         trigger=CronTrigger(hour=15, minute=37, day_of_week="mon-fri"),
         id="confirm_pending_orders",
         name="确认pending订单（每个交易日15:37）",
         replace_existing=True,
+        misfire_grace_time=3600,  # 错过1小时内仍可补执行
     )
-    logger.info("Pending订单确认任务已注册（每个交易日15:37）")
+    logger.info("Pending订单确认任务已注册（每个交易日15:37，1小时容错）")
 
     _scheduler.start()
 
     # 不阻塞启动，异步执行首次预热
     asyncio.ensure_future(_warmup_cache())
+    # 启动补偿：检查遗漏的 pending 订单
+    asyncio.ensure_future(_startup_pending_compensation())
 
     return _scheduler
 

@@ -12,6 +12,8 @@
 
 仅支持 fund_fee_rules 表中已配置的场外开放式基金（fund_type='of'），查不到规则直接拒绝。
 场内 ETF（fund_type='etf'）交易直接拦截。
+
+优化：每次请求只查一次 get_fee_rule，将 rule dict 向下传递，避免重复远程查询。
 """
 import logging
 from datetime import date, datetime, timezone, timedelta
@@ -117,11 +119,15 @@ class PortfolioService:
             logger.warning(f"查询基金净值失败 ({fund_code}): {e}")
         return None
 
-    def _get_fund_name(self, fund_code: str) -> str:
-        """获取基金名称"""
+    def _get_fund_name(self, fund_code: str, rule: Optional[dict] = None) -> str:
+        """获取基金名称（优先从 rule 中读取，避免重复查询）"""
+        if rule:
+            name = rule.get("fund_name")
+            if name:
+                return name
         from server.services.fund_fee_service import FundFeeService
         svc = FundFeeService()
-        name = svc.get_fund_name(fund_code)
+        name = svc.get_fund_name(fund_code, rule)
         if name:
             return name
         try:
@@ -165,13 +171,14 @@ class PortfolioService:
                 return nd
         return d + timedelta(days=1)
 
-    # ==================== 手续费计算 ====================
+    # ==================== 手续费计算（接受 rule 参数避免重复查询） ====================
 
-    def _calc_purchase_fee(self, fund_code: str, amount: Decimal) -> Optional[dict]:
-        """计算申购费，返回 None 表示不支持该基金"""
+    def _calc_purchase_fee(self, fund_code: str, amount: Decimal,
+                           rule: Optional[dict] = None) -> Optional[dict]:
+        """计算申购费，返回 None 表示不支持该基金。rule 可传入避免重复查询。"""
         from server.services.fund_fee_service import FundFeeService
         svc = FundFeeService()
-        result = svc.calc_purchase_fee(fund_code, float(amount))
+        result = svc.calc_purchase_fee(fund_code, float(amount), rule=rule)
         if result is None:
             return None
         return {
@@ -179,11 +186,12 @@ class PortfolioService:
             "net_amount": Decimal(str(result["net_amount"])),
         }
 
-    def _calc_redemption_fee(self, fund_code: str, amount: Decimal, hold_days: int) -> Optional[Decimal]:
-        """计算赎回费，返回 None 表示不支持该基金"""
+    def _calc_redemption_fee(self, fund_code: str, amount: Decimal,
+                              hold_days: int, rule: Optional[dict] = None) -> Optional[Decimal]:
+        """计算赎回费，返回 None 表示不支持该基金。rule 可传入避免重复查询。"""
         from server.services.fund_fee_service import FundFeeService
         svc = FundFeeService()
-        fee = svc.calc_redemption_fee(fund_code, float(amount), hold_days)
+        fee = svc.calc_redemption_fee(fund_code, float(amount), hold_days, rule=rule)
         if fee is None:
             return None
         return Decimal(str(fee))
@@ -202,7 +210,7 @@ class PortfolioService:
             price: 净值（不传则自动获取）
         """
         try:
-            # 0. 校验基金白名单 + ETF 拦截
+            # 0. 校验基金白名单 + ETF 拦截（只查一次 rule）
             from server.services.fund_fee_service import FundFeeService
             fee_svc = FundFeeService()
             rule = fee_svc.get_fee_rule(fund_code)
@@ -222,7 +230,8 @@ class PortfolioService:
 
             now_beijing = _beijing_now()
 
-            # 1. 计算确认日
+            # 1. 计算确认日（从 rule 中直接读取，不再重复查询）
+            confirm_delay = int(rule.get("confirm_delay", 1))
             if self._is_trading_day(now_beijing.date()) and self._is_before_cutoff(now_beijing):
                 confirm_date = now_beijing.date()
                 day_label = "当日"
@@ -230,13 +239,11 @@ class PortfolioService:
                 confirm_date = self._next_trading_day(now_beijing.date())
                 day_label = "下一交易日"
 
-            # T + confirm_delay 后确认
-            confirm_delay = int(rule.get("confirm_delay", 1))
             actual_confirm = confirm_date
             for _ in range(confirm_delay):
                 actual_confirm = self._next_trading_day(actual_confirm)
 
-            # 2. 校验最低申购金额
+            # 2. 校验最低申购金额（从 rule 中直接读取）
             min_amount = Decimal(str(rule.get("min_purchase_amount", 10.0)))
             if amount < min_amount:
                 return {
@@ -251,16 +258,17 @@ class PortfolioService:
             if price is None or price <= 0:
                 return {"success": False, "message": f"无法获取基金 {fund_code} 的净值", "data": None}
 
-            # 4. 计算申购费（确认时才真正扣费，这里先预估）
-            fee_result = self._calc_purchase_fee(fund_code, amount)
+            # 4. 计算申购费（传入 rule 避免重复查询）
+            fee_result = self._calc_purchase_fee(fund_code, amount, rule=rule)
             if fee_result is None:
                 return {"success": False, "message": f"暂不支持基金 {fund_code} 的交易", "data": None}
             fee = fee_result["fee"]
             net_amount = fee_result["net_amount"]
 
-            fund_name = self._get_fund_name(fund_code)
+            # 5. 获取基金名称（传入 rule 避免重复查询）
+            fund_name = self._get_fund_name(fund_code, rule=rule)
 
-            # 5. 校验可用现金
+            # 6. 校验可用现金
             account = self._ensure_account(user_id)
             cash = Decimal(str(account["cash"]))
             frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
@@ -335,7 +343,7 @@ class PortfolioService:
             price: 净值（不传则自动获取）
         """
         try:
-            # 0. 校验基金白名单 + ETF 拦截
+            # 0. 校验基金白名单 + ETF 拦截（只查一次 rule）
             from server.services.fund_fee_service import FundFeeService
             fee_svc = FundFeeService()
             rule = fee_svc.get_fee_rule(fund_code)
@@ -408,7 +416,8 @@ class PortfolioService:
                     "data": None,
                 }
 
-            fund_name = self._get_fund_name(fund_code)
+            # 3. 获取基金名称（传入 rule 避免重复查询）
+            fund_name = self._get_fund_name(fund_code, rule=rule)
 
             # 场外基金统一走 pending 流程：不立即入账，T+1 确认后由 confirm_pending_orders() 处理
             # 赎回费在确认时按确认日净值和持有天数计算
@@ -561,7 +570,7 @@ class PortfolioService:
                 "position_value": float(position_value.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
                 "total_assets": float(total_assets.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
                 "total_pnl": float(total_pnl.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
-                "total_return_rate": float(total_return_rate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)),
+                "total_return_rate": float(total_pnl.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)),
                 "position_count": positions_data["total"],
             }
 
@@ -571,28 +580,41 @@ class PortfolioService:
 
     # ==================== Pending 订单确认 ====================
 
-    def confirm_pending_orders(self) -> dict:
+    def confirm_pending_orders(self, skip_trading_day_check: bool = False) -> dict:
         """
-        扫描 trade_orders 中 status='pending' 且 confirm_date <= today 的订单，
+        扫描 trade_orders 中 status='pending' 且 confirm_date 到期的订单，
         执行资金扣款/入账、持仓创建/更新、写流水。
 
-        由定时调度器在每个交易日调用。
+        参数:
+            skip_trading_day_check: 如果为 True，即使非交易日也确认所有到期订单
+                                   （用于启动补偿和手动触发）
+
+        交易日：确认 confirm_date <= today 的订单
+        非交易日：确认 confirm_date < today 的遗漏订单（启动补偿机制）
+        由定时调度器在每个交易日调用，也在服务启动时调用。
         """
         if not self.client:
             return {"status": "error", "message": "数据库不可用"}
 
         today = _beijing_date()
-        if not self._is_trading_day(today):
-            return {"status": "skipped", "message": f"{today} 非交易日，跳过确认", "processed": 0}
+        is_trading = self._is_trading_day(today)
 
         try:
-            result = (
+            query = (
                 self.client.table("trade_orders")
                 .select("*")
                 .eq("status", "pending")
-                .lte("confirm_date", today.isoformat())
-                .execute()
             )
+
+            if skip_trading_day_check or is_trading:
+                # 手动触发 或 交易日：确认到今天及之前的
+                query = query.lte("confirm_date", today.isoformat())
+            else:
+                # 非交易日定时任务：只确认昨天及之前遗漏的
+                yesterday = today - timedelta(days=1)
+                query = query.lte("confirm_date", yesterday.isoformat())
+
+            result = query.execute()
 
             orders = result.data or []
             if not orders:
@@ -642,6 +664,8 @@ class PortfolioService:
 
         from server.services.fund_fee_service import FundFeeService
         fee_svc = FundFeeService()
+        # 只查一次 rule，向下传递
+        rule = fee_svc.get_fee_rule(fund_code)
 
         if direction == "buy":
             # --- 申购确认 ---
@@ -650,8 +674,8 @@ class PortfolioService:
             if nav is None or nav <= 0:
                 nav = price  # 回退到订单中的价格
 
-            # 2. 计算申购费和净金额
-            fee_result = self._calc_purchase_fee(fund_code, amount)
+            # 2. 计算申购费和净金额（传入 rule 避免重复查询）
+            fee_result = self._calc_purchase_fee(fund_code, amount, rule=rule)
             if fee_result:
                 actual_fee = fee_result["fee"]
                 net_amount = fee_result["net_amount"]
@@ -764,7 +788,7 @@ class PortfolioService:
             current_qty = Decimal(str(position["quantity"]))
             cost_price = Decimal(str(position["cost_price"]))
 
-            # 2. 计算赎回费（按确认日净值）
+            # 2. 计算赎回费（按确认日净值，传入 rule 避免重复查询）
             nav = self._get_nav(fund_code)
             if nav is None or nav <= 0:
                 nav = price
@@ -780,7 +804,7 @@ class PortfolioService:
                 except Exception:
                     hold_days = 0
 
-            actual_fee = self._calc_redemption_fee(fund_code, redeem_amount, max(hold_days, 0))
+            actual_fee = self._calc_redemption_fee(fund_code, redeem_amount, max(hold_days, 0), rule=rule)
             if actual_fee is None:
                 actual_fee = Decimal("0")
             net_amount = redeem_amount - actual_fee

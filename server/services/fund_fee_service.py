@@ -6,6 +6,7 @@
 
 白名单机制：从 fund_fee_rules 表查询，表中有记录才允许交易。
 赎回费按 JSON 档位计算，每只基金档位可不同。
+申购费按 JSON 金额分档计算，支持不同金额不同费率。
 """
 import json
 import logging
@@ -67,28 +68,50 @@ class FundFeeService:
             logger.error(f"查询费率规则失败: {e}")
             return None
 
-    # ==================== 申购费（外扣法） ====================
+    # ==================== 申购费（外扣法，金额分档） ====================
 
-    def calc_purchase_fee(self, fund_code: str, amount: float) -> Optional[dict]:
+    def calc_purchase_fee(self, fund_code: str, amount: float,
+                          rule: Optional[dict] = None) -> Optional[dict]:
         """
-        计算申购费（外扣法）。
+        计算申购费（外扣法，按金额分档，支持固定费用）。
 
-        外扣法：
+        外扣法（比例费率）：
             净申购金额 = 申购金额 / (1 + 申购费率)
             申购费用 = 申购金额 - 净申购金额
+
+        固定费用（如 ≥1000万 每笔1000元）：
+            fee = fixed_fee, net_amount = amount - fixed_fee
 
         参数:
             fund_code: 基金代码
             amount: 申购金额（元）
+            rule: 已查询的费率规则（可选，传入则避免重复查询）
 
         返回:
             {"fee": float, "net_amount": float} 或 None（不支持该基金）
         """
-        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            rule = self.get_fee_rule(fund_code)
         if rule is None:
             return None
 
-        rate = float(rule.get("purchase_fee_rate", 0.0015))
+        # 优先用 purchase_fee_tiers（金额分档）
+        tiers_data = rule.get("purchase_fee_tiers")
+        if tiers_data:
+            if isinstance(tiers_data, str):
+                tiers_data = json.loads(tiers_data)
+            tier = self._match_purchase_tier(tiers_data, amount)
+            rate = float(tier.get("rate", 0))
+            fixed_fee = float(tier.get("fixed_fee", 0) or 0)
+        else:
+            # 回退到旧字段 purchase_fee_rate
+            rate = float(rule.get("purchase_fee_rate", 0.0015))
+            fixed_fee = 0.0
+
+        # 固定费用模式
+        if fixed_fee > 0:
+            return {"fee": fixed_fee, "net_amount": amount - fixed_fee}
+
         if rate == 0:
             return {"fee": 0.0, "net_amount": amount}
 
@@ -96,21 +119,49 @@ class FundFeeService:
         fee = amount - net_amount
         return {"fee": round(fee, 2), "net_amount": round(net_amount, 2)}
 
-    # ==================== 赎回费（JSON 档位） ====================
-
-    def calc_redemption_fee(self, fund_code: str, amount: float, hold_days: int) -> Optional[float]:
+    @staticmethod
+    def _match_purchase_tier(tiers: list, amount: float) -> dict:
         """
-        计算赎回费（按 JSON 档位匹配）。
+        按申购金额匹配费率档位，返回匹配到的档位 dict。
+
+        tiers 结构: [{"amount": N, "rate": R, "fixed_fee": F, "inclusive": bool}]
+        - amount: 金额分界点
+        - rate: 比例费率（与 fixed_fee 互斥，优先 fixed_fee）
+        - fixed_fee: 固定费用（如每笔1000元），存在则忽略 rate
+        - inclusive=false（默认）: amount < tier.amount 时命中
+        - inclusive=true: amount <= tier.amount 时命中（用于最后一档兜底）
+
+        匹配不到任何档位时返回最后一档。
+        """
+        tiers_sorted = sorted(tiers, key=lambda t: t["amount"])
+        for tier in tiers_sorted:
+            inclusive = tier.get("inclusive", False)
+            if inclusive:
+                if amount <= tier["amount"]:
+                    return tier
+            else:
+                if amount < tier["amount"]:
+                    return tier
+        return tiers_sorted[-1] if tiers_sorted else {"rate": 0.0015}
+
+    # ==================== 赎回费（JSON 档位，支持 inclusive） ====================
+
+    def calc_redemption_fee(self, fund_code: str, amount: float, hold_days: int,
+                            rule: Optional[dict] = None) -> Optional[float]:
+        """
+        计算赎回费（按 JSON 档位匹配，支持 inclusive 边界语义）。
 
         参数:
             fund_code: 基金代码
             amount: 赎回金额（元）
             hold_days: 持有天数
+            rule: 已查询的费率规则（可选，传入则避免重复查询）
 
         返回:
             赎回费（元），或 None（不支持该基金）
         """
-        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            rule = self.get_fee_rule(fund_code)
         if rule is None:
             return None
 
@@ -131,43 +182,57 @@ class FundFeeService:
         if not tiers:
             return 0.0
 
-        # 从小到大排序，找到第一个 days > hold_days 的档位
+        # 从小到大排序，按档位匹配
+        # 每个档位支持 inclusive 字段：
+        #   inclusive=False（默认）: hold_days < tier.days 时命中
+        #   inclusive=True: hold_days <= tier.days 时命中（用于最后一档"≥N天"）
         tiers_sorted = sorted(tiers, key=lambda t: t["days"])
         rate = 0.0
         for tier in tiers_sorted:
-            if hold_days < tier["days"]:
-                rate = tier["rate"]
-                break
+            days = tier["days"]
+            inclusive = tier.get("inclusive", False)
+            if inclusive:
+                if hold_days <= days:
+                    rate = tier["rate"]
+                    break
+            else:
+                if hold_days < days:
+                    rate = tier["rate"]
+                    break
 
         fee = amount * rate
         return round(fee, 2)
 
-    # ==================== 简单查询 ====================
+    # ==================== 简单查询（支持传入 rule 避免重复查询） ====================
 
-    def get_min_purchase_amount(self, fund_code: str) -> Optional[float]:
+    def get_min_purchase_amount(self, fund_code: str, rule: Optional[dict] = None) -> Optional[float]:
         """获取最低申购金额（元）"""
-        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            rule = self.get_fee_rule(fund_code)
         if rule is None:
             return None
         return float(rule.get("min_purchase_amount", 10.0))
 
-    def get_confirm_delay(self, fund_code: str) -> int:
+    def get_confirm_delay(self, fund_code: str, rule: Optional[dict] = None) -> int:
         """获取申购确认延迟天数（T+N）"""
-        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            rule = self.get_fee_rule(fund_code)
         if rule is None:
             return 1
         return int(rule.get("confirm_delay", 1))
 
-    def get_redeem_settle_delay(self, fund_code: str) -> int:
+    def get_redeem_settle_delay(self, fund_code: str, rule: Optional[dict] = None) -> int:
         """获取赎回到账延迟天数（T+N）"""
-        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            rule = self.get_fee_rule(fund_code)
         if rule is None:
             return 3
         return int(rule.get("redeem_settle_delay", 3))
 
-    def get_fund_name(self, fund_code: str) -> Optional[str]:
+    def get_fund_name(self, fund_code: str, rule: Optional[dict] = None) -> Optional[str]:
         """获取基金名称"""
-        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            rule = self.get_fee_rule(fund_code)
         if rule is None:
             return None
         return rule.get("fund_name")

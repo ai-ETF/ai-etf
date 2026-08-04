@@ -128,14 +128,15 @@ CREATE INDEX idx_snapshots_user ON account_snapshots(user_id);
 CREATE INDEX idx_snapshots_user_date ON account_snapshots(user_id, snapshot_date DESC);
 
 -- ============================================================
--- 6. fund_fee_rules 表（JSON 赎回档位）
+-- 6. fund_fee_rules 表（JSON 申购/赎回档位）
 -- ============================================================
 CREATE TABLE fund_fee_rules (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   fund_code VARCHAR(10) NOT NULL UNIQUE,
   fund_name VARCHAR(100) NOT NULL,
   purchase_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.0015,
-  redemption_fee_tiers JSONB NOT NULL DEFAULT '[{"days":7,"rate":0.0150},{"days":30,"rate":0.0100},{"days":180,"rate":0.0050},{"days":365,"rate":0.0000}]',
+  purchase_fee_tiers JSONB,
+  redemption_fee_tiers JSONB NOT NULL DEFAULT '[{"days":7,"rate":0.0150},{"days":30,"rate":0.0100},{"days":180,"rate":0.0050},{"days":365,"rate":0.0000,"inclusive":true}]',
   management_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.015,
   custody_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.0025,
   min_purchase_amount DECIMAL(18,2) NOT NULL DEFAULT 10.00,
@@ -150,8 +151,9 @@ CREATE TABLE fund_fee_rules (
 );
 
 COMMENT ON TABLE fund_fee_rules IS '基金手续费规则（仅覆盖被动指数/ETF联接基金）';
-COMMENT ON COLUMN fund_fee_rules.purchase_fee_rate IS '申购费率（互联网渠道1折后）';
-COMMENT ON COLUMN fund_fee_rules.redemption_fee_tiers IS '赎回费档位 JSON';
+COMMENT ON COLUMN fund_fee_rules.purchase_fee_rate IS '申购费率（互联网渠道1折后），purchase_fee_tiers 为空时使用此字段';
+COMMENT ON COLUMN fund_fee_rules.purchase_fee_tiers IS '申购费金额分档 JSON。每项: {"amount": 金额上限, "rate": 费率, "inclusive": bool}。NULL 则回退到 purchase_fee_rate';
+COMMENT ON COLUMN fund_fee_rules.redemption_fee_tiers IS '赎回费档位 JSON。每项: {"days": 天数, "rate": 费率, "inclusive": bool}。inclusive=true 表示 hold_days<=days 时命中';
 COMMENT ON COLUMN fund_fee_rules.confirm_delay IS '申购确认延迟天数 T+N，默认1=T+1';
 COMMENT ON COLUMN fund_fee_rules.redeem_settle_delay IS '赎回到账延迟天数 T+N，默认3=T+3';
 COMMENT ON COLUMN fund_fee_rules.fund_type IS '基金类型: of=场外开放式基金, etf=场内ETF';
