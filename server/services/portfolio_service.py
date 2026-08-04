@@ -570,7 +570,7 @@ class PortfolioService:
                 "position_value": float(position_value.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
                 "total_assets": float(total_assets.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
                 "total_pnl": float(total_pnl.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
-                "total_return_rate": float(total_pnl.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)),
+                "total_return_rate": float(total_return_rate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)),
                 "position_count": positions_data["total"],
             }
 
