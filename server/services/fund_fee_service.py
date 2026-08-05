@@ -43,7 +43,7 @@ class FundFeeService:
 
     def get_fee_rule(self, fund_code: str) -> Optional[dict]:
         """
-        查询基金的费率规则。
+        查询基金的费率规则。单基金查询用此方法。
 
         返回:
             fee_rule dict，或 None（表示不支持该基金交易）
@@ -67,6 +67,43 @@ class FundFeeService:
         except Exception as e:
             logger.error(f"查询费率规则失败: {e}")
             return None
+
+    def get_fee_rules_batch(self, fund_codes: list) -> dict:
+        """
+        批量查询基金费率规则。一次 Supabase 请求查询所有基金。
+
+        参数:
+            fund_codes: 基金代码列表（会去重）
+
+        返回:
+            {fund_code: fee_rule dict} 的 dict，查不到的基金不在 dict 中
+        """
+        if not self.client:
+            logger.error("数据库不可用")
+            return {}
+
+        codes = list(set(fund_codes))  # 去重
+        if not codes:
+            return {}
+
+        try:
+            result = (
+                self.client.table("fund_fee_rules")
+                .select("*")
+                .in_("fund_code", codes)
+                .execute()
+            )
+            rules = {}
+            if result.data:
+                for row in result.data:
+                    code = row.get("fund_code")
+                    if code:
+                        rules[code] = row
+            logger.debug(f"批量查询费率: {len(codes)} 只基金 → {len(rules)} 条结果")
+            return rules
+        except Exception as e:
+            logger.error(f"批量查询费率规则失败: {e}")
+            return {}
 
     # ==================== 申购费（外扣法，金额分档） ====================
 
@@ -95,7 +132,7 @@ class FundFeeService:
         if rule is None:
             return None
 
-        # 优先用 purchase_fee_tiers（金额分档）
+        # 按金额分档匹配
         tiers_data = rule.get("purchase_fee_tiers")
         if tiers_data:
             if isinstance(tiers_data, str):
@@ -103,10 +140,6 @@ class FundFeeService:
             tier = self._match_purchase_tier(tiers_data, amount)
             rate = float(tier.get("rate", 0))
             fixed_fee = float(tier.get("fixed_fee", 0) or 0)
-        else:
-            # 回退到旧字段 purchase_fee_rate
-            rate = float(rule.get("purchase_fee_rate", 0.0015))
-            fixed_fee = 0.0
 
         # 固定费用模式
         if fixed_fee > 0:
@@ -125,7 +158,7 @@ class FundFeeService:
         按申购金额匹配费率档位，返回匹配到的档位 dict。
 
         tiers 结构: [{"amount": N, "rate": R, "fixed_fee": F, "inclusive": bool}]
-        - amount: 金额分界点
+        - amount: 金额分界点（可选；不提供表示匹配所有金额，如 C 类全免申购费）
         - rate: 比例费率（与 fixed_fee 互斥，优先 fixed_fee）
         - fixed_fee: 固定费用（如每笔1000元），存在则忽略 rate
         - inclusive=false（默认）: amount < tier.amount 时命中
@@ -133,6 +166,9 @@ class FundFeeService:
 
         匹配不到任何档位时返回最后一档。
         """
+        universal_tiers = [t for t in tiers if "amount" not in t]
+        if universal_tiers:
+            return universal_tiers[0]  # 无 amount = 匹配所有金额，直接返回
         tiers_sorted = sorted(tiers, key=lambda t: t["amount"])
         for tier in tiers_sorted:
             inclusive = tier.get("inclusive", False)

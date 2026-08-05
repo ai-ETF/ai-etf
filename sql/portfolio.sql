@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS fund_fee_rules (
   fund_code VARCHAR(10) NOT NULL UNIQUE,
   fund_name VARCHAR(100) NOT NULL,
   -- 费率
-  purchase_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.0015,
+  purchase_fee_tiers JSONB NOT NULL DEFAULT '[{"rate": 0.0015, "amount": 1000000}]',
   -- 赎回费档位 JSON：{"tiers":[{"days":7,"rate":0.015},{...}]}
   redemption_fee_tiers JSONB NOT NULL DEFAULT '[{"days":7,"rate":0.0150},{"days":30,"rate":0.0100},{"days":180,"rate":0.0050},{"days":365,"rate":0.0000}]',
   -- 管理费率（年化）
@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS fund_fee_rules (
 );
 
 COMMENT ON TABLE fund_fee_rules IS '基金手续费规则（仅覆盖被动指数/ETF联接基金）';
-COMMENT ON COLUMN fund_fee_rules.purchase_fee_rate IS '申购费率（如0.0015=0.15%，互联网渠道1折后）';
+COMMENT ON COLUMN fund_fee_rules.purchase_fee_tiers IS '申购费金额分档 JSON。格式: [{"amount":金额,"rate":费率,"fixed_fee":固定费,"inclusive":bool}]. 不提供amount表示匹配所有金额';
 COMMENT ON COLUMN fund_fee_rules.redemption_fee_tiers IS '赎回费档位 JSON，含 days 和 rate';
 COMMENT ON COLUMN fund_fee_rules.min_purchase_amount IS '最低申购金额（元），默认10元';
 COMMENT ON COLUMN fund_fee_rules.confirm_delay IS '申购确认延迟天数（T+N），默认1=T+1';

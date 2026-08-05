@@ -620,11 +620,19 @@ class PortfolioService:
             if not orders:
                 return {"status": "ok", "message": "无待确认订单", "processed": 0}
 
+            # 预加载所有涉及的基金费率规则（一次批量查询代替每笔单独查询）
+            fund_codes = list({o.get("fund_code") for o in orders if o.get("fund_code")})
+            from server.services.fund_fee_service import FundFeeService
+            fee_svc = FundFeeService()
+            rules_map = fee_svc.get_fee_rules_batch(fund_codes)
+            logger.info(f"预加载费率规则: {len(fund_codes)} 只基金 → {len(rules_map)} 条")
+
             confirmed = 0
             failed = 0
             for order in orders:
                 try:
-                    self._confirm_one_order(order, today)
+                    rule = rules_map.get(order.get("fund_code"))
+                    self._confirm_one_order(order, today, rule=rule)
                     confirmed += 1
                 except Exception as e:
                     failed += 1
@@ -649,8 +657,8 @@ class PortfolioService:
             logger.error(f"确认 pending 订单失败: {e}", exc_info=True)
             return {"status": "error", "message": str(e), "processed": 0}
 
-    def _confirm_one_order(self, order: dict, today: date) -> None:
-        """确认单笔 pending 订单"""
+    def _confirm_one_order(self, order: dict, today: date, rule: Optional[dict] = None) -> None:
+        """确认单笔 pending 订单。rule 可预加载传入避免重复查询。"""
         order_id = order["id"]
         user_id = order["user_id"]
         fund_code = order["fund_code"]
@@ -662,10 +670,10 @@ class PortfolioService:
         fee = Decimal(str(order["fee"]))
         now = _now_iso()
 
-        from server.services.fund_fee_service import FundFeeService
-        fee_svc = FundFeeService()
-        # 只查一次 rule，向下传递
-        rule = fee_svc.get_fee_rule(fund_code)
+        # 如果未预加载 rule，回退到单独查询（手动确认场景）
+        if rule is None:
+            from server.services.fund_fee_service import FundFeeService
+            rule = FundFeeService().get_fee_rule(fund_code)
 
         if direction == "buy":
             # --- 申购确认 ---
