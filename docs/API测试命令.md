@@ -206,10 +206,11 @@ curl -s "$API/api/portfolio/daily-returns?days=30" \
   -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 ```
 
-### 5.8 手动确认 pending 订单（无需认证）
+### 5.8 手动确认 pending 订单（需 JWT）
 
 ```bash
-curl -s -X POST "$API/api/portfolio/confirm-pending" | python3 -m json.tool
+curl -s -X POST "$API/api/portfolio/confirm-pending" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 ```
 
 ### 5.9 拦截验证
