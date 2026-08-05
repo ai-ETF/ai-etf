@@ -166,19 +166,30 @@ class FundFeeService:
 
         匹配不到任何档位时返回最后一档。
         """
+        # 分离：有 amount 的档位先按金额匹配，无 amount 的档位作为兜底
+        amount_tiers = [t for t in tiers if "amount" in t]
         universal_tiers = [t for t in tiers if "amount" not in t]
+
+        if amount_tiers:
+            # 先尝试金额分档匹配
+            tiers_sorted = sorted(amount_tiers, key=lambda t: t["amount"])
+            for tier in tiers_sorted:
+                inclusive = tier.get("inclusive", False)
+                if inclusive:
+                    if amount <= tier["amount"]:
+                        return tier
+                else:
+                    if amount < tier["amount"]:
+                        return tier
+            # 所有金额档位都没命中 → 兜底档
+            if universal_tiers:
+                return universal_tiers[0]
+            return tiers_sorted[-1]
+
+        # 无金额分档（如 C 类全免申购费）
         if universal_tiers:
-            return universal_tiers[0]  # 无 amount = 匹配所有金额，直接返回
-        tiers_sorted = sorted(tiers, key=lambda t: t["amount"])
-        for tier in tiers_sorted:
-            inclusive = tier.get("inclusive", False)
-            if inclusive:
-                if amount <= tier["amount"]:
-                    return tier
-            else:
-                if amount < tier["amount"]:
-                    return tier
-        return tiers_sorted[-1] if tiers_sorted else {"rate": 0.0015}
+            return universal_tiers[0]
+        return {"rate": 0.0015}
 
     # ==================== 赎回费（JSON 档位，支持 inclusive） ====================
 
