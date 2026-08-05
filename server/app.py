@@ -83,13 +83,17 @@ async def lifespan(app: FastAPI):
 
 
 # 创建FastAPI应用实例
-app = FastAPI(title="AI-ETF Server", lifespan=lifespan, debug=True)
+app = FastAPI(
+    title="AI-ETF Server",
+    lifespan=lifespan,
+    debug=os.getenv("ENV", "").lower() != "production",
+)
 
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 在生产环境中应该限制为特定的域名
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

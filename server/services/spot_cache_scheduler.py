@@ -19,9 +19,10 @@ _scheduler: AsyncIOScheduler | None = None
 
 
 def _is_trading_time() -> bool:
-    """判断当前是否为A股交易时段（9:30-15:00，工作日）"""
-    import datetime
-    now = datetime.datetime.now()
+    """判断当前是否为A股交易时段（9:30-15:00，工作日，北京时间）"""
+    from datetime import datetime, timezone, timedelta
+    BEIJING_TZ = timezone(timedelta(hours=8))
+    now = datetime.now(BEIJING_TZ)
     if now.weekday() >= 5:
         return False
     if now.hour < 9 or (now.hour == 9 and now.minute < 30):

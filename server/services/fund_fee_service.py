@@ -138,8 +138,12 @@ class FundFeeService:
             if isinstance(tiers_data, str):
                 tiers_data = json.loads(tiers_data)
             tier = self._match_purchase_tier(tiers_data, amount)
-            rate = float(tier.get("rate", 0))
-            fixed_fee = float(tier.get("fixed_fee", 0) or 0)
+            rate = float(tier.get("rate") or 0)
+            fixed_fee = float(tier.get("fixed_fee") or 0)
+        else:
+            logger.warning(f"基金 {fund_code} 缺少 purchase_fee_tiers，使用默认费率")
+            rate = 0.0015
+            fixed_fee = 0.0
 
         # 固定费用模式
         if fixed_fee > 0:
@@ -172,14 +176,15 @@ class FundFeeService:
 
         if amount_tiers:
             # 先尝试金额分档匹配
-            tiers_sorted = sorted(amount_tiers, key=lambda t: t["amount"])
+            tiers_sorted = sorted(amount_tiers, key=lambda t: float(t.get("amount") or 0))
             for tier in tiers_sorted:
+                tier_amount = float(tier.get("amount") or 0)
                 inclusive = tier.get("inclusive", False)
                 if inclusive:
-                    if amount <= tier["amount"]:
+                    if amount <= tier_amount:
                         return tier
                 else:
-                    if amount < tier["amount"]:
+                    if amount < tier_amount:
                         return tier
             # 所有金额档位都没命中 → 兜底档
             if universal_tiers:
@@ -258,7 +263,7 @@ class FundFeeService:
             rule = self.get_fee_rule(fund_code)
         if rule is None:
             return None
-        return float(rule.get("min_purchase_amount", 10.0))
+        return float(rule.get("min_purchase_amount") or 10.0)
 
     def get_confirm_delay(self, fund_code: str, rule: Optional[dict] = None) -> int:
         """获取申购确认延迟天数（T+N）"""

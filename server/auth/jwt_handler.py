@@ -35,9 +35,6 @@ def verify_supabase_token(token: str) -> Optional[dict]:
         logger.error("未配置 SUPABASE_JWT_SECRET，无法验证 JWT")
         return None
 
-    # 调试日志：显示 secret 的前 10 个字符（隐藏完整密钥）
-    logger.debug(f"使用 JWT Secret 验证，密钥前缀: {secret[:10]}...")
-
     try:
         payload = jwt.decode(
             token,

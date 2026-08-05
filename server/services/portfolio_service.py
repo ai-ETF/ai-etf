@@ -80,10 +80,22 @@ class PortfolioService:
             "created_at": now,
             "updated_at": now,
         }
-        r = self.client.table("accounts").insert(insert_data).execute()
-        if r.data and len(r.data) > 0:
-            logger.info(f"新用户账户创建成功: user_id={user_id}")
-            return r.data[0]
+        try:
+            r = self.client.table("accounts").insert(insert_data).execute()
+            if r.data and len(r.data) > 0:
+                logger.info(f"新用户账户创建成功: user_id={user_id}")
+                return r.data[0]
+        except Exception:
+            # 并发创建导致的重复键冲突，重新查询
+            logger.warning(f"账户创建冲突，重查: user_id={user_id}")
+            result = (
+                self.client.table("accounts")
+                .select("*")
+                .eq("user_id", user_id)
+                .execute()
+            )
+            if result.data and len(result.data) > 0:
+                return result.data[0]
         raise RuntimeError("账户创建失败")
 
     def get_account(self, user_id: str) -> Optional[dict]:
@@ -114,7 +126,7 @@ class PortfolioService:
                 latest = df.iloc[-1]
                 nav = latest.get("单位净值")
                 if nav is not None:
-                    return Decimal(str(float(nav)))
+                    return Decimal(str(nav))
         except Exception as e:
             logger.warning(f"查询基金净值失败 ({fund_code}): {e}")
         return None
@@ -291,11 +303,20 @@ class PortfolioService:
             }).eq("user_id", user_id).execute()
 
             # 写委托记录（pending，份额待确认后填入）
-            self._write_trade_order(
-                user_id, fund_code, fund_name, "buy", amount,
-                Decimal("0"), Decimal("0"), fee, "pending",
-                confirm_date=actual_confirm.isoformat(),
-            )
+            # 如果写订单失败，回滚冻结资金
+            try:
+                self._write_trade_order(
+                    user_id, fund_code, fund_name, "buy", amount,
+                    Decimal("0"), Decimal("0"), fee, "pending",
+                    confirm_date=actual_confirm.isoformat(),
+                )
+            except Exception:
+                self.client.table("accounts").update({
+                    "cash": float(cash),
+                    "frozen_cash": float(frozen_cash),
+                    "updated_at": now,
+                }).eq("user_id", user_id).execute()
+                raise
 
             message = (
                 f"申购申请已提交（{day_label}受理），"
@@ -677,24 +698,7 @@ class PortfolioService:
 
         if direction == "buy":
             # --- 申购确认 ---
-            # 1. 获取当日净值
-            nav = self._get_nav(fund_code)
-            if nav is None or nav <= 0:
-                nav = price  # 回退到订单中的价格
-
-            # 2. 计算申购费和净金额（传入 rule 避免重复查询）
-            fee_result = self._calc_purchase_fee(fund_code, amount, rule=rule)
-            if fee_result:
-                actual_fee = fee_result["fee"]
-                net_amount = fee_result["net_amount"]
-            else:
-                actual_fee = fee
-                net_amount = amount - fee
-
-            # 3. 计算实际份额
-            actual_qty = (net_amount / nav).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-            # 4. 解冻资金（扣减 frozen_cash）
+            # 1. 先解冻资金（放在最前面，异常时资金已释放不会被锁死）
             account_result = (
                 self.client.table("accounts")
                 .select("*")
@@ -707,12 +711,30 @@ class PortfolioService:
             frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
             new_frozen = frozen_cash - amount
             if new_frozen < 0:
+                logger.warning(f"冻结资金不足: user={user_id}, frozen={frozen_cash}, amount={amount}")
                 new_frozen = Decimal("0")
 
             self.client.table("accounts").update({
                 "frozen_cash": float(new_frozen),
                 "updated_at": now,
             }).eq("user_id", user_id).execute()
+
+            # 2. 获取当日净值
+            nav = self._get_nav(fund_code)
+            if nav is None or nav <= 0:
+                nav = price  # 回退到订单中的价格
+
+            # 3. 计算申购费和净金额
+            fee_result = self._calc_purchase_fee(fund_code, amount, rule=rule)
+            if fee_result:
+                actual_fee = fee_result["fee"]
+                net_amount = fee_result["net_amount"]
+            else:
+                actual_fee = fee
+                net_amount = amount - fee
+
+            # 4. 计算实际份额
+            actual_qty = (net_amount / nav).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             # 5. 建仓（加权平均成本）
             pos_result = (
@@ -817,8 +839,15 @@ class PortfolioService:
                 actual_fee = Decimal("0")
             net_amount = redeem_amount - actual_fee
 
-            # 3. 更新持仓
+            # 3. 先扣持仓（先减份额再加钱，防止中间崩溃用户多拿钱）
             new_qty = current_qty - quantity
+            if new_qty <= 0:
+                self.client.table("positions").delete().eq("id", position["id"]).execute()
+            else:
+                self.client.table("positions").update({
+                    "quantity": float(new_qty),
+                    "updated_at": now,
+                }).eq("id", position["id"]).execute()
 
             # 4. 现金入账
             account_result = (
@@ -836,21 +865,16 @@ class PortfolioService:
                 "updated_at": now,
             }).eq("user_id", user_id).execute()
 
-            if new_qty <= 0:
-                self.client.table("positions").delete().eq("id", position["id"]).execute()
-            else:
-                self.client.table("positions").update({
-                    "quantity": float(new_qty),
-                    "updated_at": now,
-                }).eq("id", position["id"]).execute()
-
-            # 5. 写流水
-            self._write_trade_flow(user_id, fund_code, fund_name, "sell",
-                                   redeem_amount, nav, quantity, actual_fee)
-
-            # 6. 更新订单状态
+            # 5. 计算盈亏
             cost_of_sold = (cost_price * quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             trade_pnl = (net_amount - cost_of_sold).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
+
+            # 6. 写流水（含盈亏）
+            self._write_trade_flow(user_id, fund_code, fund_name, "sell",
+                                   redeem_amount, nav, quantity, actual_fee,
+                                   trade_pnl=trade_pnl)
+
+            # 7. 更新订单状态
 
             self.client.table("trade_orders").update({
                 "status": "completed",
@@ -881,19 +905,17 @@ class PortfolioService:
             "quantity": float(quantity),
             "fee": float(fee),
             "status": status,
-            "reject_reason": f"确认日期: {confirm_date}" if confirm_date and status == "pending" else None,
+            "reject_reason": None,
             "confirm_date": confirm_date,
             "created_at": now,
             "updated_at": now,
         }
-        try:
-            self.client.table("trade_orders").insert(data).execute()
-        except Exception as e:
-            logger.error(f"写交易委托失败: {e}")
+        self.client.table("trade_orders").insert(data).execute()
 
     def _write_trade_flow(self, user_id: str, fund_code: str, fund_name: str,
                           direction: str, amount: Decimal, price: Decimal,
-                          quantity: Decimal, fee: Decimal) -> None:
+                          quantity: Decimal, fee: Decimal,
+                          trade_pnl: Optional[Decimal] = None) -> None:
         now = _now_iso()
         data = {
             "user_id": user_id,
@@ -906,10 +928,9 @@ class PortfolioService:
             "fee": float(fee),
             "trade_time": now,
         }
-        try:
-            self.client.table("trade_flow").insert(data).execute()
-        except Exception as e:
-            logger.error(f"写交易流水失败: {e}")
+        if trade_pnl is not None:
+            data["trade_pnl"] = float(trade_pnl)
+        self.client.table("trade_flow").insert(data).execute()
 
     def query_trade_flow(self, user_id: str, fund_code: Optional[str] = None,
                          direction: Optional[str] = None,

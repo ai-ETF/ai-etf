@@ -14,6 +14,7 @@
 开发环境：/api/portfolio/test/* 端点免 JWT 认证，用 X-User-Id header 指定用户。
 """
 import logging
+import os
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -44,7 +45,9 @@ router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
 
 def _get_test_user(x_user_id: Optional[str] = Header(None)) -> str:
-    """开发测试：从 X-User-Id header 获取用户 ID，不校验 JWT"""
+    """开发测试：从 X-User-Id header 获取用户 ID，不校验 JWT。仅非生产环境可用。"""
+    if os.getenv("ENV", "").lower() == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
     if not x_user_id:
         raise HTTPException(status_code=400, detail="请传入 X-User-Id header")
     return x_user_id
@@ -183,9 +186,8 @@ async def take_snapshot(
 
 
 @router.post("/confirm-pending", response_model=dict)
-async def confirm_pending():
-    """手动触发 pending 订单确认（公开，供定时任务/手动调用）。
-    跳过交易日检查，直接处理所有 overdue 订单。"""
+async def confirm_pending(current_user: str = Depends(get_current_user)):
+    """手动触发 pending 订单确认（需 JWT 认证）。"""
     svc = PortfolioService()
     result = svc.confirm_pending_orders(skip_trading_day_check=True)
     return result
