@@ -148,6 +148,11 @@ Thumbs.db
 任务TODO.md
 
 # 知识库文件夹（本地存储，不上传）
-etf-knowledge/local_models/
+etf-knowledge/
+local_models/
 .env
 .local_models
+
+# 测试脚本和提示词文件（不上传）
+docs/test_portfolio_jwt.sh
+docs/场内ETF交易规则搜索提示词.md
