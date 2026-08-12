@@ -109,31 +109,71 @@ class PortfolioService:
         raise RuntimeError("账户创建失败")
 
     def _auto_invest_money_fund(self, user_id: str):
-        """自动将用户可用现金全额申购货币基金（已持仓则跳过）。
+        """根据用户余额理财设置，将闲置现金自动申购货币基金。
 
-        新用户：初始资金 10 万全额购入。
-        老用户：首次访问时，闲置现金全额购入。
-        申购成功后立即确认，无需等待 T+1。
+        - 未开启余额理财：跳过
+        - 已持仓货基：跳过
+        - 可用现金 > 预留金额：超出部分自动申购并立即确认
         """
         try:
+            # 已有货基持仓则跳过
             existing = self._get_position(user_id, MONEY_FUND_CODE)
             if existing:
                 return
-            # 取用户当前可用现金（新用户=10万，老用户=当前余额）
+            # 查余额理财配置
+            config = self.get_auto_invest_config(user_id)
+            if not config["enabled"]:
+                return
+            # 取可用现金
             account = self.get_account(user_id)
             cash = Decimal(str(account["cash"])) if account else INITIAL_CASH
-            if cash <= 0:
-                logger.debug(f"用户 {user_id} 无可用现金，跳过自动申购货基")
+            reserve = Decimal(str(config["reserve"]))
+            investable = cash - reserve
+            if investable <= 0:
+                logger.debug(f"用户 {user_id} 可用现金 {cash} 未超过预留 {reserve}，跳过")
                 return
-            result = self.apply_purchase(user_id, MONEY_FUND_CODE, cash)
+            result = self.apply_purchase(user_id, MONEY_FUND_CODE, investable)
             if result["success"]:
-                logger.info(f"用户 {user_id} 自动申购货基成功: {float(cash):.2f} 元")
-                # 立即确认，用户马上看到持仓
+                logger.info(f"用户 {user_id} 自动申购货基成功: {float(investable):.2f} 元")
                 self._confirm_money_fund_order(user_id)
             else:
                 logger.warning(f"用户 {user_id} 自动申购货基失败: {result['message']}")
         except Exception as e:
             logger.error(f"用户 {user_id} 自动申购货基异常: {e}")
+
+    def get_auto_invest_config(self, user_id: str) -> dict:
+        """查询余额理财开关配置"""
+        try:
+            account = self.get_account(user_id)
+            enabled = bool(account.get("auto_invest_enabled", False)) if account else False
+            reserve = float(account.get("auto_invest_reserve", 0)) if account else 0.0
+            return {
+                "enabled": enabled,
+                "reserve": reserve,
+                "money_fund_code": MONEY_FUND_CODE,
+                "money_fund_name": "天弘余额宝货币市场基金",
+            }
+        except Exception as e:
+            logger.error(f"查询余额理财配置失败: {e}")
+            return {
+                "enabled": False, "reserve": 0.0,
+                "money_fund_code": MONEY_FUND_CODE,
+                "money_fund_name": "天弘余额宝货币市场基金",
+            }
+
+    def set_auto_invest_config(self, user_id: str, enabled: bool, reserve: float) -> dict:
+        """设置余额理财开关和预留金额"""
+        if not self.client:
+            raise RuntimeError("数据库不可用")
+        self._ensure_account(user_id)
+        now = _now_iso()
+        self.client.table("accounts").update({
+            "auto_invest_enabled": enabled,
+            "auto_invest_reserve": reserve,
+            "updated_at": now,
+        }).eq("user_id", user_id).execute()
+        logger.info(f"用户 {user_id} 余额理财: enabled={enabled}, reserve={reserve}")
+        return self.get_auto_invest_config(user_id)
 
     def _confirm_money_fund_order(self, user_id: str):
         """确认用户最新的货基 pending 申购订单（自动申购专用）。"""
