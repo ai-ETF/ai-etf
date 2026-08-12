@@ -109,24 +109,31 @@ class PortfolioService:
         raise RuntimeError("账户创建失败")
 
     def _auto_invest_money_fund(self, user_id: str):
-        """新用户自动将初始资金全额申购货币基金（仅首次，已持仓则跳过）。
+        """自动将用户可用现金全额申购货币基金（已持仓则跳过）。
 
-        申购成功后立即确认订单，用户无需等待 T+1，马上看到货基持仓。
+        新用户：初始资金 10 万全额购入。
+        老用户：首次访问时，闲置现金全额购入。
+        申购成功后立即确认，无需等待 T+1。
         """
         try:
             existing = self._get_position(user_id, MONEY_FUND_CODE)
             if existing:
                 return
-            result = self.apply_purchase(user_id, MONEY_FUND_CODE, INITIAL_CASH)
+            # 取用户当前可用现金（新用户=10万，老用户=当前余额）
+            account = self.get_account(user_id)
+            cash = Decimal(str(account["cash"])) if account else INITIAL_CASH
+            if cash <= 0:
+                logger.debug(f"用户 {user_id} 无可用现金，跳过自动申购货基")
+                return
+            result = self.apply_purchase(user_id, MONEY_FUND_CODE, cash)
             if result["success"]:
-                logger.info(f"新用户 {user_id} 自动申购货基 {MONEY_FUND_CODE} 成功: "
-                            f"{float(INITIAL_CASH):.2f} 元")
-                # 立即确认该笔申购，用户马上看到持仓
+                logger.info(f"用户 {user_id} 自动申购货基成功: {float(cash):.2f} 元")
+                # 立即确认，用户马上看到持仓
                 self._confirm_money_fund_order(user_id)
             else:
-                logger.warning(f"新用户 {user_id} 自动申购货基失败: {result['message']}")
+                logger.warning(f"用户 {user_id} 自动申购货基失败: {result['message']}")
         except Exception as e:
-            logger.error(f"新用户 {user_id} 自动申购货基异常: {e}")
+            logger.error(f"用户 {user_id} 自动申购货基异常: {e}")
 
     def _confirm_money_fund_order(self, user_id: str):
         """确认用户最新的货基 pending 申购订单（自动申购专用）。"""
