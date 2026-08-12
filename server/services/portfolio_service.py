@@ -16,6 +16,8 @@
 优化：每次请求只查一次 get_fee_rule，将 rule dict 向下传递，避免重复远程查询。
 """
 import logging
+import json
+import urllib.request
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
@@ -24,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 INITIAL_CASH = Decimal("100000.00")
 BEIJING_TZ = timezone(timedelta(hours=8))
+
+# 货币基金配置
+MONEY_FUND_CODE = "000198"
+MONEY_FUND_DEFAULT_ANNUAL_YIELD = 0.00824  # 默认年化 0.824%，akshare 获取失败时使用（参考 000198 七日年化）
+MONEY_FUND_REFERENCE_DATE = date(2020, 1, 1)  # 模拟净值起始日
 
 
 def _beijing_now() -> datetime:
@@ -84,7 +91,10 @@ class PortfolioService:
             r = self.client.table("accounts").insert(insert_data).execute()
             if r.data and len(r.data) > 0:
                 logger.info(f"新用户账户创建成功: user_id={user_id}")
-                return r.data[0]
+                account = r.data[0]
+                # 新用户自动将初始资金全额申购货币基金
+                self._auto_invest_money_fund(user_id)
+                return account
         except Exception:
             # 并发创建导致的重复键冲突，重新查询
             logger.warning(f"账户创建冲突，重查: user_id={user_id}")
@@ -97,6 +107,50 @@ class PortfolioService:
             if result.data and len(result.data) > 0:
                 return result.data[0]
         raise RuntimeError("账户创建失败")
+
+    def _auto_invest_money_fund(self, user_id: str):
+        """新用户自动将初始资金全额申购货币基金（仅首次，已持仓则跳过）。
+
+        申购成功后立即确认订单，用户无需等待 T+1，马上看到货基持仓。
+        """
+        try:
+            existing = self._get_position(user_id, MONEY_FUND_CODE)
+            if existing:
+                return
+            result = self.apply_purchase(user_id, MONEY_FUND_CODE, INITIAL_CASH)
+            if result["success"]:
+                logger.info(f"新用户 {user_id} 自动申购货基 {MONEY_FUND_CODE} 成功: "
+                            f"{float(INITIAL_CASH):.2f} 元")
+                # 立即确认该笔申购，用户马上看到持仓
+                self._confirm_money_fund_order(user_id)
+            else:
+                logger.warning(f"新用户 {user_id} 自动申购货基失败: {result['message']}")
+        except Exception as e:
+            logger.error(f"新用户 {user_id} 自动申购货基异常: {e}")
+
+    def _confirm_money_fund_order(self, user_id: str):
+        """确认用户最新的货基 pending 申购订单（自动申购专用）。"""
+        try:
+            result = (
+                self.client.table("trade_orders")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("fund_code", MONEY_FUND_CODE)
+                .eq("direction", "buy")
+                .eq("status", "pending")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if not result.data:
+                return
+            from server.services.fund_fee_service import FundFeeService
+            rule = FundFeeService().get_fee_rule(MONEY_FUND_CODE)
+            today = _beijing_date()
+            self._confirm_one_order(result.data[0], today, rule=rule)
+            logger.info(f"用户 {user_id} 货基自动申购已确认")
+        except Exception as e:
+            logger.error(f"确认货基自动申购失败: {e}")
 
     def get_account(self, user_id: str) -> Optional[dict]:
         if not self.client:
@@ -118,7 +172,11 @@ class PortfolioService:
     # ==================== 净值获取 ====================
 
     def _get_nav(self, fund_code: str) -> Optional[Decimal]:
-        """获取场外基金最新净值"""
+        """获取场外基金最新净值。货币基金使用合成净值（akshare 不支持货基）。"""
+        # 货币基金：akshare 不支持，直接走合成净值
+        if fund_code == MONEY_FUND_CODE:
+            return self._money_fund_synthetic_nav()
+
         try:
             import akshare as ak
             df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
@@ -130,6 +188,60 @@ class PortfolioService:
         except Exception as e:
             logger.warning(f"查询基金净值失败 ({fund_code}): {e}")
         return None
+
+    def _money_fund_synthetic_nav(self) -> Decimal:
+        """计算货币基金模拟净值：1.0000 × (1 + 年化/365) ^ 距起始日天数"""
+        try:
+            annual_yield = self._money_fund_annual_yield()
+        except Exception:
+            annual_yield = MONEY_FUND_DEFAULT_ANNUAL_YIELD
+        days = (_beijing_date() - MONEY_FUND_REFERENCE_DATE).days
+        if days < 0:
+            days = 0
+        daily_factor = annual_yield / 365
+        synthetic = Decimal("1.0000") * Decimal(str((1 + daily_factor) ** days))
+        return synthetic.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+    # 七日年化内存缓存（当天有效）
+    _yield_cache: dict = {}
+
+    def _money_fund_annual_yield(self) -> float:
+        """获取货币基金七日年化收益率。
+
+        优先从天天基金 API 获取实时数据（每日更新），失败则用默认值。
+        结果按天缓存，避免频繁 HTTP 请求。
+        """
+        today = _beijing_date().isoformat()
+        cached = self._yield_cache.get("date"), self._yield_cache.get("yield")
+        if cached[0] == today and cached[1] is not None:
+            return cached[1]
+
+        # 尝试从天天基金 API 获取
+        try:
+            url = (
+                "https://api.fund.eastmoney.com/f10/lsjz"
+                f"?fundCode={MONEY_FUND_CODE}&pageIndex=1&pageSize=1"
+            )
+            req = urllib.request.Request(url)
+            req.add_header("Referer", "https://fundf10.eastmoney.com/")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                items = data.get("Data", {}).get("LSJZList", [])
+                if items:
+                    # 货基的 LJJZ 字段 = 七日年化（如 0.8240 表示 0.8240%）
+                    raw = items[0].get("LJJZ")
+                    if raw is not None:
+                        annual_yield = float(raw) / 100.0  # 转为小数
+                        if annual_yield > 0:
+                            self._yield_cache = {"date": today, "yield": annual_yield}
+                            logger.debug(f"货基七日年化(实时): {annual_yield:.4%}")
+                            return annual_yield
+        except Exception as e:
+            logger.warning(f"获取货基七日年化失败: {e}")
+
+        # 兜底：默认值
+        logger.debug(f"货基七日年化使用默认值: {MONEY_FUND_DEFAULT_ANNUAL_YIELD:.4%}")
+        return MONEY_FUND_DEFAULT_ANNUAL_YIELD
 
     def _get_fund_name(self, fund_code: str, rule: Optional[dict] = None) -> str:
         """获取基金名称（优先从 rule 中读取，避免重复查询）"""
@@ -565,6 +677,8 @@ class PortfolioService:
 
     def account_summary(self, user_id: str) -> dict:
         try:
+            # 确保账户存在（新用户会触发自动申购货基）
+            self._ensure_account(user_id)
             account = self.get_account(user_id)
             if not account:
                 return {
