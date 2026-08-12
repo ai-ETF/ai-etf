@@ -431,6 +431,197 @@ class MoneyFlowRankingResponse(BaseModel):
     items: List[MoneyFlowRankingItem]
 
 
+# ==================== 场外基金持仓交易数据模型（旧版，兼容保留） ====================
+
+class BuyRequest(BaseModel):
+    """场外基金申购请求（按金额）- 旧版兼容"""
+    fund_code: str  # 基金代码
+    amount: float   # 申购金额（元）
+    price: Optional[float] = None  # 净值（不传则自动获取）
+
+
+class SellRequest(BaseModel):
+    """场外基金赎回请求（按份额）- 旧版兼容"""
+    fund_code: str  # 基金代码
+    quantity: float  # 赎回份额
+    price: Optional[float] = None  # 净值（不传则自动获取）
+
+
+class TradeData(BaseModel):
+    """成交数据 - 旧版兼容"""
+    fund_code: str
+    fund_name: str
+    amount: float  # 申购金额/赎回金额
+    fee: float
+    net_amount: Optional[float] = None  # 净申购金额/净赎回金额
+    price: float  # 净值
+    quantity: Optional[float] = None  # 份额（确认后填入）
+    hold_days: Optional[int] = None
+    trade_pnl: Optional[float] = None
+    position_qty: Optional[float] = None
+    cost_price: Optional[float] = None
+    confirm_date: Optional[str] = None
+    available_date: Optional[str] = None
+    cash_remaining: Optional[float] = None
+    frozen_cash: Optional[float] = None
+    status: str = "completed"
+    trade_time: Optional[str] = None
+
+
+class TradeResponse(BaseModel):
+    """买卖响应 - 旧版兼容"""
+    success: bool
+    message: str
+    data: Optional[TradeData] = None
+
+
+# ==================== 场外基金交易数据模型（新版，申购/赎回术语） ====================
+
+class PurchaseRequest(BaseModel):
+    """场外基金申购请求（按金额申购）"""
+    fund_code: str  # 基金代码
+    amount: float   # 申购金额（元）
+    price: Optional[float] = None  # 净值（不传则自动获取）
+
+
+class RedeemRequest(BaseModel):
+    """场外基金赎回请求（按份额赎回）"""
+    fund_code: str  # 基金代码
+    quantity: float  # 赎回份额
+    price: Optional[float] = None  # 净值（不传则自动获取）
+
+
+class OrderResult(BaseModel):
+    """申购/赎回订单结果"""
+    fund_code: str
+    fund_name: str
+    amount: float  # 申购金额/赎回金额
+    fee: float
+    net_amount: Optional[float] = None  # 净申购金额/净赎回金额
+    price: float  # 净值
+    quantity: Optional[float] = None  # 份额（确认后填入）
+    hold_days: Optional[int] = None
+    trade_pnl: Optional[float] = None
+    position_qty: Optional[float] = None
+    cost_price: Optional[float] = None
+    confirm_date: Optional[str] = None
+    available_date: Optional[str] = None
+    settle_date: Optional[str] = None  # 赎回到账日期
+    cash_remaining: Optional[float] = None
+    frozen_cash: Optional[float] = None
+    status: str = "completed"
+    trade_time: Optional[str] = None
+
+
+class OrderResponse(BaseModel):
+    """申购/赎回订单响应"""
+    success: bool
+    message: str
+    data: Optional[OrderResult] = None
+
+
+class PositionItem(BaseModel):
+    """持仓单项"""
+    id: str
+    user_id: str
+    fund_code: str
+    fund_name: str
+    quantity: float
+    cost_price: float
+    cost_value: Optional[float] = None
+    market_price: Optional[float] = None
+    market_value: Optional[float] = None
+    pnl: Optional[float] = None
+    pnl_pct: Optional[float] = None
+    confirm_date: Optional[str] = None
+    available_date: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class PositionListResponse(BaseModel):
+    """持仓列表响应"""
+    total: int
+    items: List[PositionItem]
+    total_pnl: float
+    total_position_value: float
+
+
+class AccountSummaryResponse(BaseModel):
+    """账户概况响应"""
+    cash: float
+    frozen_cash: float
+    position_value: float
+    total_assets: float
+    total_pnl: float
+    total_return_rate: float
+    position_count: int
+
+
+class TradeFlowItem(BaseModel):
+    """交易流水单项"""
+    id: str
+    user_id: str
+    fund_code: str
+    fund_name: str
+    direction: str
+    amount: float
+    price: float
+    quantity: float
+    fee: float
+    trade_time: str
+
+
+class TradeFlowResponse(BaseModel):
+    """交易流水分页响应"""
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    items: List[TradeFlowItem]
+
+
+class TradeFlowQueryParams(BaseModel):
+    """交易流水查询参数"""
+    fund_code: Optional[str] = None
+    direction: Optional[str] = None
+    page: int = 1
+    page_size: int = 20
+
+
+class SnapshotData(BaseModel):
+    """快照数据"""
+    snapshot_date: str
+    total_assets: float
+    cash: float
+    position_value: float
+    total_pnl: float
+    total_return_rate: float
+
+
+class SnapshotResponse(BaseModel):
+    """快照响应"""
+    success: bool
+    message: str
+    data: Optional[SnapshotData] = None
+
+
+class DailyReturnItem(BaseModel):
+    """每日收益率"""
+    date: str
+    total_assets: float
+    cash: float
+    position_value: float
+    total_pnl: float
+    total_return_rate: float
+    daily_return: float
+
+
+class DailyReturnResponse(BaseModel):
+    """每日收益率响应"""
+    items: List[DailyReturnItem]
+
+
 # ==================== 风险画像数据模型（新增） ====================
 
 

@@ -73,23 +73,27 @@ async def lifespan(app: FastAPI):
     logger.info("Supabase连接验证成功")
 
     # 启动行情缓存调度器（交易时段每30秒拉取全量行情）
-    from server.services.spot_cache_scheduler import start_scheduler, shutdown_scheduler
-    start_scheduler()
+    from server.services.spot_cache_scheduler import start_scheduler as start_spot_scheduler, shutdown_scheduler as shutdown_spot_scheduler
+    start_spot_scheduler()
 
     yield  # 应用在此处运行
 
-    shutdown_scheduler()
+    shutdown_spot_scheduler()
     logger.info("应用关闭")
 
 
 # 创建FastAPI应用实例
-app = FastAPI(title="AI-ETF Server", lifespan=lifespan, debug=True)
+app = FastAPI(
+    title="AI-ETF Server",
+    lifespan=lifespan,
+    debug=os.getenv("ENV", "").lower() != "production",
+)
 
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 在生产环境中应该限制为特定的域名
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
