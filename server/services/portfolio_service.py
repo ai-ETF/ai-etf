@@ -684,8 +684,10 @@ class PortfolioService:
 
     def account_summary(self, user_id: str) -> dict:
         try:
-            # 确保账户存在（新用户会触发自动申购货基）
+            # 确保账户存在
             self._ensure_account(user_id)
+            # 新老用户一视同仁：闲置现金自动申购货基
+            self._auto_invest_money_fund(user_id)
             account = self.get_account(user_id)
             if not account:
                 return {
