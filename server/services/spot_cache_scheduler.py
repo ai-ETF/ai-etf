@@ -52,6 +52,27 @@ async def _confirm_pending_orders_job():
     logger.info(f"[确认] Pending 订单确认完成: {result}")
 
 
+async def _credit_money_fund_income_job():
+    """货基每日收益入账任务（每天 00:05 执行）。
+
+    把「昨日」公布的万份收益折算成份额，加到所有货基持仓的 quantity
+    （份额逐日增长，即复投；本金 principal 不变）。
+    数据源失败时 credit_money_fund_income 会抛异常（不兜底），
+    此处捕获后记录错误并重新抛出，让调度器将其标记为失败任务，
+    避免当天用虚假数字入账。
+    """
+    from server.services.portfolio_service import PortfolioService
+    logger.info("[货基收益] 开始每日收益入账...")
+    svc = PortfolioService()
+    try:
+        result = svc.credit_money_fund_income()
+        logger.info(f"[货基收益] 每日收益入账完成: {result}")
+    except Exception as e:
+        # 无兜底：明确失败并上抛，不静默跳过（宁可当天不入账）
+        logger.error(f"[货基收益] 每日收益入账失败（未入账）: {e}", exc_info=True)
+        raise
+
+
 async def _startup_pending_compensation():
     """启动补偿：确认所有遗漏的 pending 订单（不检查交易日）"""
     from server.services.portfolio_service import PortfolioService
@@ -88,6 +109,19 @@ def start_scheduler() -> AsyncIOScheduler:
         misfire_grace_time=3600,  # 错过1小时内仍可补执行
     )
     logger.info("Pending订单确认任务已注册（每个交易日15:37，1小时容错）")
+
+    # 任务3：货基每日收益入账（每天 00:05）
+    # 货基当日万份收益通常在晚间披露，00:05 运行时拿到的即昨日完整收益。
+    # 数据源失败时任务内会抛错，由调度器记录，不会用兜底数字入账。
+    _scheduler.add_job(
+        _credit_money_fund_income_job,
+        trigger=CronTrigger(hour=0, minute=5),
+        id="credit_money_fund_income",
+        name="货基万份收益每日入账（每天00:05）",
+        replace_existing=True,
+        misfire_grace_time=3600,  # 错过1小时内仍可补执行
+    )
+    logger.info("货基收益入账任务已注册（每天00:05，1小时容错）")
 
     _scheduler.start()
 

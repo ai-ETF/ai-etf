@@ -529,6 +529,7 @@ export type Database = {
       }
       positions: {
         Row: {
+          principal: number
           available_date: string | null
           confirm_date: string | null
           cost_price: number
@@ -541,6 +542,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          principal?: number
           available_date?: string | null
           confirm_date?: string | null
           cost_price?: number
@@ -553,6 +555,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          principal?: number
           available_date?: string | null
           confirm_date?: string | null
           cost_price?: number

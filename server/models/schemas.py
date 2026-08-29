@@ -545,6 +545,7 @@ class PositionItem(BaseModel):
     market_value: Optional[float] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
+    principal: Optional[float] = None  # 货基累计投入本金（元），非货基持仓为 None
     confirm_date: Optional[str] = None
     available_date: Optional[str] = None
     created_at: str
