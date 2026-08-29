@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "13.0.5"
+    PostgrestVersion: "14.5"
   }
   graphql_public: {
     Tables: {
@@ -529,7 +529,6 @@ export type Database = {
       }
       positions: {
         Row: {
-          principal: number
           available_date: string | null
           confirm_date: string | null
           cost_price: number
@@ -537,12 +536,12 @@ export type Database = {
           fund_code: string
           fund_name: string
           id: string
+          principal: number
           quantity: number
           updated_at: string | null
           user_id: string
         }
         Insert: {
-          principal?: number
           available_date?: string | null
           confirm_date?: string | null
           cost_price?: number
@@ -550,12 +549,12 @@ export type Database = {
           fund_code: string
           fund_name?: string
           id?: string
+          principal?: number
           quantity?: number
           updated_at?: string | null
           user_id: string
         }
         Update: {
-          principal?: number
           available_date?: string | null
           confirm_date?: string | null
           cost_price?: number
@@ -563,6 +562,7 @@ export type Database = {
           fund_code?: string
           fund_name?: string
           id?: string
+          principal?: number
           quantity?: number
           updated_at?: string | null
           user_id?: string
@@ -902,6 +902,7 @@ export type Database = {
           page_number: number
         }[]
       }
+      purge_user_data: { Args: { p_user_id: string }; Returns: undefined }
     }
     Enums: {
       profile_source: "questionnaire" | "default" | "manual" | "system_inferred"

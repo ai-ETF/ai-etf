@@ -8,7 +8,7 @@
 
 | 模块 | 文件 | 覆盖接口 |
 |------|------|----------|
-| 基础 & 认证 | [01-基础与认证.md](01-基础与认证.md) | 健康检查、`/api/secure-chat/register` 注册、`/api/secure-chat/login` 登录 |
+| 基础 & 认证 | [01-基础与认证.md](01-基础与认证.md) | 健康检查、注册、登录、退出登录、注销账号 |
 | 对话 & 会话 | [02-对话与会话.md](02-对话与会话.md) | LLM 流式对话、会话管理 |
 | 行情 | [03-行情.md](03-行情.md) | spot / ranking / kline / intraday / detail / money-flow / search / categories |
 | 自选股 | [04-自选股.md](04-自选股.md) | watchlist |

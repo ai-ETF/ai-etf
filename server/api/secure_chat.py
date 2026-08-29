@@ -5,16 +5,18 @@
 user_id 从 JWT token 中自动读取，不从请求体取，杜绝冒充。
 """
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from server.auth import get_current_user
+from server.auth.deps import extract_and_verify
 from server.llm import get_llm
-from server.services.auth_service import register_user
+from server.services.auth_service import delete_account, logout_user, register_user
 from server.storage.chat_repo import get_chat_repo
 from server.storage.supabase_client import get_supabase
 from server.utils.sse import format_sse_event, create_sse_stream_response
@@ -56,6 +58,11 @@ class RegisterResponse(BaseModel):
     user_id: Optional[str] = None
     expires_in: Optional[int] = None
     message: str
+
+
+class DeleteAccountRequest(BaseModel):
+    """注销账号请求"""
+    password: str = Field(..., description="账号密码（用于复核，防止 token 被盗后随意删号）")
 
 
 class SecureMessageRequest(BaseModel):
@@ -150,6 +157,45 @@ async def register(req: RegisterRequest):
         needs_email_confirmation=True,
         message="注册成功，请前往邮箱完成验证后登录",
     )
+
+
+# ========== 退出登录 / 注销账号（需要 JWT）==========
+
+
+@router.post("/logout")
+async def logout(authorization: str = Header(...)):
+    """
+    退出登录 —— 撤销当前 access token（本地即时失效）与 Supabase refresh token。
+
+    幂等操作：token 已失效或重复登出均返回成功。
+    """
+    token, payload = extract_and_verify(authorization)
+    exp = payload.get("exp") or time.time() + 3600
+    logout_user(token=token, exp=exp)
+    return {"success": True, "message": "退出登录成功"}
+
+
+@router.post("/delete-account")
+async def delete_account_endpoint(
+    req: DeleteAccountRequest,
+    authorization: str = Header(...),
+):
+    """
+    注销账号 —— 不可逆操作：复核密码后，RPC 清理全部业务数据并删除 Supabase 账号。
+
+    需携带 JWT 并提交账号密码。注销成功后当前 token 即失效。
+    """
+    token, payload = extract_and_verify(authorization)
+    user_id = payload.get("sub")
+    email = payload.get("email")
+    if not user_id or not email:
+        raise HTTPException(status_code=401, detail="令牌中未包含用户信息")
+
+    delete_account(user_id=user_id, email=email, password=req.password)
+    # 账号已删除，立即使当前 access token 失效
+    exp = payload.get("exp") or time.time() + 3600
+    logout_user(token=token, exp=exp)
+    return {"success": True, "message": "账号已注销"}
 
 
 # ========== 流式生成器 ==========
