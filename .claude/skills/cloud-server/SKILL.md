@@ -22,16 +22,16 @@ description: 通过 SSH 密码认证连接云服务器 47.113.220.182（root，�
 | 用户 | `root`（登录失败可尝试 `ubuntu`/`admin`，但需用户确认） |
 | 认证 | 密码（sshpass） |
 
-## 使用流程（渐进式路由）
+## 使用方法
 
 | 阶段 | 何时做 | 读哪个文件 |
 |------|--------|-----------|
-| 1. 环境检查 | 首次使用、出现环境类报错时 | [`./environment.md`](./environment.md) |
-| 2. 连接测试 | 每次会话开始、连接异常时 | [`./connect.md`](./connect.md) |
-| 3. 常用操作 | 确认连通后开始干活时 | [`./operations.md`](./operations.md) |
+| 1. 连接测试 | 每次会话开始、连接异常时 | [`./connect.md`](./connect.md) |
+| 2. 常用操作 | 确认连通后开始干活时 | [`./operations.md`](./operations.md) |
+| 3. 环境检查 | 首次使用、出现环境类报错时 | [`./environment.md`](./environment.md) |
 | 4. 故障排查 | 上面任一环节报错时 | [`./troubleshooting.md`](./troubleshooting.md) |
 
-> 原则：连得通就不读 environment.md；没报错就不读 troubleshooting.md；需要哪个阶段就读哪个文件。
+> 原则：先尝试连接，连得通就不读 environment.md；没报错就不读 troubleshooting.md；需要哪个阶段就读哪个文件。
 
 ## 红线（任何情况下不得违反，始终生效）
 
