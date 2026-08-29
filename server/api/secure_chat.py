@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from server.auth import get_current_user
 from server.llm import get_llm
+from server.services.auth_service import register_user
 from server.storage.chat_repo import get_chat_repo
 from server.storage.supabase_client import get_supabase
 from server.utils.sse import format_sse_event, create_sse_stream_response
@@ -38,6 +39,23 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     user_id: str
     expires_in: int
+
+
+class RegisterRequest(BaseModel):
+    """注册请求"""
+    email: str = Field(..., description="邮箱")
+    password: str = Field(..., description="密码（至少 8 位）")
+
+
+class RegisterResponse(BaseModel):
+    """注册响应（兼容 auto-confirm 与邮箱确认两种模式）"""
+    success: bool
+    needs_email_confirmation: bool
+    access_token: Optional[str] = None
+    token_type: str = "bearer"
+    user_id: Optional[str] = None
+    expires_in: Optional[int] = None
+    message: str
 
 
 class SecureMessageRequest(BaseModel):
@@ -96,6 +114,41 @@ async def login(req: LoginRequest):
         access_token=session.access_token,
         user_id=user.id,
         expires_in=session.expires_in or 3600,
+    )
+
+
+# ========== 注册端点（不需要 JWT）==========
+
+
+@router.post("/register", response_model=RegisterResponse)
+async def register(req: RegisterRequest):
+    """
+    注册接口 —— 调用 Supabase Auth 注册新用户。
+
+    - 密码至少 8 位；重复邮箱返回 409。
+    - auto-confirm 模式（当前 enable_confirmations=false）：注册即激活，直接返回 JWT 登录态。
+    - 邮箱确认模式：不返回 session，提示用户查收邮件后走登录接口。
+    """
+    result = register_user(email=req.email, password=req.password)
+    session = result.get("session")
+    user = result.get("user")
+
+    if session:
+        # auto-confirm 模式：注册即激活，返回登录态
+        return RegisterResponse(
+            success=True,
+            needs_email_confirmation=False,
+            access_token=session.access_token,
+            user_id=user.id,
+            expires_in=session.expires_in or 3600,
+            message="注册成功，已自动登录",
+        )
+
+    # 邮箱确认模式：需用户查收邮件确认后再登录
+    return RegisterResponse(
+        success=True,
+        needs_email_confirmation=True,
+        message="注册成功，请前往邮箱完成验证后登录",
     )
 
 
