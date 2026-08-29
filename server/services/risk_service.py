@@ -21,6 +21,66 @@ RISK_LEVELS = {
     "aggressive":   {"label": "进取型",  "summary": "您属于进取型投资者，愿意承担较高风险以换取更高的长期投资回报。"},
 }
 
+# ==================== 交易风险提示 ====================
+
+# 警告矩阵：用户画像 × 基金风险等级 → 提示级别（None = 无需提示）
+RISK_WARNING_MATRIX = {
+    "conservative": {"moderate": "info", "aggressive": "warning", "speculative": "alert"},
+    "moderate":     {"moderate": None,   "aggressive": "info",    "speculative": "warning"},
+    "aggressive":   {"moderate": None,   "aggressive": None,      "speculative": "info"},
+}
+
+# 建议配置比例（%）矩阵：仅 warning/alert 级携带；info 级模板无比例占位符，不携带
+SUGGESTED_PCT_MATRIX = {
+    "conservative": {"aggressive": 10, "speculative": 5},
+    "moderate":     {"speculative": 15},
+}
+
+
+def _build_warning_message(level: str, user_risk_label: str,
+                           fund_risk_label: str, suggested_pct) -> str:
+    """按提示级别构建消息文本"""
+    if level == "info":
+        return (
+            f"ETF 均属于权益类投资产品，存在本金损失风险。该基金风险等级为 **{fund_risk_label}**，"
+            f"与您 **{user_risk_label}** 的风险偏好存在一定差异，请根据自身情况审慎决策。"
+        )
+    if level == "warning":
+        return (
+            f"⚠️ 该基金风险等级为 **{fund_risk_label}**，超出您 **{user_risk_label}** 的风险承受范围。"
+            f"建议：① 控制该基金配置比例不超过总资产的 **{suggested_pct}%**；"
+            f"② 结合自身投资期限和回撤承受能力综合评估。"
+        )
+    # alert
+    return (
+        f"🔴 该基金为 **{fund_risk_label}** 品种，与您 **{user_risk_label}** 的风险偏好存在显著差异。"
+        f"强烈建议：① 重新评估是否配置此类高风险产品；"
+        f"② 如确需配置，建议比例不超过 **{suggested_pct}%**；"
+        f"③ 做好承受较大回撤的准备。"
+    )
+
+
+def _build_risk_warning(user_risk_level: str, user_risk_label: str,
+                        fund_risk_level: str, fund_risk_label: str) -> Optional[dict]:
+    """查警告矩阵生成风险提示 dict；无需提示返回 None"""
+    level = RISK_WARNING_MATRIX.get(user_risk_level, {}).get(fund_risk_level)
+    if not level:
+        return None
+
+    suggested_pct = None
+    if level in ("warning", "alert"):
+        suggested_pct = SUGGESTED_PCT_MATRIX.get(user_risk_level, {}).get(fund_risk_level)
+
+    return {
+        "level": level,
+        "fund_risk_level": fund_risk_level,
+        "fund_risk_label": fund_risk_label,
+        "user_risk_level": user_risk_level,
+        "user_risk_label": user_risk_label,
+        "message": _build_warning_message(level, user_risk_label, fund_risk_label, suggested_pct),
+        "suggested_max_pct": suggested_pct,
+    }
+
 
 class RiskService:
     """风险画像服务"""
@@ -166,6 +226,26 @@ class RiskService:
             logger.error(f"查询用户画像失败: {e}")
             return None
 
+    @staticmethod
+    def get_risk_warning(user_risk_level: str, user_risk_label: str,
+                         fund_risk_level: str, fund_risk_label: str) -> Optional[dict]:
+        """
+        根据用户画像和基金风险等级生成交易风险提示（建议性，不拦截交易）。
+
+        参数:
+            user_risk_level:  用户画像等级 (conservative/moderate/aggressive)
+            user_risk_label:  用户画像中文标签（入库直接读）
+            fund_risk_level:  基金风险等级 (moderate/aggressive/speculative)
+            fund_risk_label:  基金风险中文标签（入库直接读）
+
+        返回:
+            risk_warning dict，或 None（无需提示）
+        """
+        return _build_risk_warning(
+            user_risk_level, user_risk_label,
+            fund_risk_level, fund_risk_label,
+        )
+
     # ==================== 内部方法 ====================
 
     def _get_questionnaire_by_id(self, questionnaire_id: str) -> Optional[dict]:
@@ -308,6 +388,7 @@ class RiskService:
         return {
             "user_id": user_id,
             "risk_level": risk_level,
+            "risk_label": level_info["label"],   # 中文标签入库，避免运行时计算
             "total_score": score_result["total_score"],
             "weighted_scores": score_result["weighted_scores"],
             "dimension_scores": score_result["dimension_scores"],
@@ -316,7 +397,7 @@ class RiskService:
             "source": "questionnaire",
             "model_version": "risk-v1",
             "is_active": True,
-            "metadata": {"questionnaire_id": questionnaire_id, "risk_label": level_info["label"]},
+            "metadata": {"questionnaire_id": questionnaire_id},
             "expires_at": None,
             "created_at": now,
         }

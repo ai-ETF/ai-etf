@@ -513,11 +513,23 @@ class OrderResult(BaseModel):
     trade_time: Optional[str] = None
 
 
+class RiskWarning(BaseModel):
+    """交易风险提示（建议性，不拦截交易）"""
+    level: str  # info / warning / alert
+    fund_risk_level: str  # moderate / aggressive / speculative
+    fund_risk_label: str
+    user_risk_level: str  # conservative / moderate / aggressive
+    user_risk_label: str
+    message: str
+    suggested_max_pct: Optional[int] = None  # 仅 warning/alert 携带
+
+
 class OrderResponse(BaseModel):
     """申购/赎回订单响应"""
     success: bool
     message: str
     data: Optional[OrderResult] = None
+    risk_warning: Optional[RiskWarning] = None
 
 
 class PositionItem(BaseModel):

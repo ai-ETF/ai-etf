@@ -12,6 +12,31 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "13.0.5"
   }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
   public: {
     Tables: {
       account_snapshots: {
@@ -52,22 +77,31 @@ export type Database = {
       }
       accounts: {
         Row: {
+          auto_invest_enabled: boolean
+          auto_invest_reserve: number
           cash: number
           created_at: string | null
+          frozen_cash: number
           id: string
           updated_at: string | null
           user_id: string
         }
         Insert: {
+          auto_invest_enabled?: boolean
+          auto_invest_reserve?: number
           cash?: number
           created_at?: string | null
+          frozen_cash?: number
           id?: string
           updated_at?: string | null
           user_id: string
         }
         Update: {
+          auto_invest_enabled?: boolean
+          auto_invest_reserve?: number
           cash?: number
           created_at?: string | null
+          frozen_cash?: number
           id?: string
           updated_at?: string | null
           user_id?: string
@@ -293,6 +327,7 @@ export type Database = {
       fund_fee_rules: {
         Row: {
           commission_rate: number
+          confirm_delay: number
           created_at: string | null
           custody_fee_rate: number
           fund_code: string
@@ -301,15 +336,16 @@ export type Database = {
           id: string
           management_fee_rate: number
           min_purchase_amount: number
-          purchase_fee_rate: number
-          redemption_fee_rate_1y: number
-          redemption_fee_rate_30d: number
-          redemption_fee_rate_7d: number
-          redemption_fee_rate_over1y: number
+          purchase_fee_tiers: Json | null
+          redeem_settle_delay: number
+          redemption_fee_tiers: Json
+          sales_service_fee_rate: number
+          share_class: string
           updated_at: string | null
         }
         Insert: {
           commission_rate?: number
+          confirm_delay?: number
           created_at?: string | null
           custody_fee_rate?: number
           fund_code: string
@@ -318,15 +354,16 @@ export type Database = {
           id?: string
           management_fee_rate?: number
           min_purchase_amount?: number
-          purchase_fee_rate?: number
-          redemption_fee_rate_1y?: number
-          redemption_fee_rate_30d?: number
-          redemption_fee_rate_7d?: number
-          redemption_fee_rate_over1y?: number
+          purchase_fee_tiers?: Json | null
+          redeem_settle_delay?: number
+          redemption_fee_tiers?: Json
+          sales_service_fee_rate?: number
+          share_class?: string
           updated_at?: string | null
         }
         Update: {
           commission_rate?: number
+          confirm_delay?: number
           created_at?: string | null
           custody_fee_rate?: number
           fund_code?: string
@@ -335,12 +372,51 @@ export type Database = {
           id?: string
           management_fee_rate?: number
           min_purchase_amount?: number
-          purchase_fee_rate?: number
-          redemption_fee_rate_1y?: number
-          redemption_fee_rate_30d?: number
-          redemption_fee_rate_7d?: number
-          redemption_fee_rate_over1y?: number
+          purchase_fee_tiers?: Json | null
+          redeem_settle_delay?: number
+          redemption_fee_tiers?: Json
+          sales_service_fee_rate?: number
+          share_class?: string
           updated_at?: string | null
+        }
+        Relationships: []
+      }
+      fund_risk_profiles: {
+        Row: {
+          board_score: number
+          breadth_score: number
+          created_at: string | null
+          fund_code: string
+          id: string
+          market_score: number
+          risk_label: string
+          risk_level: string
+          updated_at: string | null
+          volatility_score: number
+        }
+        Insert: {
+          board_score: number
+          breadth_score: number
+          created_at?: string | null
+          fund_code: string
+          id?: string
+          market_score: number
+          risk_label: string
+          risk_level: string
+          updated_at?: string | null
+          volatility_score: number
+        }
+        Update: {
+          board_score?: number
+          breadth_score?: number
+          created_at?: string | null
+          fund_code?: string
+          id?: string
+          market_score?: number
+          risk_label?: string
+          risk_level?: string
+          updated_at?: string | null
+          volatility_score?: number
         }
         Relationships: []
       }
@@ -453,6 +529,7 @@ export type Database = {
       }
       positions: {
         Row: {
+          available_date: string | null
           confirm_date: string | null
           cost_price: number
           created_at: string | null
@@ -464,6 +541,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          available_date?: string | null
           confirm_date?: string | null
           cost_price?: number
           created_at?: string | null
@@ -475,6 +553,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          available_date?: string | null
           confirm_date?: string | null
           cost_price?: number
           created_at?: string | null
@@ -524,6 +603,7 @@ export type Database = {
           id: string
           price: number
           quantity: number
+          trade_pnl: number | null
           trade_time: string | null
           user_id: string
         }
@@ -536,6 +616,7 @@ export type Database = {
           id?: string
           price: number
           quantity: number
+          trade_pnl?: number | null
           trade_time?: string | null
           user_id: string
         }
@@ -548,6 +629,7 @@ export type Database = {
           id?: string
           price?: number
           quantity?: number
+          trade_pnl?: number | null
           trade_time?: string | null
           user_id?: string
         }
@@ -562,6 +644,7 @@ export type Database = {
           fee: number
           fund_code: string
           fund_name: string
+          fund_type: string | null
           id: string
           order_type: string
           price: number
@@ -579,6 +662,7 @@ export type Database = {
           fee?: number
           fund_code: string
           fund_name?: string
+          fund_type?: string | null
           id?: string
           order_type?: string
           price: number
@@ -596,6 +680,7 @@ export type Database = {
           fee?: number
           fund_code?: string
           fund_name?: string
+          fund_type?: string | null
           id?: string
           order_type?: string
           price?: number
@@ -695,6 +780,7 @@ export type Database = {
           is_active: boolean | null
           metadata: Json | null
           model_version: string
+          risk_label: string | null
           risk_level: Database["public"]["Enums"]["risk_level"]
           source: Database["public"]["Enums"]["profile_source"]
           total_score: number | null
@@ -712,6 +798,7 @@ export type Database = {
           is_active?: boolean | null
           metadata?: Json | null
           model_version: string
+          risk_label?: string | null
           risk_level: Database["public"]["Enums"]["risk_level"]
           source: Database["public"]["Enums"]["profile_source"]
           total_score?: number | null
@@ -729,6 +816,7 @@ export type Database = {
           is_active?: boolean | null
           metadata?: Json | null
           model_version?: string
+          risk_label?: string | null
           risk_level?: Database["public"]["Enums"]["risk_level"]
           source?: Database["public"]["Enums"]["profile_source"]
           total_score?: number | null
@@ -940,6 +1028,9 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {
       profile_source: ["questionnaire", "default", "manual", "system_inferred"],

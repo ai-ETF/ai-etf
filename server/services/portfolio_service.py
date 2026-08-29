@@ -280,6 +280,9 @@ class PortfolioService:
             # 5. 获取基金名称（传入 rule 避免重复查询）
             fund_name = self._get_fund_name(fund_code, rule=rule)
 
+            # 5a. 生成风险提示（建议性，任何异常都不影响交易）
+            risk_warning = self._get_risk_warning(user_id, fund_code)
+
             # 6. 校验可用现金
             account = self._ensure_account(user_id)
             cash = Decimal(str(account["cash"]))
@@ -344,11 +347,39 @@ class PortfolioService:
                     "status": "pending",
                     "trade_time": now,
                 },
+                "risk_warning": risk_warning,
             }
 
         except Exception as e:
             logger.error(f"申购失败: {e}", exc_info=True)
             return {"success": False, "message": f"申购失败: {str(e)}", "data": None}
+
+    # ==================== 风险提示 ====================
+
+    def _get_risk_warning(self, user_id: str, fund_code: str) -> Optional[dict]:
+        """
+        读取用户画像 + 基金风险等级，生成交易风险提示（建议性）。
+
+        任何异常都不影响交易：返回 None 表示无提示/数据缺失。
+        """
+        try:
+            from server.services.risk_service import RiskService
+            from server.services.fund_risk_service import FundRiskService
+
+            profile = RiskService().get_latest_profile(user_id)
+            fund_risk = FundRiskService().get_risk_profile(fund_code)
+            if not profile or not fund_risk:
+                return None
+
+            return RiskService.get_risk_warning(
+                user_risk_level=profile["risk_level"],
+                user_risk_label=profile["risk_label"],
+                fund_risk_level=fund_risk["risk_level"],
+                fund_risk_label=fund_risk["risk_label"],
+            )
+        except Exception as e:
+            logger.warning(f"获取风险提示失败（不影响交易）: user={user_id}, code={fund_code}: {e}")
+            return None
 
     # ==================== 赎回 ====================
 

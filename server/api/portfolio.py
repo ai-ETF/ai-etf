@@ -27,6 +27,7 @@ from server.models.schemas import (
     RedeemRequest,
     OrderResponse,
     OrderResult,
+    RiskWarning,
     PositionListResponse,
     PositionItem,
     AccountSummaryResponse,
@@ -83,6 +84,7 @@ async def apply_purchase(
         success=True,
         message=result["message"],
         data=OrderResult(**result["data"]) if result["data"] else None,
+        risk_warning=RiskWarning(**result["risk_warning"]) if result.get("risk_warning") else None,
     )
 
 
@@ -234,6 +236,7 @@ async def test_apply_purchase(
         success=True,
         message=result["message"],
         data=OrderResult(**result["data"]) if result["data"] else None,
+        risk_warning=RiskWarning(**result["risk_warning"]) if result.get("risk_warning") else None,
     )
 
 
