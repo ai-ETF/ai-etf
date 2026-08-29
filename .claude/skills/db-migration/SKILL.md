@@ -17,6 +17,11 @@ supabase migration list --linked                     # 4. 校验 Local │ Deplo
 supabase gen types typescript --project-id "wiynpkkfsiiqnofhifhs" > server/types/supabase.ts  # 5. 同步前端类型
 ```
 
+> ⚠️ `db push` 会**交互确认**（`Do you want to push...? [Y/n]`）。在非交互/后台环境（Claude 工具、CI）执行会挂起且无输出，需管道喂入确认：
+> ```bash
+> printf 'y\n' | supabase db push --linked
+> ```
+
 ## 场景路由（渐进式披露：按需读，不必一次读全）
 
 | 需要处理 | 读取文件 |
