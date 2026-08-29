@@ -701,3 +701,19 @@ class ProfileResponse(BaseModel):
     """查询画像响应"""
     has_profile: bool
     profile: Optional[ProfileResult] = None
+
+
+# ==================== 余额理财配置 ====================
+
+class AutoInvestConfigRequest(BaseModel):
+    """余额理财开关配置请求"""
+    enabled: bool  # 是否开启
+    reserve: Optional[float] = 0.0  # 预留金额（元）
+
+
+class AutoInvestConfigResponse(BaseModel):
+    """余额理财开关配置响应"""
+    enabled: bool
+    reserve: float  # 预留金额
+    money_fund_code: str  # 货基代码
+    money_fund_name: str  # 货基名称
