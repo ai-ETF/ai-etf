@@ -9,7 +9,7 @@ import logging
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from server.llm import get_llm
+from server.llm import astream_text, get_llm
 from server.utils.sse import format_sse_event, create_sse_stream_response
 
 logger = logging.getLogger(__name__)
@@ -43,9 +43,8 @@ async def stream_simple_chat(question: str):
     llm = get_llm()
 
     try:
-        async for chunk in llm.astream([HumanMessage(content=question)]):
-            if chunk.content:
-                yield format_sse_event("token", {"content": chunk.content})
+        async for text in astream_text(llm, [HumanMessage(content=question)]):
+            yield format_sse_event("token", {"content": text})
 
         yield format_sse_event("done", {})
 

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from server.auth import get_current_user
 from server.auth.deps import extract_and_verify
-from server.llm import get_llm
+from server.llm import astream_text, get_llm
 from server.services.auth_service import delete_account, logout_user, register_user
 from server.storage.chat_repo import get_chat_repo
 from server.storage.supabase_client import get_supabase
@@ -212,10 +212,9 @@ async def stream_with_save(question: str, chat_id: str, user_id: str):
     full_response = ""
 
     try:
-        async for chunk in llm.astream([HumanMessage(content=question)]):
-            if chunk.content:
-                full_response += chunk.content
-                yield format_sse_event("token", {"content": chunk.content})
+        async for text in astream_text(llm, [HumanMessage(content=question)]):
+            full_response += text
+            yield format_sse_event("token", {"content": text})
 
         # 流式完成，保存 assistant 消息
         assistant_msg = repo.save_message(
