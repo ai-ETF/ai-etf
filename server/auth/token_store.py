@@ -21,11 +21,15 @@ def revoke(token: str, exp: float) -> None:
         _revoked[token] = exp
 
 
-def is_revoked(token: str) -> bool:
-    """判断 token 是否已被撤销，并惰性清理已过期的条目。"""
-    now = time.time()
+def is_revoked(token: str, now: float | None = None) -> bool:
+    """判断 token 是否已被撤销，并惰性清理已过期的条目。
+
+    now: 可注入的当前时间（epoch 秒）。测试时传入固定值即可确定性验证
+    “过期清理”逻辑；为 None 时取真实时钟 time.time()（生产路径）。
+    """
+    current = time.time() if now is None else now
     with _lock:
-        expired = [t for t, e in _revoked.items() if e <= now]
+        expired = [t for t, e in _revoked.items() if e <= current]
         for t in expired:
             _revoked.pop(t, None)
         return token in _revoked
