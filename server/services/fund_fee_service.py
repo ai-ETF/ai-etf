@@ -134,16 +134,16 @@ class FundFeeService:
 
         # 按金额分档匹配
         tiers_data = rule.get("purchase_fee_tiers")
-        if tiers_data:
-            if isinstance(tiers_data, str):
-                tiers_data = json.loads(tiers_data)
-            tier = self._match_purchase_tier(tiers_data, amount)
-            rate = float(tier.get("rate") or 0)
-            fixed_fee = float(tier.get("fixed_fee") or 0)
-        else:
-            logger.warning(f"基金 {fund_code} 缺少 purchase_fee_tiers，使用默认费率")
-            rate = 0.0015
-            fixed_fee = 0.0
+        if isinstance(tiers_data, str):
+            tiers_data = json.loads(tiers_data)
+        if not tiers_data:
+            # 规则缺失/为空即拒绝 —— 不允许按默认费率兜底（交易规则不能靠猜）
+            logger.error(f"基金 {fund_code} 缺少 purchase_fee_tiers，拒绝计算申购费")
+            return None
+
+        tier = self._match_purchase_tier(tiers_data, amount)
+        rate = float(tier.get("rate") or 0)
+        fixed_fee = float(tier.get("fixed_fee") or 0)
 
         # 固定费用模式
         if fixed_fee > 0:
@@ -194,7 +194,8 @@ class FundFeeService:
         # 无金额分档（如 C 类全免申购费）
         if universal_tiers:
             return universal_tiers[0]
-        return {"rate": 0.0015}
+        # 档位为空 —— 规则不完整，直接暴露而不是猜一个默认费率
+        raise ValueError("purchase_fee_tiers 为空，无可用费率档位")
 
     # ==================== 赎回费（JSON 档位，支持 inclusive） ====================
 
@@ -210,7 +211,7 @@ class FundFeeService:
             rule: 已查询的费率规则（可选，传入则避免重复查询）
 
         返回:
-            赎回费（元），或 None（不支持该基金）
+            赎回费（元），或 None（不支持该基金 / 缺少费率规则）
         """
         if rule is None:
             rule = self.get_fee_rule(fund_code)
@@ -219,7 +220,9 @@ class FundFeeService:
 
         tiers_data = rule.get("redemption_fee_tiers")
         if tiers_data is None:
-            return 0.0
+            # 规则缺失即拒绝 —— 与申购侧一致，不允许按"免赎回费"放行
+            logger.error(f"基金 {fund_code} 缺少 redemption_fee_tiers，拒绝计算赎回费")
+            return None
 
         # 解析 JSON 档位
         if isinstance(tiers_data, str):
@@ -232,7 +235,9 @@ class FundFeeService:
             tiers = []
 
         if not tiers:
-            return 0.0
+            # 空档位 = 规则不完整，同样拒绝，不做免赎回费兜底
+            logger.error(f"基金 {fund_code} 的 redemption_fee_tiers 为空，拒绝计算赎回费")
+            return None
 
         # 从小到大排序，按档位匹配
         # 每个档位支持 inclusive 字段：
@@ -257,29 +262,33 @@ class FundFeeService:
 
     # ==================== 简单查询（支持传入 rule 避免重复查询） ====================
 
-    def get_min_purchase_amount(self, fund_code: str, rule: Optional[dict] = None) -> Optional[float]:
-        """获取最低申购金额（元）"""
+    def _require_rule_field(self, fund_code: str, rule: Optional[dict], field: str):
+        """
+        读取费率规则中的必填字段，缺失即抛错。
+
+        规则不完整时直接暴露，不用默认值兜底 —— 否则会用错误的天数/金额
+        把交易做完，问题被静默吞掉。与模块「交易规则不能靠猜」原则一致。
+        """
         if rule is None:
             rule = self.get_fee_rule(fund_code)
         if rule is None:
-            return None
-        return float(rule.get("min_purchase_amount") or 10.0)
+            raise ValueError(f"基金 {fund_code} 无费率规则，不支持交易")
+        value = rule.get(field)
+        if value is None:
+            raise ValueError(f"基金 {fund_code} 的费率规则缺少 {field}")
+        return value
+
+    def get_min_purchase_amount(self, fund_code: str, rule: Optional[dict] = None) -> float:
+        """获取最低申购金额（元）。字段缺失即报错，配置为 0 表示无门槛。"""
+        return float(self._require_rule_field(fund_code, rule, "min_purchase_amount"))
 
     def get_confirm_delay(self, fund_code: str, rule: Optional[dict] = None) -> int:
-        """获取申购确认延迟天数（T+N）"""
-        if rule is None:
-            rule = self.get_fee_rule(fund_code)
-        if rule is None:
-            return 1
-        return int(rule.get("confirm_delay", 1))
+        """获取申购确认延迟天数（T+N）。字段缺失即报错，不默认 T+1。"""
+        return int(self._require_rule_field(fund_code, rule, "confirm_delay"))
 
     def get_redeem_settle_delay(self, fund_code: str, rule: Optional[dict] = None) -> int:
-        """获取赎回到账延迟天数（T+N）"""
-        if rule is None:
-            rule = self.get_fee_rule(fund_code)
-        if rule is None:
-            return 3
-        return int(rule.get("redeem_settle_delay", 3))
+        """获取赎回到账延迟天数（T+N）。字段缺失即报错，不默认 T+3。"""
+        return int(self._require_rule_field(fund_code, rule, "redeem_settle_delay"))
 
     def get_fund_name(self, fund_code: str, rule: Optional[dict] = None) -> Optional[str]:
         """获取基金名称"""

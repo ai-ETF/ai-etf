@@ -58,6 +58,19 @@ def _parse_time(ts: str) -> datetime:
     return dt.replace(tzinfo=None)
 
 
+def _require_rule_field(rule: dict, fund_code: str, field: str):
+    """
+    读取费率规则中的必填字段，缺失即抛错。
+
+    与货基收益口径一致：规则不完整直接暴露，不用默认值兜底，
+    否则会用错误的天数/金额把交易做完，问题被静默吞掉。
+    """
+    value = rule.get(field)
+    if value is None:
+        raise RuntimeError(f"基金 {fund_code} 的费率规则缺少 {field}，无法继续交易")
+    return value
+
+
 class PortfolioService:
     """场外基金持仓交易服务"""
 
@@ -526,7 +539,7 @@ class PortfolioService:
             now_beijing = _beijing_now()
 
             # 1. 计算确认日（从 rule 中直接读取，不再重复查询）
-            confirm_delay = int(rule.get("confirm_delay", 1))
+            confirm_delay = int(_require_rule_field(rule, fund_code, "confirm_delay"))
             if self._is_trading_day(now_beijing.date()) and self._is_before_cutoff(now_beijing):
                 confirm_date = now_beijing.date()
                 day_label = "当日"
@@ -539,7 +552,7 @@ class PortfolioService:
                 actual_confirm = self._next_trading_day(actual_confirm)
 
             # 2. 校验最低申购金额（从 rule 中直接读取）
-            min_amount = Decimal(str(rule.get("min_purchase_amount", 10.0)))
+            min_amount = Decimal(str(_require_rule_field(rule, fund_code, "min_purchase_amount")))
             if amount < min_amount:
                 return {
                     "success": False,
@@ -756,7 +769,7 @@ class PortfolioService:
 
             # 场外基金统一走 pending 流程：不立即入账，T+1 确认后由 confirm_pending_orders() 处理
             # 赎回费在确认时按确认日净值和持有天数计算
-            redeem_delay = int(rule.get("redeem_settle_delay", 3))
+            redeem_delay = int(_require_rule_field(rule, fund_code, "redeem_settle_delay"))
             settle_date = confirm_date
             for _ in range(redeem_delay):
                 settle_date = self._next_trading_day(settle_date)
@@ -1223,7 +1236,9 @@ class PortfolioService:
 
             actual_fee = self._calc_redemption_fee(fund_code, redeem_amount, max(hold_days, 0), rule=rule)
             if actual_fee is None:
-                actual_fee = Decimal("0")
+                # 费率规则缺失时拒绝确认，不允许按免手续费放行
+                # （异常由 confirm_pending_orders 捕获并把订单标记为 failed）
+                raise RuntimeError(f"基金 {fund_code} 缺少赎回费率规则，无法确认赎回")
             # 货基收益已含在份额里（quantity 已折算），无需再加 income_portion
             net_amount = redeem_amount - actual_fee
 
