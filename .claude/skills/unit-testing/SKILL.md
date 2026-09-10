@@ -1,6 +1,5 @@
 ---
 name: unit-testing
-disable-model-invocation: true
 description: 在已明确需要测试模块的名称及功能后，使用该用skill辅助单元测试，并落实文档。
 ---
 
