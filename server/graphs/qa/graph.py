@@ -51,9 +51,9 @@ def get_qa_graph():
     return _qa_graph
 
 
-def run_qa_analysis(question: str) -> Dict[str, Any]:
+async def arun_qa_analysis(question: str) -> Dict[str, Any]:
     """
-    运行 QA 分析图（同步接口）
+    运行 QA 分析图（异步接口）
 
     替代原有的 QuestionAgent.analyze() + OutputFormatAgent.analyze() 调用。
 
@@ -74,8 +74,8 @@ def run_qa_analysis(question: str) -> Dict[str, Any]:
     graph = get_qa_graph()
     initial_state = create_qa_state(question)
 
-    # 使用 invoke（同步），LangGraph 会处理内部的 async 节点
-    result = graph.invoke(initial_state)
+    # 使用 ainvoke（异步），正确驱动 async 节点
+    result = await graph.ainvoke(initial_state)
 
     logger.debug(f"QA 分析完成: intent={result['intent']}, top_k={result['top_k']}")
 

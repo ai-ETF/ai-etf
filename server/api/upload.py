@@ -17,7 +17,7 @@ async def upload(req: UploadRequest):
     
     try:
         logger.debug("开始处理文档摄取")
-        doc_id = svc.ingest_document(req.url, source=req.source)
+        doc_id = await svc.ingest_document(req.url, source=req.source)
         logger.debug(f"文档摄取完成，文档ID: {doc_id}")
     except Exception as e:
         logger.error(f"处理文档摄取时发生错误: {str(e)}")
@@ -60,7 +60,7 @@ async def process_file_from_edge(request: Request):
         
         # 调用处理方法
         logger.debug("开始处理文档...")
-        document_id = svc.process_file_from_edge(
+        document_id = await svc.process_file_from_edge(
             file_id=file_id,
             user_id=user_id,
             download_url=download_url,

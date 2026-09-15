@@ -11,7 +11,7 @@ from server.rag.embedder import Embedder
 from server.storage.document_repo import DocumentRepo
 from server.storage.embedding_repo import EmbeddingRepo
 from server.config.settings import SETTINGS
-from server.graphs.document.graph import run_document_analysis
+from server.graphs.document.graph import arun_document_analysis
 from server.storage.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -172,7 +172,7 @@ class DocumentService:
         }
         logger.debug(f"📋 已注册处理器: {list(self.processors.keys())}")
 
-    def ingest_document(self, url: str, source: str = None) -> str:
+    async def ingest_document(self, url: str, source: str = None) -> str:
         """
         摄取文档的主入口
         清晰的功能步骤:
@@ -206,7 +206,7 @@ class DocumentService:
         # === 步骤5: 使用DocumentAgent分析文档类型和结构 ===
         logger.debug("5️⃣ 使用DocumentAgent分析文档...")
         text_content = self._decode_content(content)  # 先解码内容以供分析
-        analysis_result = run_document_analysis(text_content)
+        analysis_result = await arun_document_analysis(text_content)
         doc_type = analysis_result["document_type"]
         logger.debug(f"  文档类型分析结果: {doc_type}，置信度: {analysis_result['confidence']:.2f}")
         
@@ -230,7 +230,7 @@ class DocumentService:
         logger.info("=" * 60)
         return doc_id
 
-    def process_file_from_edge(self, file_id: str, user_id: str, download_url: str, doc_type: str = "general_document", parse_strategy: Dict = None) -> str:
+    async def process_file_from_edge(self, file_id: str, user_id: str, download_url: str, doc_type: str = "general_document", parse_strategy: Dict = None) -> str:
         """
         从Edge Function接收的文件处理请求
         严格按照指定的表操作规则执行
@@ -268,7 +268,7 @@ class DocumentService:
             # 步骤 3: 使用DocumentAgent分析文档类型和结构
             logger.debug("3️⃣ 使用DocumentAgent分析文档...")
             text_content = self._decode_content(content)  # 先解码内容以供分析
-            analysis_result = run_document_analysis(text_content)
+            analysis_result = await arun_document_analysis(text_content)
             analyzed_doc_type = analysis_result["document_type"]
             logger.debug(f"  文档类型分析结果: {analyzed_doc_type}，置信度: {analysis_result['confidence']:.2f}")
 
