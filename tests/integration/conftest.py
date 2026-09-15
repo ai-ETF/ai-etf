@@ -104,3 +104,68 @@ def supabase_client():
     except Exception as e:  # noqa: BLE001
         pytest.exit(f"无法连接本地 Supabase（{url}）：{e}", returncode=3)
     return client
+
+
+# ---------- 服务 fixture：注入本地库 client（绕过 get_supabase 读生产 env） ----------
+
+@pytest.fixture
+def fee_service(supabase_client):
+    """FundFeeService 实例，client 指向本地库（含 21 条种子费率规则）。"""
+    from server.services.fund_fee_service import FundFeeService
+
+    svc = FundFeeService()
+    svc._client = supabase_client
+    return svc
+
+
+@pytest.fixture
+def watchlist_service(supabase_client):
+    """WatchlistService 实例，client 指向本地库。"""
+    from server.services.watchlist_service import WatchlistService
+
+    svc = WatchlistService()
+    svc._client = supabase_client
+    return svc
+
+
+@pytest.fixture
+def risk_service(supabase_client):
+    """RiskService 实例，client 指向本地库（含种子问卷）。"""
+    from server.services.risk_service import RiskService
+
+    svc = RiskService()
+    svc._client = supabase_client
+    return svc
+
+
+@pytest.fixture
+def user_id(supabase_client):
+    """合成 user_id，用于**无 FK 到 auth.users** 的表（accounts/watchlist/positions 等）。
+
+    测试结束后调用 purge_user_data RPC 定向清理该用户的全部业务数据；
+    清理失败会抛错，不做静默吞掉。
+    """
+    import uuid as _uuid
+
+    uid = str(_uuid.uuid4())
+    yield uid
+    supabase_client.rpc("purge_user_data", {"p_user_id": uid}).execute()
+
+
+@pytest.fixture
+def auth_user_id(supabase_client):
+    """真实 auth 用户（admin.create_user），用于**有 FK 到 auth.users** 的表
+    （chats/messages/documents/user_risk_answers/user_risk_profiles 等）。
+
+    清理顺序：先 purge 业务数据（含 FK 引用），再删 auth 用户本身。
+    """
+    import uuid as _uuid
+
+    email = f"test-{_uuid.uuid4()}@example.com"
+    resp = supabase_client.auth.admin.create_user(
+        {"email": email, "password": "test-password-123", "email_confirm": True}
+    )
+    uid = resp.user.id
+    yield uid
+    supabase_client.rpc("purge_user_data", {"p_user_id": uid}).execute()
+    supabase_client.auth.admin.delete_user(uid)
