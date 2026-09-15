@@ -5,6 +5,7 @@
          logout_user（撤销 token + 登出）、delete_account（密码复核后注销）
 测试方法：monkeypatch get_supabase / revoke，用 FakeSupabase 替身覆盖 auth/rpc 子接口，全程不联网、不连 Supabase。
 """
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -208,12 +209,63 @@ def test_弱密码_抛400(monkeypatch, fake_supabase):
     assert e.value.status_code == 400
 
 
-def test_其他AuthApi错误_抛502(monkeypatch, fake_supabase):
+def test_请求限流_抛429(monkeypatch, fake_supabase):
     _patch_supabase(monkeypatch, fake_supabase)
     fake_supabase.sign_up_error = AuthApiError("msg", 429, "over_request_rate_limit")
     with pytest.raises(HTTPException) as e:
         register_user("user@example.com", "password123")
+    assert e.value.status_code == 429
+
+
+def test_邮件限流_抛429而非502(monkeypatch, fake_supabase):
+    # 线上真实故障回归：Supabase 端开启邮箱确认 + 内置邮件服务限流，
+    # 该 code 曾落到兜底分支被错报成 502（"稍后重试"），掩盖了配置问题。
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.sign_up_error = AuthApiError(
+        "msg", 429, "over_email_send_rate_limit"
+    )
+    with pytest.raises(HTTPException) as e:
+        register_user("user@example.com", "password123")
+    assert e.value.status_code == 429
+
+
+def test_注册被关闭_抛403(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.sign_up_error = AuthApiError("msg", 422, "signup_disabled")
+    with pytest.raises(HTTPException) as e:
+        register_user("user@example.com", "password123")
+    assert e.value.status_code == 403
+
+
+def test_邮件通道未配置_抛503(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.sign_up_error = AuthApiError(
+        "msg", 400, "email_address_not_authorized"
+    )
+    with pytest.raises(HTTPException) as e:
+        register_user("user@example.com", "password123")
+    assert e.value.status_code == 503
+
+
+def test_未覆盖的AuthApi错误_抛502(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.sign_up_error = AuthApiError("msg", 400, "some_unknown_code")
+    with pytest.raises(HTTPException) as e:
+        register_user("user@example.com", "password123")
     assert e.value.status_code == 502
+
+
+def test_注册成功但未返回session_记录告警(monkeypatch, fake_supabase, caplog):
+    # 「注册即激活」是本项目的设计要求：Supabase 端若仍开启邮箱确认，
+    # 这里会拿到空 session —— 必须留下告警，否则前端只表现为"点了注册没反应"。
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.sign_up_result = FakeSignUpResult(
+        user=SimpleNamespace(id="user-123"), session=None
+    )
+    with caplog.at_level(logging.WARNING):
+        result = register_user("user@example.com", "password123")
+    assert result["session"] is None
+    assert "未返回 session" in caplog.text
 
 
 # ==================== logout_user ====================

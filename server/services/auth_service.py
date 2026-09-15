@@ -23,6 +23,25 @@ PASSWORD_MIN_LENGTH = 8
 # 轻量邮箱格式校验，避免额外引入 email-validator 依赖
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# Supabase Auth 错误码 → (HTTP 状态码, 文案)。
+# 关键在于区分三类语义，不能一律 502：
+#   - 参数错（400/409）：用户改输入即可
+#   - 限流（429）：稍后重试有意义
+#   - 配置/权限（403/503）：重试一万次也没用，必须让运维改配置
+# 完整错误码见 supabase_auth.errors.ErrorCode。
+_AUTH_ERROR_MAP: dict[str, tuple[int, str]] = {
+    "user_already_exists": (409, "该邮箱已注册，请直接登录"),
+    "email_address_invalid": (400, "邮箱格式不正确"),
+    "weak_password": (400, f"密码不符合安全要求，请设置至少 {PASSWORD_MIN_LENGTH} 位"),
+    "over_request_rate_limit": (429, "注册请求过于频繁，请稍后重试"),
+    "over_email_send_rate_limit": (429, "注册请求过于频繁，请稍后重试"),
+    "over_sms_send_rate_limit": (429, "注册请求过于频繁，请稍后重试"),
+    "signup_disabled": (403, "当前未开放注册"),
+    "email_provider_disabled": (403, "当前未开放注册"),
+    # 仅在邮箱确认开启 + SMTP 未配置时出现；本设计为「注册即激活」，走到这里说明配置漂移了
+    "email_address_not_authorized": (503, "注册邮件通道未配置，请联系管理员"),
+}
+
 
 def validate_email(email: str) -> None:
     """校验邮箱格式，非法时抛出 400。"""
@@ -50,7 +69,8 @@ def register_user(email: str, password: str) -> dict:
         {"session": AuthResponse.session 或 None, "user": AuthResponse.user}
 
     Raises:
-        HTTPException: 400 参数非法 / 409 邮箱已注册 / 500 数据库未就绪 / 502 服务异常
+        HTTPException: 400 参数非法 / 403 未开放注册 / 409 邮箱已注册 /
+            429 请求过于频繁 / 500 数据库未就绪 / 502 未知服务异常 / 503 邮件通道未配置
     """
     validate_email(email)
     validate_password(password)
@@ -64,28 +84,30 @@ def register_user(email: str, password: str) -> dict:
     except AuthWeakPasswordError:
         # 兜底：应用层已校验长度，此处防御 Supabase 端密码策略变更
         logger.warning("Supabase 判定密码过弱")
-        raise HTTPException(
-            status_code=400, detail=f"密码不符合安全要求，请设置至少 {PASSWORD_MIN_LENGTH} 位"
-        )
+        raise HTTPException(status_code=400, detail=_AUTH_ERROR_MAP["weak_password"][1])
     except AuthApiError as e:
         logger.warning(f"注册失败: code={e.code}, status={e.status}, message={e.message}")
-        if e.code == "user_already_exists":
-            raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
-        if e.code == "email_address_invalid":
-            raise HTTPException(status_code=400, detail="邮箱格式不正确")
-        if e.code == "weak_password":
-            raise HTTPException(
-                status_code=400, detail=f"密码不符合安全要求，请设置至少 {PASSWORD_MIN_LENGTH} 位"
-            )
-        # 其余 Auth API 错误（限流、禁用注册等）统一按服务不可用处理
+        mapped = _AUTH_ERROR_MAP.get(e.code or "")
+        if mapped:
+            raise HTTPException(status_code=mapped[0], detail=mapped[1])
+        # 未覆盖的 Auth 错误按服务不可用处理；原始 code 已在上面日志里，便于复盘
         raise HTTPException(status_code=502, detail="注册服务暂时不可用，请稍后重试")
     except Exception as e:
         logger.error(f"注册发生未知异常: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail="注册服务暂时不可用，请稍后重试")
 
     user_id = getattr(result.user, "id", None)
-    has_session = result.session is not None
-    logger.info(f"用户注册成功: user_id={user_id}, auto_login={has_session}")
+    if result.session is not None:
+        logger.info(f"用户注册成功: user_id={user_id}, auto_login=True")
+    else:
+        # 本项目设计为「注册即激活」：Supabase 端应关闭 Confirm email，sign_up 直接签发 session。
+        # 返回空 session 说明线上配置与设计不符——注册会「成功」但用户拿不到登录态，
+        # 前端表现为「点了注册没反应」。必须大声报出来，否则又是一次 502 式的哑巴故障。
+        logger.warning(
+            f"用户注册成功但未返回 session: user_id={user_id}，"
+            "疑似 Supabase 端仍开启邮箱确认（Confirm email），"
+            "请在 Authentication → Sign In / Providers → Email 关闭该开关"
+        )
     return {"session": result.session, "user": result.user}
 
 
