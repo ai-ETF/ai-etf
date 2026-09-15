@@ -55,8 +55,11 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m 'not integration and not eval'"
 markers = [
     "unit: 单元测试（默认运行，禁网、禁外部 IO）",
     "integration: 集成测试（需本地 Supabase 等真实资源，默认不跑）",
+    "integration_db: 仅需数据库，无网络（默认不跑）",
+    "integration_net: 需录制回放/真实网络（默认不跑）",
     "eval: LLM/评测类测试（需真实模型或录制回放，默认不跑）",
 ]
