@@ -69,19 +69,23 @@ def _assert_local_target(url: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _block_outbound_network(monkeypatch):
-    """禁止测试进程连接非 localhost 地址，白名单本地回环。"""
-    allowed_hosts = {"127.0.0.1", "localhost", "::1"}
-    real_create_connection = socket.create_connection
+    """禁止测试进程连接非 localhost 地址，白名单本地回环。
 
-    def guarded(address, *args, **kwargs):
+    在 socket.socket.connect 这一最底层拦截，覆盖 requests/httpx/urllib/akshare
+    等所有 HTTP 客户端（它们最终都落到 socket.connect）。
+    """
+    allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+    real_connect = socket.socket.connect
+
+    def guarded_connect(self, address):
         host = address[0] if isinstance(address, tuple) else address
         if host not in allowed_hosts:
             raise RuntimeError(
                 f"集成测试禁止出网：{host}。外部 API（AKShare/LLM）须用录制回放或假对象隔离。"
             )
-        return real_create_connection(address, *args, **kwargs)
+        return real_connect(self, address)
 
-    monkeypatch.setattr(socket, "create_connection", guarded)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     yield
 
 
@@ -136,6 +140,23 @@ def risk_service(supabase_client):
     svc = RiskService()
     svc._client = supabase_client
     return svc
+
+
+@pytest.fixture
+def portfolio_service(supabase_client, monkeypatch):
+    """PortfolioService 实例。
+
+    关键：PortfolioService 内部会自行实例化 FundFeeService/RiskService，
+    二者经 `get_supabase()` 读 env 会连生产库。此处 monkeypatch `get_supabase`
+    返回本地库 client，使整个调用链（含内部服务）都落在本地库上。
+    """
+    from server.storage import supabase_client as sc
+
+    monkeypatch.setattr(sc, "get_supabase", lambda: supabase_client)
+
+    from server.services.portfolio_service import PortfolioService
+
+    return PortfolioService()
 
 
 @pytest.fixture
