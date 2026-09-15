@@ -12,21 +12,18 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.integration_db
 def test_连上本地库且fund_fee_rules表存在(supabase_client):
-    """基础连通性：fund_fee_rules 表可查询（即使空表）。"""
-    resp = supabase_client.table("fund_fee_rules").select("count", count="exact").limit(0).execute()
-    assert resp.count >= 0
+    """基础连通性：fund_fee_rules 表可查询（含种子数据）。"""
+    resp = supabase_client.table("fund_fee_rules").select("count", count="exact").execute()
+    assert resp.count >= 20
 
 
-@pytest.mark.integration_db
 def test_出网守卫拦截非localhost连接():
     """安全护栏：任何连接非 localhost 地址的尝试都必须被拦截。"""
     with pytest.raises(RuntimeError, match="禁止出网"):
         socket.create_connection(("huggingface.co", 443), timeout=2)
 
 
-@pytest.mark.integration_db
 def test_写入并读回再清理(supabase_client):
     """真实读写往返：写入一条合成数据 → 读回 → 清理。"""
     user_id = str(uuid.uuid4())
