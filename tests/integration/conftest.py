@@ -274,15 +274,24 @@ def sql_delete_auth_user():
     """
 
     def _delete(user_id: str) -> None:
+        import time
+
         sql = (
             f"DELETE FROM auth.identities WHERE user_id = '{user_id}';"
             f"DELETE FROM auth.users WHERE id = '{user_id}';"
         )
-        subprocess.run(
-            ["sg", "docker", "-c",
-             f"docker exec supabase_db_ai-etf psql -U postgres -d postgres -c \"{sql}\""],
-            capture_output=True, text=True, timeout=20, check=True,
-        )
+        cmd = ["sg", "docker", "-c",
+               f"docker exec supabase_db_ai-etf psql -U postgres -d postgres -c \"{sql}\""]
+        # docker exec 偶发失败（资源竞争/超时），重试 3 次提升健壮性
+        last_err = None
+        for _ in range(3):
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True)
+                return
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                last_err = e
+                time.sleep(1)
+        raise last_err
 
     return _delete
 
