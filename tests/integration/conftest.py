@@ -9,8 +9,35 @@
 import os
 import socket
 import subprocess
+import sys
+import types
 
 import pytest
+
+
+# ---------- 重依赖替身（import server.app 前预填充 sys.modules） ----------
+# langchain_anthropic 导入 >60s；document_service → rag.embedder/graphs → torch/langgraph 极重。
+# 二者在 import server.app（→ api → secure_chat/upload）时被连带加载，拖垮所有 API 测试。
+# 阶段 2 的 API 端到端不测 upload，故 document_service 用空替身；server.llm 的 langchain
+# 类仅作类型提示、运行时惰性，空替身即可让真实代码加载。
+
+
+def _install(name, **attrs):
+    if name in sys.modules:
+        return sys.modules[name]
+    mod = types.ModuleType(name)
+    for k, v in attrs.items():
+        setattr(mod, k, v)
+    sys.modules[name] = mod
+    return mod
+
+
+_install("langchain_anthropic", ChatAnthropic=type("ChatAnthropic", (), {}))
+_install("langchain_core")
+_install("langchain_core.language_models")
+_install("langchain_core.language_models.chat_models", BaseChatModel=type("BaseChatModel", (), {}))
+_install("langchain_core.messages", BaseMessage=type("BaseMessage", (), {}))
+_install("server.services.document_service", DocumentService=type("DocumentService", (), {}))
 
 
 # ---------- 本地库配置解析 ----------
@@ -190,3 +217,106 @@ def auth_user_id(supabase_client):
     yield uid
     supabase_client.rpc("purge_user_data", {"p_user_id": uid}).execute()
     supabase_client.auth.admin.delete_user(uid)
+
+
+# ---------- JWT 自签 + API 端到端 fixture ----------
+
+def _resolve_local_jwt_secret() -> str:
+    """本地 Supabase 的 JWT secret（supabase status 输出），默认 supabase 公开默认值。"""
+    for cmd in [
+        ["sg", "docker", "-c", "supabase status -o env"],
+        ["supabase", "status", "-o", "env"],
+    ]:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                if line.startswith("JWT_SECRET="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return "super-secret-jwt-token-with-at-least-32-characters-long"
+
+
+def mint_token(user_id: str, secret: str) -> str:
+    """自签 HS256 JWT（aud=authenticated），覆盖所有 Depends(get_current_user) 路由。"""
+    import jwt
+
+    return jwt.encode(
+        {"sub": user_id, "role": "authenticated", "aud": "authenticated"},
+        secret,
+        algorithm="HS256",
+    )
+
+
+@pytest.fixture
+def jwt_secret():
+    """本地 Supabase 的 JWT secret。"""
+    return _resolve_local_jwt_secret()
+
+
+@pytest.fixture
+def auth_headers(jwt_secret):
+    """返回函数：根据 user_id 生成 Authorization headers（自签 JWT）。"""
+
+    def _make(user_id: str) -> dict:
+        return {"Authorization": f"Bearer {mint_token(user_id, jwt_secret)}"}
+
+    return _make
+
+
+@pytest.fixture
+def sql_delete_auth_user():
+    """返回函数：SQL 直删 auth 用户（先删 identities 再删 users）。
+
+    sign_up 创建的用户，`auth.admin.delete_user` 会报「User not allowed」
+    （create_user 创建的用户则能删），故 register 测试的清理需走 SQL 直删。
+    """
+
+    def _delete(user_id: str) -> None:
+        sql = (
+            f"DELETE FROM auth.identities WHERE user_id = '{user_id}';"
+            f"DELETE FROM auth.users WHERE id = '{user_id}';"
+        )
+        subprocess.run(
+            ["sg", "docker", "-c",
+             f"docker exec supabase_db_ai-etf psql -U postgres -d postgres -c \"{sql}\""],
+            capture_output=True, text=True, timeout=20, check=True,
+        )
+
+    return _delete
+
+
+@pytest.fixture
+def api_client(monkeypatch):
+    """FastAPI TestClient：真实 app + 独立本地库 client + 本地 JWT secret。
+
+    - get_supabase 指向一个**独立**的 service_role client（每个测试新建），
+      而非共享的 supabase_client——因为 secure_chat 的 sign_up 会自动设置 client
+      的 session（auto-login），把 service_role 切成 authenticated role 触发 RLS，
+      独立 client 可隔离这种污染；
+    - 调度器替身，避免 lifespan 启动 30s 行情刷新任务打 AKShare；
+    - SETTINGS.SUPABASE_JWT_SECRET 指向本地，使自签 token 能通过 verify。
+    """
+    from supabase import create_client
+
+    url, key = _resolve_local_supabase()
+    _assert_local_target(url)
+    local_client = create_client(url, key)
+
+    from server.storage import supabase_client as sc
+
+    monkeypatch.setattr(sc, "get_supabase", lambda: local_client)
+
+    monkeypatch.setattr("server.services.spot_cache_scheduler.start_scheduler", lambda: None)
+    monkeypatch.setattr("server.services.spot_cache_scheduler.shutdown_scheduler", lambda: None)
+
+    from server.config.settings import SETTINGS
+
+    monkeypatch.setattr(SETTINGS, "SUPABASE_JWT_SECRET", _resolve_local_jwt_secret())
+
+    from server.app import app
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        yield client
