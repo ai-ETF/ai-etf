@@ -18,8 +18,10 @@ import pytest
 # ---------- 重依赖替身（import server.app 前预填充 sys.modules） ----------
 # langchain_anthropic 导入 >60s；document_service → rag.embedder/graphs → torch/langgraph 极重。
 # 二者在 import server.app（→ api → secure_chat/upload）时被连带加载，拖垮所有 API 测试。
-# 阶段 2 的 API 端到端不测 upload，故 document_service 用空替身；server.llm 的 langchain
-# 类仅作类型提示、运行时惰性，空替身即可让真实代码加载。
+# 阶段 2 的 API 端到端不测 upload，故 document_service 用空替身；server.llm 仅把
+# ChatAnthropic 当类型提示、运行时惰性，空替身即可。
+# 注意：langchain_core 不能替身——langgraph（图执行，P2）需要真实的 langchain_core.runnables，
+# 而其 import 仅 0.65s，不影响测试速度。
 
 
 def _install(name, **attrs):
@@ -33,10 +35,6 @@ def _install(name, **attrs):
 
 
 _install("langchain_anthropic", ChatAnthropic=type("ChatAnthropic", (), {}))
-_install("langchain_core")
-_install("langchain_core.language_models")
-_install("langchain_core.language_models.chat_models", BaseChatModel=type("BaseChatModel", (), {}))
-_install("langchain_core.messages", BaseMessage=type("BaseMessage", (), {}))
 _install("server.services.document_service", DocumentService=type("DocumentService", (), {}))
 
 
