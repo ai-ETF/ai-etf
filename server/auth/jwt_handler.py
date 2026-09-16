@@ -14,7 +14,7 @@ from server.config.settings import SETTINGS
 logger = logging.getLogger(__name__)
 
 
-def verify_supabase_token(token: str) -> Optional[dict]:
+def verify_supabase_token(token: str, secret: Optional[str] = None) -> Optional[dict]:
     """
     验证 Supabase JWT，返回 payload。
 
@@ -26,11 +26,13 @@ def verify_supabase_token(token: str) -> Optional[dict]:
 
     Args:
         token: JWT 字符串（不含 "Bearer " 前缀）
+        secret: HS256 验签密钥。测试时传入固定 secret 可确定性验证；
+                为 None 时回退到 SETTINGS.SUPABASE_JWT_SECRET（生产路径）。
 
     Returns:
         验证成功返回 payload dict，失败返回 None
     """
-    secret = SETTINGS.SUPABASE_JWT_SECRET
+    secret = secret or SETTINGS.SUPABASE_JWT_SECRET
     if not secret:
         logger.error("未配置 SUPABASE_JWT_SECRET，无法验证 JWT")
         return None

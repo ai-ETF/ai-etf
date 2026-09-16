@@ -513,11 +513,23 @@ class OrderResult(BaseModel):
     trade_time: Optional[str] = None
 
 
+class RiskWarning(BaseModel):
+    """交易风险提示（建议性，不拦截交易）"""
+    level: str  # info / warning / alert
+    fund_risk_level: str  # moderate / aggressive / speculative
+    fund_risk_label: str
+    user_risk_level: str  # conservative / moderate / aggressive
+    user_risk_label: str
+    message: str
+    suggested_max_pct: Optional[int] = None  # 仅 warning/alert 携带
+
+
 class OrderResponse(BaseModel):
     """申购/赎回订单响应"""
     success: bool
     message: str
     data: Optional[OrderResult] = None
+    risk_warning: Optional[RiskWarning] = None
 
 
 class PositionItem(BaseModel):
@@ -533,6 +545,7 @@ class PositionItem(BaseModel):
     market_value: Optional[float] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
+    principal: Optional[float] = None  # 货基累计投入本金（元），非货基持仓为 None
     confirm_date: Optional[str] = None
     available_date: Optional[str] = None
     created_at: str
@@ -620,3 +633,88 @@ class DailyReturnItem(BaseModel):
 class DailyReturnResponse(BaseModel):
     """每日收益率响应"""
     items: List[DailyReturnItem]
+
+
+# ==================== 风险画像数据模型（新增） ====================
+
+
+class SubmitAnswerItem(BaseModel):
+    """提交答案单项"""
+    question_id: str  # 题目 ID（如 q1）
+    value: str  # 选项值（如 A、B、C）
+
+
+class SubmitRequest(BaseModel):
+    """提交问卷请求"""
+    questionnaire_id: str  # 问卷 ID
+    answers: List[SubmitAnswerItem]  # 答案列表
+
+
+class QuestionOption(BaseModel):
+    """题目选项（前端可见，不含内部评分）"""
+    text: str  # 选项文字
+    value: str  # 选项值
+
+
+class QuestionItem(BaseModel):
+    """问卷题目（前端可见）"""
+    id: str  # 题目 ID
+    question: str  # 题目文字
+    category: str  # 维度分类
+    options: List[QuestionOption]  # 选项列表
+
+
+class QuestionnaireResponse(BaseModel):
+    """问卷响应"""
+    id: str  # 问卷 ID
+    version: str  # 版本号
+    questions: List[QuestionItem]  # 题目列表
+    total_questions: int  # 题目总数
+
+
+class DimensionScores(BaseModel):
+    """各维度得分"""
+    investment_horizon: Optional[int] = None
+    drawdown_tolerance: Optional[int] = None
+    investment_experience: Optional[int] = None
+    goal_orientation: Optional[int] = None
+    knowledge_level: Optional[int] = None
+
+
+class ProfileResult(BaseModel):
+    """画像结果（前端可见）"""
+    risk_level: str  # conservative / moderate / aggressive
+    risk_label: str  # 保守型 / 稳健型 / 进取型
+    total_score: float  # 加权总分
+    dimension_scores: DimensionScores  # 各维度得分
+    summary: str  # 画像解读文字
+    created_at: Optional[str] = None  # 画像生成时间
+
+
+class SubmitResponse(BaseModel):
+    """提交问卷响应"""
+    success: bool
+    message: str
+    profile: Optional[ProfileResult] = None
+
+
+class ProfileResponse(BaseModel):
+    """查询画像响应"""
+    has_profile: bool
+    profile: Optional[ProfileResult] = None
+
+
+# ==================== 余额理财配置 ====================
+
+class AutoInvestConfigRequest(BaseModel):
+    """余额理财开关配置请求"""
+    enabled: bool  # 是否开启
+    reserve: Optional[float] = 0.0  # 预留金额（元）
+
+
+class AutoInvestConfigResponse(BaseModel):
+    """余额理财开关配置响应"""
+    enabled: bool
+    reserve: float  # 预留金额
+    money_fund_code: str  # 货基代码
+    money_fund_name: str  # 货基名称

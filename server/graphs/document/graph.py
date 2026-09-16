@@ -51,9 +51,9 @@ def get_document_graph():
     return _document_graph
 
 
-def run_document_analysis(content: str, doc_id: str = None) -> Dict[str, Any]:
+async def arun_document_analysis(content: str, doc_id: str = None) -> Dict[str, Any]:
     """
-    运行文档分析图（同步接口）
+    运行文档分析图（异步接口）
 
     替代原有的 DocumentAgent.analyze() 调用。
     返回格式与 DocumentAgent.analyze() 完全一致，确保全链路兼容。
@@ -77,8 +77,8 @@ def run_document_analysis(content: str, doc_id: str = None) -> Dict[str, Any]:
     graph = get_document_graph()
     initial_state = create_document_state(content, doc_id)
 
-    # 使用 invoke（同步），LangGraph 会处理内部的 async 节点
-    result = graph.invoke(initial_state)
+    # 使用 ainvoke（异步），正确驱动 async 节点
+    result = await graph.ainvoke(initial_state)
 
     logger.debug(f"文档分析完成: type={result.get('document_type')}, confidence={result.get('confidence'):.2f}")
 

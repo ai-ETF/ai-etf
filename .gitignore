@@ -156,3 +156,7 @@ local_models/
 # 测试脚本和提示词文件（不上传）
 docs/test_portfolio_jwt.sh
 docs/场内ETF交易规则搜索提示词.md
+
+# Supabase CLI 本地状态（不提交）
+supabase/.temp/
+supabase/.branches/

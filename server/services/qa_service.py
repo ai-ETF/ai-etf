@@ -4,7 +4,8 @@ from server.rag.prompt_builder import build_prompt
 from server.storage.embedding_repo import EmbeddingRepo
 from server.config.settings import SETTINGS
 from server.services.finance_api_service import FinanceApiService
-from server.graphs.qa.graph import run_qa_analysis
+from server.agents.question_agent import QuestionAgent
+from server.agents.output_format_agent import OutputFormatAgent
 import logging
 import re
 
@@ -34,7 +35,9 @@ class QAService:
         self.embedder = Embedder(dim=SETTINGS.EMBED_DIM)
         self.emb_repo = EmbeddingRepo()
         self.retriever = Retriever(self.emb_repo)
-        
+        self.agent = QuestionAgent()
+        self.output_format_agent = OutputFormatAgent()
+
         logger.debug("正在加载 Reranker 重排序模型... (大厂级 RAG 2.0 护城河)")
         try:
             # 引入智源科学院的 BAAI bge-reranker 专门用于中文 RAG 重排
@@ -419,7 +422,7 @@ class QAService:
         logger.debug(f"问题分析完成，结果: {decision}")
 
         # P2: 事实查询走 API（费率/净值/规模），不再让大模型从文档猜
-        if decision["intent"] == "factual_query" or self._is_fee_question(normalized_question):
+        if decision.intent == "factual_query" or self._is_fee_question(normalized_question):
             api_result = self.finance_api.query(normalized_question)
             if api_result:
                 logger.debug(f"API 查询成功: {api_result}")

@@ -5,15 +5,18 @@
 user_id 从 JWT token 中自动读取，不从请求体取，杜绝冒充。
 """
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from server.auth import get_current_user
-from server.llm import get_llm
+from server.auth.deps import extract_and_verify
+from server.llm import astream_text, get_llm
+from server.services.auth_service import delete_account, logout_user, register_user
 from server.storage.chat_repo import get_chat_repo
 from server.storage.supabase_client import get_supabase
 from server.utils.sse import format_sse_event, create_sse_stream_response
@@ -38,6 +41,28 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     user_id: str
     expires_in: int
+
+
+class RegisterRequest(BaseModel):
+    """注册请求"""
+    email: str = Field(..., description="邮箱")
+    password: str = Field(..., description="密码（至少 8 位）")
+
+
+class RegisterResponse(BaseModel):
+    """注册响应（兼容 auto-confirm 与邮箱确认两种模式）"""
+    success: bool
+    needs_email_confirmation: bool
+    access_token: Optional[str] = None
+    token_type: str = "bearer"
+    user_id: Optional[str] = None
+    expires_in: Optional[int] = None
+    message: str
+
+
+class DeleteAccountRequest(BaseModel):
+    """注销账号请求"""
+    password: str = Field(..., description="账号密码（用于复核，防止 token 被盗后随意删号）")
 
 
 class SecureMessageRequest(BaseModel):
@@ -99,6 +124,80 @@ async def login(req: LoginRequest):
     )
 
 
+# ========== 注册端点（不需要 JWT）==========
+
+
+@router.post("/register", response_model=RegisterResponse)
+async def register(req: RegisterRequest):
+    """
+    注册接口 —— 调用 Supabase Auth 注册新用户。
+
+    - 密码至少 8 位；重复邮箱返回 409。
+    - auto-confirm 模式（当前 enable_confirmations=false）：注册即激活，直接返回 JWT 登录态。
+    - 邮箱确认模式：不返回 session，提示用户查收邮件后走登录接口。
+    """
+    result = register_user(email=req.email, password=req.password)
+    session = result.get("session")
+    user = result.get("user")
+
+    if session:
+        # auto-confirm 模式：注册即激活，返回登录态
+        return RegisterResponse(
+            success=True,
+            needs_email_confirmation=False,
+            access_token=session.access_token,
+            user_id=user.id,
+            expires_in=session.expires_in or 3600,
+            message="注册成功，已自动登录",
+        )
+
+    # 邮箱确认模式：需用户查收邮件确认后再登录
+    return RegisterResponse(
+        success=True,
+        needs_email_confirmation=True,
+        message="注册成功，请前往邮箱完成验证后登录",
+    )
+
+
+# ========== 退出登录 / 注销账号（需要 JWT）==========
+
+
+@router.post("/logout")
+async def logout(authorization: str = Header(...)):
+    """
+    退出登录 —— 撤销当前 access token（本地即时失效）与 Supabase refresh token。
+
+    幂等操作：token 已失效或重复登出均返回成功。
+    """
+    token, payload = extract_and_verify(authorization)
+    exp = payload.get("exp") or time.time() + 3600
+    logout_user(token=token, exp=exp)
+    return {"success": True, "message": "退出登录成功"}
+
+
+@router.post("/delete-account")
+async def delete_account_endpoint(
+    req: DeleteAccountRequest,
+    authorization: str = Header(...),
+):
+    """
+    注销账号 —— 不可逆操作：复核密码后，RPC 清理全部业务数据并删除 Supabase 账号。
+
+    需携带 JWT 并提交账号密码。注销成功后当前 token 即失效。
+    """
+    token, payload = extract_and_verify(authorization)
+    user_id = payload.get("sub")
+    email = payload.get("email")
+    if not user_id or not email:
+        raise HTTPException(status_code=401, detail="令牌中未包含用户信息")
+
+    delete_account(user_id=user_id, email=email, password=req.password)
+    # 账号已删除，立即使当前 access token 失效
+    exp = payload.get("exp") or time.time() + 3600
+    logout_user(token=token, exp=exp)
+    return {"success": True, "message": "账号已注销"}
+
+
 # ========== 流式生成器 ==========
 
 
@@ -113,10 +212,9 @@ async def stream_with_save(question: str, chat_id: str, user_id: str):
     full_response = ""
 
     try:
-        async for chunk in llm.astream([HumanMessage(content=question)]):
-            if chunk.content:
-                full_response += chunk.content
-                yield format_sse_event("token", {"content": chunk.content})
+        async for text in astream_text(llm, [HumanMessage(content=question)]):
+            full_response += text
+            yield format_sse_event("token", {"content": text})
 
         # 流式完成，保存 assistant 消息
         assistant_msg = repo.save_message(

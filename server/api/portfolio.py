@@ -27,6 +27,7 @@ from server.models.schemas import (
     RedeemRequest,
     OrderResponse,
     OrderResult,
+    RiskWarning,
     PositionListResponse,
     PositionItem,
     AccountSummaryResponse,
@@ -36,6 +37,8 @@ from server.models.schemas import (
     SnapshotData,
     DailyReturnResponse,
     DailyReturnItem,
+    AutoInvestConfigRequest,
+    AutoInvestConfigResponse,
 )
 from server.services.portfolio_service import PortfolioService
 
@@ -83,6 +86,7 @@ async def apply_purchase(
         success=True,
         message=result["message"],
         data=OrderResult(**result["data"]) if result["data"] else None,
+        risk_warning=RiskWarning(**result["risk_warning"]) if result.get("risk_warning") else None,
     )
 
 
@@ -211,6 +215,30 @@ async def health_check():
     return {"status": "ok", "service": "portfolio"}
 
 
+# ==================== 余额理财开关 ====================
+
+
+@router.get("/auto-invest/config", response_model=AutoInvestConfigResponse)
+async def get_auto_invest_config(current_user: str = Depends(get_current_user)):
+    """查询余额理财开关状态"""
+    from server.services.portfolio_service import PortfolioService, MONEY_FUND_CODE
+    svc = PortfolioService()
+    config = svc.get_auto_invest_config(current_user)
+    return AutoInvestConfigResponse(**config)
+
+
+@router.post("/auto-invest/config", response_model=AutoInvestConfigResponse)
+async def set_auto_invest_config(
+    req: AutoInvestConfigRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """设置余额理财开关和预留金额"""
+    from server.services.portfolio_service import PortfolioService, MONEY_FUND_CODE
+    svc = PortfolioService()
+    config = svc.set_auto_invest_config(current_user, req.enabled, req.reserve or 0.0)
+    return AutoInvestConfigResponse(**config)
+
+
 # ==================== 开发测试端点（免 JWT，用 X-User-Id header） ====================
 
 
@@ -234,6 +262,7 @@ async def test_apply_purchase(
         success=True,
         message=result["message"],
         data=OrderResult(**result["data"]) if result["data"] else None,
+        risk_warning=RiskWarning(**result["risk_warning"]) if result.get("risk_warning") else None,
     )
 
 
