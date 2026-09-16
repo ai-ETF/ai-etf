@@ -93,12 +93,18 @@ def _assert_local_target(url: str) -> None:
 # ---------- 出网守卫 ----------
 
 @pytest.fixture(autouse=True)
-def _block_outbound_network(monkeypatch):
+def _block_outbound_network(request, monkeypatch):
     """禁止测试进程连接非 localhost 地址，白名单本地回环。
 
     在 socket.socket.connect 这一最底层拦截，覆盖 requests/httpx/urllib/akshare
     等所有 HTTP 客户端（它们最终都落到 socket.connect）。
+
+    eval 测试（真实 LLM）需访问 Anthropic API，跳过守卫。
     """
+    if request.node.get_closest_marker("eval"):
+        yield
+        return
+
     allowed_hosts = {"127.0.0.1", "localhost", "::1"}
     real_connect = socket.socket.connect
 
