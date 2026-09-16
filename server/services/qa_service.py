@@ -504,7 +504,7 @@ class QAService:
         candidate_chunks = self._boost_by_doc_type(candidate_chunks, normalized_question)
 
         # 交叉注意力重排序过滤
-        top = self._rerank_and_select(candidate_chunks, retrieval_query, decision["top_k"])
+        top = self._rerank_and_select(candidate_chunks, retrieval_query, decision.top_k)
 
         # 第一道防线：rerank 分数阈值拒识
         rejected = self._check_rejection(top, decision, format_analysis, normalized_question)
