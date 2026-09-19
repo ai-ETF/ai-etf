@@ -602,12 +602,11 @@ class PortfolioService:
             }).eq("user_id", user_id).execute()
 
             # 写委托记录（pending，份额待确认后填入）
-            # price 写提交时净值，确认时若取不到最新净值可回退到它（避免 price=0 除零）
             # 如果写订单失败，回滚冻结资金
             try:
                 self._write_trade_order(
                     user_id, fund_code, fund_name, "buy", amount,
-                    price, Decimal("0"), fee, "pending",
+                    Decimal("0"), Decimal("0"), fee, "pending",
                     confirm_date=actual_confirm.isoformat(),
                 )
             except Exception:
@@ -768,12 +767,6 @@ class PortfolioService:
             # 3. 获取基金名称（传入 rule 避免重复查询）
             fund_name = self._get_fund_name(fund_code, rule=rule)
 
-            # 3a. 获取净值（写进订单，确认时取不到最新净值可回退，避免 price=0 导致赎回金额算成 0）
-            if price is None:
-                price = self._get_nav(fund_code)
-            if price is None or price <= 0:
-                return {"success": False, "message": f"无法获取基金 {fund_code} 的净值", "data": None}
-
             # 场外基金统一走 pending 流程：不立即入账，T+1 确认后由 confirm_pending_orders() 处理
             # 赎回费在确认时按确认日净值和持有天数计算
             redeem_delay = int(_require_rule_field(rule, fund_code, "redeem_settle_delay"))
@@ -785,7 +778,7 @@ class PortfolioService:
 
             self._write_trade_order(
                 user_id, fund_code, fund_name, "sell",
-                Decimal("0"), price,  # 金额确认时按确认日算；净值写提交时，确认时取不到可回退
+                Decimal("0"), Decimal("0"),  # 金额和净值确认时按确认日填入
                 quantity, Decimal("0"), "pending",
                 confirm_date=confirm_date.isoformat(),
             )
@@ -1083,10 +1076,10 @@ class PortfolioService:
                 "updated_at": now,
             }).eq("user_id", user_id).execute()
 
-            # 2. 获取当日净值
+            # 2. 获取当日净值（取不到就拒绝确认，避免除零或信任客户端传入的净值）
             nav = self._get_nav(fund_code)
             if nav is None or nav <= 0:
-                nav = price  # 回退到订单中的价格
+                raise RuntimeError(f"无法获取基金 {fund_code} 的确认日净值，拒绝确认")
 
             # 3. 计算申购费和净金额
             fee_result = self._calc_purchase_fee(fund_code, amount, rule=rule)
@@ -1213,7 +1206,7 @@ class PortfolioService:
             # 2. 计算赎回费（按确认日净值，传入 rule 避免重复查询）
             nav = self._get_nav(fund_code)
             if nav is None or nav <= 0:
-                nav = price
+                raise RuntimeError(f"无法获取基金 {fund_code} 的确认日净值，拒绝确认")
             redeem_amount = (quantity * nav).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             # 2a. 货基特殊：收益已折算成份额（quantity），赎回金额 = 份额×1.0，

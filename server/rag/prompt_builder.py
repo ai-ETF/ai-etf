@@ -1,19 +1,21 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import logging
+
+from server.models.decision import DecisionResult
 
 logger = logging.getLogger(__name__)
 
 
-def build_prompt(question: str, decision: Dict, chunks: List[Dict], format_analysis: Dict = None) -> str:
+def build_prompt(question: str, decision: DecisionResult, chunks: List[Dict], format_analysis: Optional[Dict] = None) -> str:
     """
     根据问题、决策和相关文本块构建完整的提示词
-    
+
     参数:
         question: 用户的问题
-        decision: 决策结果字典（包含意图、输出格式等）
+        decision: 决策结果（DecisionResult dataclass，含 intent/output_format/top_k）
         chunks: 检索到的相关文本块列表
         format_analysis: 输出格式分析结果（可选）
-        
+
     返回:
         构建完成的提示词字符串
     """

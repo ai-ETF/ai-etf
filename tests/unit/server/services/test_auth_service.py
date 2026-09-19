@@ -63,10 +63,14 @@ class FakeAuth:
 
 
 class FakeRpc:
-    def __init__(self, client):
+    def __init__(self, client, name):
         self._c = client
+        self._name = name
 
     def execute(self):
+        err = self._c.rpc_errors.get(self._name)
+        if err:
+            raise err
         if self._c.rpc_error:
             raise self._c.rpc_error
         return object()
@@ -82,6 +86,7 @@ class FakeSupabase:
         self.sign_in_error = None
         self.sign_out_error = None
         self.rpc_error = None
+        self.rpc_errors = {}
         self.delete_user_error = None
         self.signed_out = []
         self.deleted_users = []
@@ -89,7 +94,7 @@ class FakeSupabase:
 
     def rpc(self, name, params):
         self.rpc_calls.append((name, params))
-        return FakeRpc(self)
+        return FakeRpc(self, name)
 
 
 @pytest.fixture
@@ -331,9 +336,20 @@ def test_清理业务数据失败_抛502(monkeypatch, fake_supabase):
     assert e.value.status_code == 502
 
 
-def test_删除账号失败_抛502(monkeypatch, fake_supabase):
+def test_删除账号失败_降级SQL兜底成功(monkeypatch, fake_supabase):
     _patch_supabase(monkeypatch, fake_supabase)
     fake_supabase.delete_user_error = RuntimeError("delete fail")
+    delete_account("user-1", "user@example.com", "password123")  # 不抛异常（SQL 兜底成功）
+    assert fake_supabase.rpc_calls == [
+        ("purge_user_data", {"p_user_id": "user-1"}),
+        ("delete_auth_user", {"p_user_id": "user-1"}),
+    ]
+
+
+def test_删除账号失败_且SQL兜底也失败_抛502(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.delete_user_error = RuntimeError("delete fail")
+    fake_supabase.rpc_errors = {"delete_auth_user": RuntimeError("sql fail")}
     with pytest.raises(HTTPException) as e:
         delete_account("user-1", "user@example.com", "password123")
     assert e.value.status_code == 502
