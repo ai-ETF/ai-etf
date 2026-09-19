@@ -168,7 +168,13 @@ def delete_account(user_id: str, email: str, password: str) -> None:
     try:
         admin.auth.admin.delete_user(user_id)
     except Exception as e:
-        logger.error(f"删除 auth 用户失败: {e}", exc_info=True)
-        raise HTTPException(status_code=502, detail="注销失败，删除账号时出错，请重试")
+        # sign_up 注册的用户 admin.delete_user 会报「User not allowed」，
+        # 降级用 SQL 直删（delete_auth_user RPC，SECURITY DEFINER）兜底
+        logger.warning(f"admin.delete_user 失败（sign_up 用户可能报 User not allowed），降级 SQL 直删: {e}")
+        try:
+            admin.rpc("delete_auth_user", {"p_user_id": user_id}).execute()
+        except Exception as e2:
+            logger.error(f"SQL 直删 auth 用户也失败: {e2}", exc_info=True)
+            raise HTTPException(status_code=502, detail="注销失败，删除账号时出错，请重试")
 
     logger.info(f"账号已注销: user_id={user_id}")
