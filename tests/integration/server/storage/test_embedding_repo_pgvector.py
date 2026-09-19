@@ -77,21 +77,21 @@ def test_match_by_vector_稠密检索命中语义相近chunk(embedding_repo, sup
 
 
 def test_match_by_keywords_稀疏检索命中关键词(embedding_repo, supabase_client, auth_user_id, embedder):
-    # 用英文 content：FTS 用 simple 配置，default parser 对中文完全不切分
-    # （「跟踪沪深300指数」是单个 token，数字也不分离），故用英文验证 FTS 检索本身是通的。
+    # 中文关键词：FTS（simple 配置）不切分中文会返回空，但 match_by_keywords 已修复为
+    # 「FTS 空时降级 ilike 兜底」，故中文关键词也能命中。
     doc_id = _create_doc_with_chunks(
         supabase_client, auth_user_id, embedder,
         [
-            "This fund tracks the CSI 300 index, focusing on large-cap blue-chip stocks",
-            "This fund invests in money market instruments with high liquidity",
+            "本基金主要投资于大盘蓝筹股，跟踪沪深300指数",
+            "本基金投资于货币市场工具，流动性较高",
         ],
     )
 
-    results = embedding_repo.match_by_keywords("CSI 300", top_k=5, doc_id=doc_id)
+    results = embedding_repo.match_by_keywords("沪深300", top_k=5, doc_id=doc_id)
 
     assert len(results) >= 1
-    # 命中含「CSI」关键词的 chunk
-    assert any("CSI" in r.get("content", "") for r in results)
+    # 命中含「沪深300」关键词的 chunk
+    assert any("沪深300" in r.get("content", "") for r in results)
 
 
 def test_retriever_双路融合返回结果(embedding_repo, supabase_client, auth_user_id, embedder):

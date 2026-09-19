@@ -602,11 +602,12 @@ class PortfolioService:
             }).eq("user_id", user_id).execute()
 
             # 写委托记录（pending，份额待确认后填入）
+            # price 写提交时净值，确认时若取不到最新净值可回退到它（避免 price=0 除零）
             # 如果写订单失败，回滚冻结资金
             try:
                 self._write_trade_order(
                     user_id, fund_code, fund_name, "buy", amount,
-                    Decimal("0"), Decimal("0"), fee, "pending",
+                    price, Decimal("0"), fee, "pending",
                     confirm_date=actual_confirm.isoformat(),
                 )
             except Exception:
@@ -767,6 +768,12 @@ class PortfolioService:
             # 3. 获取基金名称（传入 rule 避免重复查询）
             fund_name = self._get_fund_name(fund_code, rule=rule)
 
+            # 3a. 获取净值（写进订单，确认时取不到最新净值可回退，避免 price=0 导致赎回金额算成 0）
+            if price is None:
+                price = self._get_nav(fund_code)
+            if price is None or price <= 0:
+                return {"success": False, "message": f"无法获取基金 {fund_code} 的净值", "data": None}
+
             # 场外基金统一走 pending 流程：不立即入账，T+1 确认后由 confirm_pending_orders() 处理
             # 赎回费在确认时按确认日净值和持有天数计算
             redeem_delay = int(_require_rule_field(rule, fund_code, "redeem_settle_delay"))
@@ -778,7 +785,7 @@ class PortfolioService:
 
             self._write_trade_order(
                 user_id, fund_code, fund_name, "sell",
-                Decimal("0"), Decimal("0"),  # 金额和净值确认时按确认日填入
+                Decimal("0"), price,  # 金额确认时按确认日算；净值写提交时，确认时取不到可回退
                 quantity, Decimal("0"), "pending",
                 confirm_date=confirm_date.isoformat(),
             )
