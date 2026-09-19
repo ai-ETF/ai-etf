@@ -240,7 +240,8 @@ class EmbeddingRepo:
         except Exception as fts_error:
             logger.warning(f"FTS 检索不可用，回退 ilike: {fts_error}")
 
-        if not fts_ok:
+        # FTS 对中文无效（simple 配置不切分中文，返回空但不报错），没命中任何结果时降级 ilike 兜底
+        if not fts_ok or not hit_map:
             for term in dedup_terms[:8]:
                 query = (
                     self.supabase
