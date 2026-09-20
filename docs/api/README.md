@@ -48,9 +48,13 @@ AUTH="Authorization: Bearer $TOKEN"
 | GET | `/` | - | [01](01-基础与认证.md) |
 | GET | `/api/test/hello` | - | [01](01-基础与认证.md) |
 | POST | `/api/secure-chat/login` | - | [01](01-基础与认证.md) |
+| POST | `/api/secure-chat/register` | - | [01](01-基础与认证.md) |
+| POST | `/api/secure-chat/logout` | 🔒 | [01](01-基础与认证.md) |
+| POST | `/api/secure-chat/delete-account` | 🔒 | [01](01-基础与认证.md) |
 | POST | `/api/secure-chat` | 🔒 | [02](02-对话与会话.md) |
 | GET | `/api/secure-chat/chats` | 🔒 | [02](02-对话与会话.md) |
 | GET | `/api/secure-chat/chats/{chat_id}/messages` | 🔒 | [02](02-对话与会话.md) |
+| PUT | `/api/secure-chat/chats/{chat_id}/title` | 🔒 | [02](02-对话与会话.md) |
 | DELETE | `/api/secure-chat/chats/{chat_id}` | 🔒 | [02](02-对话与会话.md) |
 | POST | `/api/watchlist/add` | 🔒 | [04](04-自选股.md) |
 | DELETE | `/api/watchlist/remove` | 🔒 | [04](04-自选股.md) |
