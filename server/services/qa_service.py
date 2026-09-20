@@ -361,6 +361,14 @@ class QAService:
         if not top:
             return self._handle_no_results(decision_dict, format_analysis, question)
 
+        # reranker 降级（None）时无 rerank_score，改用向量相似度兜底，避免恒 0 导致整体误拒识
+        if not getattr(self, "reranker", None):
+            top_score = top[0].get('similarity', 0) if isinstance(top[0], dict) else getattr(top[0], 'similarity', 0)
+            if top_score > 0:
+                return None
+            logger.warning("检索内容不相关（无 reranker，向量相似度为 0）")
+            return self._handle_no_results(decision_dict, format_analysis, question)
+
         top_score = top[0].get('rerank_score', 0) if isinstance(top[0], dict) else getattr(top[0], 'rerank_score', 0)
         if top_score >= self.RERANK_THRESHOLD:
             return None
@@ -504,7 +512,7 @@ class QAService:
         candidate_chunks = self._boost_by_doc_type(candidate_chunks, normalized_question)
 
         # 交叉注意力重排序过滤
-        top = self._rerank_and_select(candidate_chunks, retrieval_query, decision["top_k"])
+        top = self._rerank_and_select(candidate_chunks, retrieval_query, decision.top_k)
 
         # 第一道防线：rerank 分数阈值拒识
         rejected = self._check_rejection(top, decision, format_analysis, normalized_question)

@@ -1,19 +1,21 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import logging
+
+from server.models.decision import DecisionResult
 
 logger = logging.getLogger(__name__)
 
 
-def build_prompt(question: str, decision: Dict, chunks: List[Dict], format_analysis: Dict = None) -> str:
+def build_prompt(question: str, decision: DecisionResult, chunks: List[Dict], format_analysis: Optional[Dict] = None) -> str:
     """
     根据问题、决策和相关文本块构建完整的提示词
-    
+
     参数:
         question: 用户的问题
-        decision: 决策结果字典（包含意图、输出格式等）
+        decision: 决策结果（DecisionResult dataclass，含 intent/output_format/top_k）
         chunks: 检索到的相关文本块列表
         format_analysis: 输出格式分析结果（可选）
-        
+
     返回:
         构建完成的提示词字符串
     """
@@ -27,8 +29,8 @@ def build_prompt(question: str, decision: Dict, chunks: List[Dict], format_analy
     # 添加决策信息部分
     logger.debug("添加决策信息部分")
     lines.append("# Decision:\n")
-    lines.append(f"Intent: {decision.get('intent')}\n")
-    lines.append(f"Output format: {decision.get('output_format')}\n")
+    lines.append(f"Intent: {decision.intent}\n")
+    lines.append(f"Output format: {decision.output_format}\n")
     
     # 如果有格式分析结果，添加格式信息
     if format_analysis:
@@ -74,10 +76,10 @@ def build_prompt(question: str, decision: Dict, chunks: List[Dict], format_analy
     if format_analysis and format_analysis.get('formatting_instructions'):
         logger.debug("使用输出格式智能体的指令")
         lines.append(format_analysis['formatting_instructions'] + "\n")
-    elif decision.get("intent") == "comparison":
+    elif decision.intent == "comparison":
         logger.debug("添加比较类问题指令")
         lines.append("请使用对比表格展示差异，包含关键指标的对比。\n")
-    elif decision.get("intent") == "summary":
+    elif decision.intent == "summary":
         logger.debug("添加摘要类问题指令")
         lines.append("请用要点列表总结关键信息。\n")
     else:

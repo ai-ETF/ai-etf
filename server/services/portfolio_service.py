@@ -1076,10 +1076,10 @@ class PortfolioService:
                 "updated_at": now,
             }).eq("user_id", user_id).execute()
 
-            # 2. 获取当日净值
+            # 2. 获取当日净值（取不到就拒绝确认，避免除零或信任客户端传入的净值）
             nav = self._get_nav(fund_code)
             if nav is None or nav <= 0:
-                nav = price  # 回退到订单中的价格
+                raise RuntimeError(f"无法获取基金 {fund_code} 的确认日净值，拒绝确认")
 
             # 3. 计算申购费和净金额
             fee_result = self._calc_purchase_fee(fund_code, amount, rule=rule)
@@ -1206,7 +1206,7 @@ class PortfolioService:
             # 2. 计算赎回费（按确认日净值，传入 rule 避免重复查询）
             nav = self._get_nav(fund_code)
             if nav is None or nav <= 0:
-                nav = price
+                raise RuntimeError(f"无法获取基金 {fund_code} 的确认日净值，拒绝确认")
             redeem_amount = (quantity * nav).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             # 2a. 货基特殊：收益已折算成份额（quantity），赎回金额 = 份额×1.0，
