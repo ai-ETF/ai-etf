@@ -160,3 +160,10 @@ docs/场内ETF交易规则搜索提示词.md
 # Supabase CLI 本地状态（不提交）
 supabase/.temp/
 supabase/.branches/
+
+# 公众号文章（非项目文档，不提交）
+docs/数据库规范化三范式-公众号文章.md
+
+# e2e-testing skill 的评测工作台（本地实验产物：考题、实验记录，
+# 以及故意埋错的假「前端交付」示例 —— 非项目交付物，不提交）
+.claude/skills/e2e-testing-workspace/
