@@ -167,6 +167,14 @@ jwt_expiry = 3600
 # jwt_issuer = ""
 # Path to JWT signing key. DO NOT commit your signing keys file to git.
 # signing_keys_path = "./signing_keys.json"
+#
+# ⚠️ 【2026-09-24 实测】不要试图用这里把本地栈改成签 HS256 —— **做不到**。
+# CLI 2.114.0 硬校验只接受 RS256/ES256：alg 白名单 $z() 排除 HS256，
+# 密钥类型 d2L() 拒收 oct("unsupported key type: oct")；且 GOTRUE_JWT_KEYS
+# 恒被赋值（`signingKeys ?? [内置默认 EC 密钥]`），没有回退到 GOTRUE_JWT_SECRET
+# 的分支。本地栈因此**只会签 ES256**。
+# 而后端 server/auth/jwt_handler.py:44 只支持 HS256 验签 → 所有带
+# Authorization 的接口一律 401。根因与处置见 docs/e2e/05-执行计划.md 的缺陷登记。
 # If disabled, the refresh token will never expire.
 enable_refresh_token_rotation = true
 # Allows refresh tokens to be reused after expiry, up to the specified interval in seconds.

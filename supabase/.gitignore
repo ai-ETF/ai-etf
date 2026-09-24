@@ -6,3 +6,6 @@
 .env.keys
 .env.local
 .env.*.local
+
+# 本地 JWT 签名密钥文件（由 config.toml 的 signing_keys_path 指向；含私钥，CLI 明令不入库）
+signing_keys.json
