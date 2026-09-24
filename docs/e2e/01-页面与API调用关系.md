@@ -78,7 +78,7 @@
 | 入口 | 说明 |
 |---|---|
 | **`utils/request.ts` 是唯一的鉴权汇聚点** | 除 `login`/`register`/`logout` 三个直调外，**其余 20 个接口全部经过** [utils/request.ts:34](application/src/utils/request.ts#L34)。401 拦截、token 注入、`/api/market/` 放行未登录都在这里 → E2E 的 P4 只需打这一个点 |
-| **`components/common/TabBar.vue` 不是真的 tabBar** | `pages.json` **没有 `tabBar` 段**，四个 Tab 是自定义组件，用 `uni.redirectTo` 跳转（[TabBar.vue:116-133](application/src/components/common/TabBar.vue#L116-L133)）。这带来 2 个后果：① Tab 切换会**销毁当前页栈**；② ⚠️ [settings/index.vue:309](application/src/pages/settings/index.vue#L309) 的「持仓卡片」用的是 **`uni.switchTab`**，而 `pages.json` 无 tabBar → **该入口在微信端会失败**（详见 §六 需确认 #2） |
+| **`components/common/TabBar.vue` 不是真的 tabBar** | `pages.json` **没有 `tabBar` 段**，四个 Tab 是自定义组件，用 `uni.redirectTo` 跳转（[TabBar.vue:116-133](application/src/components/common/TabBar.vue#L116-L133)）。这带来 **3** 个后果：① Tab 切换会**销毁当前页栈**；② ⚠️ [settings/index.vue:309](application/src/pages/settings/index.vue#L309) 的「持仓卡片」用的是 **`uni.switchTab`**，而 `pages.json` 无 tabBar → **该入口在微信端会静默失败**（点不动）；③ ⚠️ TabBar **没有固定在底部**，会跟着页面滚 → **E2E 每次切 Tab 前必须先滚到底**。②③ 均由真机实测确认，详见 §六之二 |
 
 ---
 
@@ -216,11 +216,40 @@ data: {"type":"error","message":"<文本>"}\n\n    ← 异常时
 | # | 事项 | 为什么重要 | 问谁 |
 |---|---|---|---|
 | 1 | **前端在微信开发者工具里打开的到底是哪个目录**（仓库根 `project.config.json` 有 `appid`，但 `dist/` 从未构建、也未见 `miniprogramRoot`） | 决定 automator 的 `projectPath` 与 `cliPath` | 前端同学 |
-| 2 | [settings/index.vue:309](application/src/pages/settings/index.vue#L309) 用 `uni.switchTab` 跳自选页，但 `pages.json` 无 `tabBar` 段 → 静态判断**会失败** | 若成立，「设置 → 持仓卡片」是**坏入口**，E2E 需绕开（改走 TabBar） | 前端同学 / 真机一试即知 |
-| 3 | `.env.development` / `.env.production` 均为 **0 字节**，`API_BASE` 硬编码 `https://ai-etf.xyz` | 决定了「本地环境」选项需要前端改 1 处代码，见 `05-执行计划.md` 阶段 0 | 前端同学 |
+| 2 | ~~[settings/index.vue:309](application/src/pages/settings/index.vue#L309) 用 `uni.switchTab` 跳自选页，但 `pages.json` 无 `tabBar` 段 → 静态判断**会失败**~~ | **✅ 已结案（2026-09-24 真机实测：确实点不动）** → 见 §六之二 | ~~前端同学~~ |
+| 3 | ~~`.env.development` / `.env.production` 均为 **0 字节**，`API_BASE` 硬编码 `https://ai-etf.xyz`~~ | **✅ 已解决（2026-09-21）**：`API_BASE` 已改为读 `import.meta.env.VITE_API_BASE`，两个 `.env` 已填值并推送（`chore/configurable-api-base`）。⚠️ 仍待 Windows 侧实测 | ~~前端同学~~ |
 | 4 | 生产环境 `.env` 是否设了 `ENV=production` | 决定线上能否用 `test/*` 夹具（我**不能读** `.env`，也无法看到线上环境变量） | 后端作者（自己） |
 | 5 | `uni.showModal({editable:true})`（重命名）在 automator 下能否驱动 | P2 的重命名步骤能否自动化，见 `03` §SSE/弹窗 | 需实机验证 |
 | 6 | 后端是否提供 LLM mock/短路开关 | 决定 P2 能否进 CI（否则每次跑都真实调 LLM） | 后端作者（自己）——**当前未发现此类开关** |
+
+---
+
+## 六之二、已确认的前端缺陷（2026-09-24 真机实测 + 代码核对）
+
+> 与 §六 的区别：§六 是「还没确认、**不要当事实用**」；这里两条**已经确认成立**。
+> ⚠️ 只登记、**不修** —— 改前端生产代码要先问前端同学。
+
+### ① 「设置 → 持仓卡片」是坏入口（点了没反应）
+
+- **现象**：真机点「个人中心 → 我的持仓」卡片，没有任何反应，只显示一个金额。
+- **代码**：[settings/index.vue:309](application/src/pages/settings/index.vue#L309) 的 `handleHoldingsClick()` 调
+  `uni.switchTab({ url: '/pages/watchlist/index' })`，但 [pages.json](application/src/pages.json) **没有 `tabBar` 段**。
+- **为什么静默失败**：`uni.switchTab` 只对 `pages.json` 里登记为 tabBar 的页面有效。本项目的四个 Tab 是
+  [TabBar.vue](application/src/components/common/TabBar.vue) 自定义组件 + `uni.redirectTo` 模拟的，不是真 tabBar
+  → 该 API 找不到目标页，失败且**不弹任何提示**（这正是"点了没反应"的原因）。
+- **对 E2E 的影响**：**必须绕开此入口**，改走 TabBar 组件。→ 已按此写进 [02 §二](02-核心路径与分层策略.md) 与 [03](03-E2E用例清单.md)。
+- **待办**：这是**线上缺陷**（不是测试问题）。修不修、谁修、什么时候修，需拍板；E2E 只负责绕开 + 登记。
+
+### ② TabBar 没有固定在底部
+
+- **现象**：真机四个功能框（Tab）**不在屏幕底部固定**，要滑到页面最下面才出现。
+- **代码**：[TabBar.vue](application/src/components/common/TabBar.vue) 的 `.tab-bar` 只声明了 `flex-shrink: 0`，
+  **没有 `position: fixed`、也没有 `bottom: 0`** → 它是普通文档流里的一个块，跟着页面内容一起滚。
+- **对 E2E 的影响**：⭐ **每次切 Tab 之前必须先滚动到底部**，否则找不到 Tab 元素、或点到别的元素。
+  这条会落到 [03 §1.2](03-E2E用例清单.md) 的 `helpers` 里 —— 建议封装成 `gotoTab(page, name)`，
+  **内部先滚动再点击**，不要让每条用例各滚一次。
+- **待办**：同属线上体验缺陷。改法是加 `position: fixed; bottom: 0; left: 0; right: 0;` + 合适的 `z-index`，
+  但会让**所有页面**底部需要留白 → **要不要改需前端同学定**，不要替他们决定。
 
 ---
 
