@@ -401,3 +401,155 @@ def test_组装费率规则_基础信息缺失时上限为空():
     rule = build_fee_rule("110020", 完整jjfl, None, 风险_境内)
     assert rule["max_purchase_amount"] is None
 
+
+
+# ==================== 非空列空值策略（2026-10-03 生产事故回归） ====================
+#
+# fund_fee_rules 的运作费率/申购起点都是 NOT NULL 列。显式写入 None 会覆盖列 DEFAULT
+# 并触发 23502，异常抛穿 run() → 整轮同步中止（生产实测崩于第 50 只，正是首次 flush）。
+
+
+def test_销售服务费率缺失时按A类语义落0():
+    """A 类不收销售服务费（列注释即「A类=0」）—— 落 0.0 是业务事实，不是猜。"""
+    jjfl = dict(完整jjfl, sales_service_fee_rate=None)
+    rule = build_fee_rule("110020", jjfl, {"fund_name": "某某ETF联接A"}, 风险_境内)
+    assert rule is not None
+    assert rule["sales_service_fee_rate"] == 0.0
+
+
+def test_销售服务费率有值时不被兜底覆盖():
+    """C 类有销售服务费，不能被 0.0 抹掉。"""
+    jjfl = dict(完整jjfl, sales_service_fee_rate=0.002)
+    rule = build_fee_rule("001595", jjfl, {"fund_name": "某某ETF联接C"}, 风险_境内)
+    assert rule["sales_service_fee_rate"] == 0.002
+
+
+@pytest.mark.parametrize("字段,说明", [
+    ("management_fee_rate", "管理费率"),
+    ("custody_fee_rate", "托管费率"),
+    ("min_purchase_amount", "申购起点"),
+])
+def test_交易规则字段缺失时跳整只基金(字段, 说明):
+    """这些都是真实交易规则，页面缺失即不可信 —— fail-closed 跳过，不写库。"""
+    jjfl = dict(完整jjfl, **{字段: None})
+    assert build_fee_rule("110020", jjfl, {"fund_name": "某某ETF联接A"}, 风险_境内) is None
+
+
+def test_组装结果不含非空列的None():
+    """回归：任一组装出的行里，fund_fee_rules 的非空列都不得为 None。"""
+    rule = build_fee_rule(
+        "110020", dict(完整jjfl, sales_service_fee_rate=None), None, 风险_境内
+    )
+    for 列 in ("fund_code", "fund_name", "fund_type", "share_class",
+               "management_fee_rate", "custody_fee_rate", "sales_service_fee_rate",
+               "min_purchase_amount", "confirm_delay", "redeem_settle_delay",
+               "commission_rate", "purchase_fee_tiers", "redemption_fee_tiers"):
+        assert rule[列] is not None, f"{列} 为 None 会触发 NOT NULL 约束"
+
+
+# ==================== 写入降级：单只坏数据不拖垮整轮 ====================
+
+class _可失败假表:
+    """execute() 时才抛错，且多行（批）写入整体失败 —— 与 PostgREST 批 upsert 的原子性一致。"""
+
+    def __init__(self, 客户端, 表名):
+        self._c, self._表名, self._待写 = 客户端, 表名, None
+
+    def upsert(self, rows, on_conflict=None):
+        self._待写 = rows
+        return self
+
+    def execute(self):
+        rows = self._待写
+        codes = [r["fund_code"] for r in rows]
+        if len(rows) > 1:
+            raise RuntimeError("整批写入失败（模拟 23502 非空约束）")
+        code = codes[0] if codes else None
+        if code and (code in self._c.坏费率 or
+                     (self._表名 == "fund_risk_profiles" and code in self._c.坏画像)):
+            raise RuntimeError(f"{code} 违反非空约束")
+        self._c.记录.append((self._表名, rows))
+        return self
+
+
+class _可失败假客户端:
+    def __init__(self, 坏费率=(), 坏画像=()):
+        self.记录 = []
+        self.坏费率 = set(坏费率)
+        self.坏画像 = set(坏画像)
+
+    def table(self, name):
+        return _可失败假表(self, name)
+
+
+def _跑同步_可失败(每只结果, 坏费率=(), 坏画像=()):
+    svc = FundCatalogSync()
+    svc._client = _可失败假客户端(坏费率, 坏画像)
+    svc.sync_one = lambda code: 每只结果.get(code)
+    stats = svc.run(codes=list(每只结果), interval=0)
+    return stats, svc._client.记录
+
+
+def test_批量写入失败时降级逐行_坏行计入失败且不中断():
+    每只结果 = {"000001": _假结果("000001"), "000002": _假结果("000002")}
+    stats, 记录 = _跑同步_可失败(每只结果, 坏费率={"000002"})
+
+    assert stats["synced"] == 1
+    assert stats["failed"] == 1
+    assert stats["codes"] == ["000001"]
+    写入的代码 = [r["fund_code"] for _, rows in 记录 for r in rows]
+    assert "000002" not in 写入的代码           # 坏行不落库
+    assert 写入的代码.count("000001") == 2      # 好行两张表都写入
+
+
+def test_费率行失败的基金不写风险画像():
+    """避免出现「有风险画像、无费率规则」的孤儿行。"""
+    每只结果 = {"000001": _假结果("000001"), "000002": _假结果("000002")}
+    _, 记录 = _跑同步_可失败(每只结果, 坏费率={"000002"})
+
+    画像表写入 = [rows for 表名, rows in 记录 if 表名 == "fund_risk_profiles"]
+    assert all(r["fund_code"] != "000002" for rows in 画像表写入 for r in rows)
+
+
+def test_风险画像写入失败不影响该基金计入成功():
+    """费率规则是交易准入的依据，画像只是提示材料 —— 画像失败不该让基金掉出白名单。"""
+    每只结果 = {"000001": _假结果("000001"), "000002": _假结果("000002")}
+    stats, 记录 = _跑同步_可失败(每只结果, 坏画像={"000002"})
+
+    assert stats["synced"] == 2
+    assert stats["failed"] == 0
+    费率表写入 = [r["fund_code"] for 表名, rows in 记录
+                  if 表名 == "fund_fee_rules" for r in rows]
+    assert sorted(费率表写入) == ["000001", "000002"]
+
+
+def test_dry_run只抓取不写库():
+    svc = FundCatalogSync()
+    svc._client = _假客户端()
+    svc.sync_one = lambda code: _假结果(code)
+    stats = svc.run(codes=["000001", "000002"], interval=0, dry_run=True)
+
+    assert svc._client.记录 == []
+    assert stats["synced"] == 2
+
+
+# ==================== 并发锁 ====================
+
+def test_同步锁互斥时抛SyncLockBusy(monkeypatch, tmp_path):
+    from server.services import fund_catalog_sync as mod
+    monkeypatch.setattr(mod, "SYNC_LOCK_PATH", str(tmp_path / "sync.lock"))
+
+    with mod.sync_lock():
+        with pytest.raises(mod.SyncLockBusy):
+            with mod.sync_lock():
+                pass
+
+
+def test_同步锁释放后可再次获取(monkeypatch, tmp_path):
+    from server.services import fund_catalog_sync as mod
+    monkeypatch.setattr(mod, "SYNC_LOCK_PATH", str(tmp_path / "sync.lock"))
+
+    with mod.sync_lock():
+        pass
+    with mod.sync_lock():
+        pass

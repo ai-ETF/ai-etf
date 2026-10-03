@@ -15,13 +15,19 @@
   subscribe_status 判定（portfolio_service.apply_purchase）；只有状态本身抓不到才整只跳过
 - 限大额的「单日累计申购上限」来自 MAXSG 字段并落库，交易时校验
 - 申购或赎回费率分档抓不到/为空的不写入 —— 宁可不支持，也不用默认费率兜底
+- 运作费率/申购起点都是 fund_fee_rules 的 NOT NULL 列：销售服务费率缺失按「A 类=0」的
+  业务事实落 0.0；其余（管理费/托管费/申购起点）缺失即 fail-closed 跳过。**不允许写入裸
+  None** —— 显式 NULL 会覆盖列 DEFAULT 并触发 23502，让整轮同步中止（见 build_fee_rule）
 - 货币基金不适用（净值恒 1.0、无申购起点），由 portfolio_service.MONEY_FUND_CODE 特例维护
 
 T+N 采用「按类别判定」而非逐只抓页面：jjfl 页对所有基金都显示 T+1（QDII 也是），
 不可用；类别规则经现有种子实证 —— 境内 (1,3)、QDII (2,7)、货基 (1,1)。
 """
+import fcntl
 import logging
+import os
 import time
+from contextlib import contextmanager
 from typing import Optional
 
 from server.services.fund_fee_service import LIMITED_SUBSCRIBE_STATUS
@@ -69,6 +75,32 @@ DEFAULT_REQUEST_INTERVAL = 0.3   # 逐只抓取的间隔（秒），避免被数
 UPSERT_BATCH_SIZE = 50           # 每批写库条数
 PROGRESS_LOG_EVERY = 50
 
+# 全量同步互斥锁：CLI 手动入口与 02:17 定时任务共用，防止两轮同步同时写同一批
+# fund_code（各自 upsert，会互相覆盖且无法察觉）。
+SYNC_LOCK_PATH = os.environ.get("FUND_SYNC_LOCK_PATH", "/tmp/fund_catalog_sync.lock")
+
+
+class SyncLockBusy(RuntimeError):
+    """已有同步任务在跑，未取到锁。"""
+
+
+@contextmanager
+def sync_lock():
+    """
+    同步任务互斥锁（非阻塞）。未取到锁时抛 SyncLockBusy，由调用方决定跳过还是报错。
+
+    flock 随文件描述符关闭自动释放 —— 进程崩溃/被杀也不会留下死锁。
+    """
+    fd = os.open(SYNC_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SyncLockBusy(f"已有同步任务在跑（锁文件 {SYNC_LOCK_PATH}）")
+        yield
+    finally:
+        os.close(fd)
+
 
 def is_off_exchange_linked_fund(fund_name: str, fund_type: str = "") -> bool:
     """
@@ -108,6 +140,24 @@ def build_fee_rule(code: str, jjfl: dict, basic: dict, risk: dict) -> Optional[d
         logger.warning(f"{code} 费率分档缺失，跳过（申购={purchase_tiers} 赎回={redemption_tiers}）")
         return None
 
+    # 以下字段在 fund_fee_rules 里都是 NOT NULL 列。**显式写入 None 会覆盖列 DEFAULT 并触发
+    # 23502，异常抛穿 run() → 整轮 20-30 分钟的全量同步中止**（2026-10-03 实测如此）。
+    # 故逐字段定策略，不留裸 None：
+    #   - 销售服务费率缺失 = A 类不收该费（列注释即「A类=0」），按业务事实落 0.0，不是猜
+    #   - 其余是真实交易规则，页面缺失即不可信 → fail-closed 跳过整只（存量行不受影响）
+    sales_service_fee_rate = jjfl.get("sales_service_fee_rate")
+    if sales_service_fee_rate is None:
+        sales_service_fee_rate = 0.0
+
+    for field, label in (
+        ("management_fee_rate", "管理费率"),
+        ("custody_fee_rate", "托管费率"),
+        ("min_purchase_amount", "申购起点"),
+    ):
+        if jjfl.get(field) is None:
+            logger.warning(f"{code} 未取到{label}（{field}），跳过（不写入白名单）")
+            return None
+
     fund_name = (basic or {}).get("fund_name") or code
     confirm_delay, settle_delay = resolve_delays(risk["market"])
 
@@ -117,7 +167,7 @@ def build_fee_rule(code: str, jjfl: dict, basic: dict, risk: dict) -> Optional[d
         "fund_type": "of",
         "management_fee_rate": jjfl.get("management_fee_rate"),
         "custody_fee_rate": jjfl.get("custody_fee_rate"),
-        "sales_service_fee_rate": jjfl.get("sales_service_fee_rate"),
+        "sales_service_fee_rate": sales_service_fee_rate,
         "min_purchase_amount": jjfl.get("min_purchase_amount"),
         # 「限大额」基金的单日累计申购上限；None = 无限额（开放申购基金即此）
         "max_purchase_amount": (basic or {}).get("max_purchase_amount"),
@@ -274,7 +324,7 @@ class FundCatalogSync:
     # ==================== 批量同步 ====================
 
     def run(self, codes: Optional[list] = None, limit: Optional[int] = None,
-            interval: float = DEFAULT_REQUEST_INTERVAL) -> dict:
+            interval: float = DEFAULT_REQUEST_INTERVAL, dry_run: bool = False) -> dict:
         """
         执行一次全量（或指定代码）同步。
 
@@ -282,6 +332,7 @@ class FundCatalogSync:
             codes: 指定基金代码列表；为空则自动发现全部场外 ETF 联接基金
             limit: 最多处理多少只（调试用），None 表示不限
             interval: 逐只抓取间隔（秒）
+            dry_run: 只抓取与组装，不写库（运维试跑用）
 
         返回: 统计 dict（discovered/synced/skipped/failed/needs_review/codes）
         """
@@ -324,7 +375,7 @@ class FundCatalogSync:
                     logger.warning(f"{code} {item['name']} 有维度未命中分类规则，风险分待人工复核")
 
             if len(pending_fee) >= UPSERT_BATCH_SIZE:
-                self._flush(pending_fee, pending_risk)
+                self._commit(pending_fee, pending_risk, stats, dry_run)
                 pending_fee, pending_risk = [], []
 
             if i % PROGRESS_LOG_EVERY == 0:
@@ -334,23 +385,71 @@ class FundCatalogSync:
             if interval:
                 time.sleep(interval)
 
-        self._flush(pending_fee, pending_risk)
+        self._commit(pending_fee, pending_risk, stats, dry_run)
         logger.info(
             f"[同步完成] 发现 {stats['discovered']}，写入 {stats['synced']}，"
             f"跳过 {stats['skipped']}，失败 {stats['failed']}，待复核 {stats['needs_review']}"
         )
         return stats
 
-    def _flush(self, fee_rules: list, risk_profiles: list):
-        """批量 upsert 两张表（fund_code 唯一，覆盖式更新，与 seed.sql 约定一致）"""
-        if not fee_rules:
+    def _commit(self, fee_rules: list, risk_profiles: list, stats: dict, dry_run: bool):
+        """写入一批并回填统计。dry_run 下只丢弃缓冲，不落库。"""
+        if dry_run:
+            logger.info(f"[dry-run] 跳过写入 {len(fee_rules)} 条")
             return
+
+        failed = self._flush(fee_rules, risk_profiles)
+        if not failed:
+            return
+        # 坏行在收集阶段已被计入 synced，这里回退并改计 failed，保证统计与库内真实一致
+        stats["synced"] -= len(failed)
+        stats["failed"] += len(failed)
+        for code in failed:
+            if code in stats["codes"]:
+                stats["codes"].remove(code)
+
+    def _flush(self, fee_rules: list, risk_profiles: list) -> list:
+        """
+        批量 upsert 两张表（fund_code 唯一，覆盖式更新，与 seed.sql 约定一致）。
+
+        整批失败时**降级为逐行写入** —— 单只脏数据（页面改版、字段缺失…）不该让整轮
+        20-30 分钟的全量同步归零（PostgREST 的单次批 upsert 是原子的，失败即整批未写，
+        故逐行重试不会重复写）。写不进去的行由 run() 计入 failed 并记日志。
+
+        返回: 写入失败的 fund_code 列表（全部成功则为空列表）
+        """
+        if not fee_rules:
+            return []
         if not self.client:
             raise RuntimeError("数据库不可用，白名单同步中止")
-        self.client.table("fund_fee_rules").upsert(
-            fee_rules, on_conflict="fund_code"
-        ).execute()
-        self.client.table("fund_risk_profiles").upsert(
-            risk_profiles, on_conflict="fund_code"
-        ).execute()
-        logger.debug(f"写入 {len(fee_rules)} 条费率规则 + 风险画像")
+
+        risk_by_code = {r["fund_code"]: r for r in risk_profiles}
+        try:
+            self._upsert("fund_fee_rules", fee_rules)
+            self._upsert("fund_risk_profiles", risk_profiles)
+            logger.debug(f"写入 {len(fee_rules)} 条费率规则 + 风险画像")
+            return []
+        except Exception as e:
+            logger.error(f"批量写入失败（{e}），降级为逐行写入", exc_info=True)
+
+        failed = []
+        for rule in fee_rules:
+            code = rule["fund_code"]
+            try:
+                self._upsert("fund_fee_rules", [rule])
+            except Exception as e:
+                logger.error(f"{code} 费率规则写入失败，跳过该基金: {e}")
+                failed.append(code)
+                continue
+            # 费率行没写成功的基金不写风险画像，避免出现「有风险画像、无费率规则」的孤儿行
+            profile = risk_by_code.get(code)
+            if profile:
+                try:
+                    self._upsert("fund_risk_profiles", [profile])
+                except Exception as e:
+                    logger.error(f"{code} 风险画像写入失败（费率规则已写入）: {e}")
+        return failed
+
+    def _upsert(self, table: str, rows: list):
+        """按 fund_code 幂等 upsert 一批行。"""
+        self.client.table(table).upsert(rows, on_conflict="fund_code").execute()

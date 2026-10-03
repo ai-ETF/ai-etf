@@ -68,12 +68,20 @@ async def _fund_catalog_sync_job():
     fund_fee_rules + fund_risk_profiles。数千只基金逐只抓取耗时约 20-30 分钟，
     必须放到线程中执行 —— 直接在事件循环里跑 requests + sleep 会阻塞整个服务。
     单只基金失败不影响其余基金（run 内部逐只捕获异常）。
+
+    与手动入口（server/scripts/sync_fund_catalog.py）共用 sync_lock：拿不到锁说明
+    已有同步在跑（多半是运维手工触发），本轮跳过即可，不视为失败。
     """
-    from server.services.fund_catalog_sync import FundCatalogSync
+    from server.services.fund_catalog_sync import FundCatalogSync, SyncLockBusy, sync_lock
 
     logger.info("[基金同步] 开始同步场外 ETF 联接基金白名单...")
-    svc = FundCatalogSync()
-    result = await asyncio.to_thread(svc.run)
+    try:
+        with sync_lock():
+            svc = FundCatalogSync()
+            result = await asyncio.to_thread(svc.run)
+    except SyncLockBusy as e:
+        logger.warning(f"[基金同步] 跳过本轮：{e}")
+        return
     logger.info(f"[基金同步] 完成: {result}")
 
 
