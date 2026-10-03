@@ -22,6 +22,11 @@ from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
+from server.services.fund_fee_service import (
+    LIMITED_SUBSCRIBE_STATUS,
+    PURCHASABLE_SUBSCRIBE_STATUSES,
+)
+
 logger = logging.getLogger(__name__)
 
 INITIAL_CASH = Decimal("100000.00")
@@ -451,19 +456,15 @@ class PortfolioService:
 
     @staticmethod
     def _is_trading_day(d: date) -> bool:
-        """判断是否为 A 股交易日"""
-        try:
-            import akshare as ak
-            df = ak.tool_trade_date_hist_sina()
-            for _, row in df.iterrows():
-                try:
-                    if date.fromisoformat(str(row['trade_date'])) == d:
-                        return True
-                except ValueError:
-                    pass
-            return False
-        except Exception:
-            return d.weekday() < 5
+        """判断是否为 A 股交易日
+
+        委托给 server.services.trading_calendar（全项目唯一日历来源）：
+        日历按北京日期缓存，避免了原先「每次调用都请求一次新浪日历」的问题 ——
+        `_next_trading_day` 是在循环里调它的，一次最多 14 次网络请求，
+        而 `apply_purchase` 又会多次调用 `_next_trading_day`。
+        """
+        from server.services.trading_calendar import is_trading_day
+        return is_trading_day(d)
 
     @staticmethod
     def _is_before_cutoff(dt: datetime) -> bool:
@@ -504,6 +505,30 @@ class PortfolioService:
             return None
         return Decimal(str(fee))
 
+    # ==================== T 日累计申购额度 ====================
+
+    def _sum_t_day_purchase(self, user_id: str, fund_code: str,
+                            confirm_date: date) -> Decimal:
+        """统计该用户对该基金在「同一 T 日」已提交的累计申购金额（元）。
+
+        为什么用 confirm_date 分组而不是存一列 T 日：同一基金下 confirm_delay 是常量，
+        「T 日 → 确认日」是套用 N 次 _next_trading_day()、严格单调，故两笔属于同一 T 日
+        ⟺ 确认日相同 —— 按确认日等值匹配与按 T 日聚合完全等价，无需新增列。
+        （若日后 confirm_delay 变成按日可变，这个双射会失效，届时必须显式存 T 日。）
+
+        只计入 pending / completed：已撤销、已拒的申请不占用额度。
+        查询异常直接上抛（fail-closed）—— 算不出已用额度时宁可拒单，也不能放行。
+        """
+        resp = (self.client.table("trade_orders")
+                .select("amount")
+                .eq("user_id", user_id)
+                .eq("fund_code", fund_code)
+                .eq("direction", "buy")
+                .in_("status", ["pending", "completed"])
+                .eq("confirm_date", confirm_date.isoformat())
+                .execute())
+        return sum((Decimal(str(r["amount"])) for r in (resp.data or [])), Decimal("0"))
+
     # ==================== 申购 ====================
 
     def apply_purchase(self, user_id: str, fund_code: str, amount: Decimal,
@@ -536,22 +561,36 @@ class PortfolioService:
                     "data": None,
                 }
 
+            # 申购状态把关：白名单里的基金不一定都能买 —— 同步会把「暂停申购」
+            # 「封闭期」等状态如实落库（这样它们仍可赎回，且状态可查询），
+            # 能不能买由这里判定。
+            # NULL 是迁移前的存量行（没有状态字段），按开放申购兼容，不拦。
+            subscribe_status = rule.get("subscribe_status")
+            if subscribe_status and subscribe_status not in PURCHASABLE_SUBSCRIBE_STATUSES:
+                return {
+                    "success": False,
+                    "message": f"该基金当前「{subscribe_status}」，暂不接受申购（已持有份额仍可赎回）",
+                    "data": None,
+                }
+
             now_beijing = _beijing_now()
 
-            # 1. 计算确认日（从 rule 中直接读取，不再重复查询）
+            # 1. 计算 T 日（申请被受理的交易日）与确认日（从 rule 中直接读取，不再重复查询）
+            #    注意 t_day 不是自然日：收盘后或非交易日（含法定节假日）下单会顺延，
+            #    假期里每天下的单全部归集到节后第一个交易日，算作同一个 T 日。
             confirm_delay = int(_require_rule_field(rule, fund_code, "confirm_delay"))
             if self._is_trading_day(now_beijing.date()) and self._is_before_cutoff(now_beijing):
-                confirm_date = now_beijing.date()
+                t_day = now_beijing.date()
                 day_label = "当日"
             else:
-                confirm_date = self._next_trading_day(now_beijing.date())
+                t_day = self._next_trading_day(now_beijing.date())
                 day_label = "下一交易日"
 
-            actual_confirm = confirm_date
+            actual_confirm = t_day
             for _ in range(confirm_delay):
                 actual_confirm = self._next_trading_day(actual_confirm)
 
-            # 2. 校验最低申购金额（从 rule 中直接读取）
+            # 2. 校验申购金额上下限（均从 rule 中直接读取）
             min_amount = Decimal(str(_require_rule_field(rule, fund_code, "min_purchase_amount")))
             if amount < min_amount:
                 return {
@@ -559,6 +598,30 @@ class PortfolioService:
                     "message": f"申购金额 {float(amount):.2f} 元低于最低申购金额 {float(min_amount):.2f} 元",
                     "data": None,
                 }
+
+            # 单日累计申购上限（「限大额」基金），NULL = 无限额。
+            # 语义是「同一 T 日累计」，因此必须聚合该 T 日已提交的申购金额 ——
+            # 只校验单笔会让用户拆成多笔小额绕过上限。
+            max_amount = rule.get("max_purchase_amount")
+            if subscribe_status == LIMITED_SUBSCRIBE_STATUS and max_amount is None:
+                # 「限大额」却没有上限值 = 同步时没抓到 MAXSG，限额未知。
+                # 此时 NULL 不能解释成「无限额」—— 那等于把限购当成随便买。
+                logger.error(f"基金 {fund_code} 状态为限大额但缺少单日申购上限，拒绝申购")
+                return {
+                    "success": False,
+                    "message": "该基金限额信息暂不可用（同步未取到单日申购上限），暂不接受申购",
+                    "data": None,
+                }
+            if max_amount is not None:
+                limit = Decimal(str(max_amount))
+                used = self._sum_t_day_purchase(user_id, fund_code, actual_confirm)
+                if used + amount > limit:
+                    return {
+                        "success": False,
+                        "message": f"本交易日已申购 {float(used):.2f} 元，本次申购 {float(amount):.2f} 元，"
+                                   f"合计超过该基金单日累计申购上限 {float(limit):.2f} 元",
+                        "data": None,
+                    }
 
             # 3. 获取净值（必须在冻结资金之前）
             if price is None:
@@ -958,6 +1021,11 @@ class PortfolioService:
 
     # ==================== Pending 订单确认 ====================
 
+    # trade_orders.status 的合法取值，由基线迁移的 CHECK 约束
+    # trade_orders_status_check 定义。写约束外的取值（如 "failed"）会被 PostgREST 拒绝，
+    # 所以确认失败只能落到 "rejected"。
+    TRADE_ORDER_STATUSES = ("pending", "completed", "cancelled", "rejected", "reserved")
+
     def confirm_pending_orders(self, skip_trading_day_check: bool = False) -> dict:
         """
         扫描 trade_orders 中 status='pending' 且 confirm_date 到期的订单，
@@ -1006,37 +1074,103 @@ class PortfolioService:
             logger.info(f"预加载费率规则: {len(fund_codes)} 只基金 → {len(rules_map)} 条")
 
             confirmed = 0
-            failed = 0
+            rejected = 0
             for order in orders:
                 try:
                     rule = rules_map.get(order.get("fund_code"))
                     self._confirm_one_order(order, today, rule=rule)
                     confirmed += 1
                 except Exception as e:
-                    failed += 1
+                    rejected += 1
                     logger.error(f"确认订单失败 {order.get('id')}: {e}", exc_info=True)
-                    try:
-                        self.client.table("trade_orders").update({
-                            "status": "failed",
-                            "reject_reason": str(e)[:200],
-                            "updated_at": _now_iso(),
-                        }).eq("id", order["id"]).execute()
-                    except Exception:
-                        pass
+                    # 先落终态再退款：顺序反过来的话，万一终态写库失败，
+                    # 就会出现「本金已退、订单还是 pending」——下一轮重试会用退回来的钱
+                    # 再建一次仓（凭空多出持仓）。
+                    self._reject_order(order, e)
+                    if order.get("direction") == "buy":
+                        self._refund_rejected_buy(order)
 
-            logger.info(f"Pending 订单确认完成: 成功 {confirmed}, 失败 {failed}")
+            logger.info(f"Pending 订单确认完成: 成功 {confirmed}, 失败 {rejected}")
             return {
                 "status": "ok",
-                "message": f"确认完成: 成功 {confirmed}, 失败 {failed}",
-                "processed": confirmed + failed,
+                "message": f"确认完成: 成功 {confirmed}, 失败 {rejected}",
+                "processed": confirmed + rejected,
             }
 
         except Exception as e:
             logger.error(f"确认 pending 订单失败: {e}", exc_info=True)
             return {"status": "error", "message": str(e), "processed": 0}
 
+    def _reject_order(self, order: dict, error: Exception) -> None:
+        """把确认失败的订单落为 rejected，并记录原因。
+
+        历史 bug：这里原先写 status="failed"，而 trade_orders_status_check 里
+        **没有** failed 这个取值（见 TRADE_ORDER_STATUSES），UPDATE 必然违反约束报错，
+        又被紧随其后的 `except Exception: pass` 吞掉 —— 订单永远停在 pending：
+        每个交易日的确认任务都会重新捞出来再失败一次，且一直占着该 T 日的申购额度。
+        所以这里同时做两件事：改用约束内的 rejected、不再静默吞异常。
+        """
+        try:
+            self.client.table("trade_orders").update({
+                "status": "rejected",
+                "reject_reason": f"确认失败: {error}"[:200],
+                "updated_at": _now_iso(),
+            }).eq("id", order["id"]).execute()
+        except Exception:
+            # 不吞：订单会留在 pending 被反复重试，必须留下可查的痕迹
+            logger.exception(f"标记订单 {order.get('id')} 为 rejected 失败，该订单仍为 pending")
+
+    def _refund_rejected_buy(self, order: dict) -> None:
+        """买单确认失败被拒后，把本金退回可用现金。
+
+        下单时已经 `cash -= amount` / `frozen_cash += amount`（见 apply_purchase），
+        而订单被置为 rejected 后不会再重试。若只解冻不退回，这笔钱就既不在现金、
+        也不在冻结、更没有持仓 —— 会凭空消失。
+
+        **只加现金，不再动 `frozen_cash`**：确认流程的第一步就是解冻
+        （`_confirm_one_order` 里解冻排在所有写操作之前），能走到这里说明这笔钱
+        已经被解冻划走了。再减一次冻结余额就会扣到同一账户里**其他 pending 订单**
+        的冻结资金上（一个账户的 frozen_cash 是所有挂单共用的一笔汇总）。
+        """
+        user_id = order["user_id"]
+        amount = Decimal(str(order["amount"]))
+        try:
+            result = (
+                self.client.table("accounts")
+                .select("*")
+                .eq("user_id", user_id)
+                .execute()
+            )
+            if not result.data:
+                logger.error(f"退回本金失败：账户不存在 user={user_id}, order={order.get('id')}")
+                return
+            account = result.data[0]
+            cash = Decimal(str(account["cash"]))
+            self.client.table("accounts").update({
+                "cash": float(cash + amount),
+                "updated_at": _now_iso(),
+            }).eq("user_id", user_id).execute()
+            logger.warning(
+                f"买单确认被拒，本金 {amount} 元已退回可用现金: "
+                f"order={order.get('id')}, user={user_id}"
+            )
+        except Exception:
+            logger.exception(
+                f"退回本金失败，需人工处理: order={order.get('id')}, "
+                f"user={user_id}, amount={amount}"
+            )
+
     def _confirm_one_order(self, order: dict, today: date, rule: Optional[dict] = None) -> None:
-        """确认单笔 pending 订单。rule 可预加载传入避免重复查询。"""
+        """确认单笔 pending 订单。rule 可预加载传入避免重复查询。
+
+        异常处理约定：本方法抛异常 = 这笔确认失败，由 confirm_pending_orders() 把订单
+        落为 rejected，并对买单执行 `_refund_rejected_buy()` 退回本金。
+
+        已知局限（非事务）：确认过程由多次独立的 PostgREST 写操作组成，跨表事务无法在此实现。
+        若失败发生在「持仓已写入」之后、「流水/订单更新」之前，退款会与已建仓位同时存在
+        （用户占便宜）。这里按「宁可退回本金，也不让本金消失」取舍；根治需把整段确认
+        放进一个数据库函数（RPC）里以事务方式执行。
+        """
         order_id = order["id"]
         user_id = order["user_id"]
         fund_code = order["fund_code"]
@@ -1055,7 +1189,9 @@ class PortfolioService:
 
         if direction == "buy":
             # --- 申购确认 ---
-            # 1. 先解冻资金（放在最前面，异常时资金已释放不会被锁死）
+            # 1. 先解冻资金（放在最前面，异常时资金已释放不会被锁死）。
+            #    若本方法随后抛异常，订单会被置为 rejected 且不再重试 ——
+            #    本金由 confirm_pending_orders() 调 _refund_rejected_buy() 退回可用现金。
             account_result = (
                 self.client.table("accounts")
                 .select("*")
@@ -1189,6 +1325,10 @@ class PortfolioService:
 
         elif direction == "sell":
             # --- 赎回确认 ---
+            # 失败点在动份额之前（无持仓 / 取不到净值 / 缺赎回费率规则）时，订单落 rejected 即可。
+            # 这里没有买单那样的退款补偿：卖单的份额在确认时才被扣，而买单的本金在下单时
+            # 就已从现金划走，不退就会凭空消失。若失败发生在「已扣份额」之后，份额需要人工处理
+            # （窗口内只剩写库失败，属于下面 docstring 说的非事务局限）。
             # 1. 获取持仓
             pos_result = (
                 self.client.table("positions")
@@ -1237,7 +1377,7 @@ class PortfolioService:
             actual_fee = self._calc_redemption_fee(fund_code, redeem_amount, max(hold_days, 0), rule=rule)
             if actual_fee is None:
                 # 费率规则缺失时拒绝确认，不允许按免手续费放行
-                # （异常由 confirm_pending_orders 捕获并把订单标记为 failed）
+                # （异常由 confirm_pending_orders 捕获并把订单标记为 rejected）
                 raise RuntimeError(f"基金 {fund_code} 缺少赎回费率规则，无法确认赎回")
             # 货基收益已含在份额里（quantity 已折算），无需再加 income_portion
             net_amount = redeem_amount - actual_fee

@@ -10,9 +10,33 @@
 """
 import json
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# 场外基金列表接口的字段集（不含两个费率分档 JSON，避免列表响应过大；
+# 分档明细走 get_fee_rule / 详情接口）
+FUND_SUMMARY_FIELDS = (
+    "fund_code, fund_name, fund_type, share_class, min_purchase_amount, "
+    "max_purchase_amount, subscribe_status, confirm_delay, redeem_settle_delay, "
+    "management_fee_rate, custody_fee_rate, sales_service_fee_rate"
+)
+
+MAX_PAGE_SIZE = 100
+
+# ==================== 申购状态（fund_fee_rules.subscribe_status）====================
+# 取值来自天天基金 jjfl 页「交易状态」小节的「申购状态」行
+# （server/services/fund_fee_source.py 的 fetch_jjfl 解析；移动端接口的 SGZT 未被采用）。
+# 定义放在这里：同步侧（fund_catalog_sync）与交易侧（portfolio_service）都要用，
+# 而本模块是两者共同依赖的「费率规则语义」模块。
+OPEN_SUBSCRIBE_STATUS = "开放申购"
+LIMITED_SUBSCRIBE_STATUS = "限大额"
+
+# 只有这两种状态接受申购；其余（暂停申购/封闭期/认购期/…）只允许赎回。
+# 注意 subscribe_status 为 NULL 的是迁移前的存量行，按开放申购兼容处理 ——
+# 所以这里判断的是「非空且不在集合内」，而不是「不在集合内」。
+PURCHASABLE_SUBSCRIBE_STATUSES = (OPEN_SUBSCRIBE_STATUS, LIMITED_SUBSCRIBE_STATUS)
 
 
 class FundFeeService:
@@ -104,6 +128,103 @@ class FundFeeService:
         except Exception as e:
             logger.error(f"批量查询费率规则失败: {e}")
             return {}
+
+    # ==================== 白名单列表查询（可交易基金目录） ====================
+
+    def list_supported_funds(self, keyword: Optional[str] = None,
+                             page: int = 1, page_size: int = 20) -> dict:
+        """
+        分页查询白名单内可交易的场外基金（fund_type='of'），供前端选基金。
+
+        参数:
+            keyword: 关键词，匹配基金代码或名称（模糊，不区分大小写）；为空则返回全部
+            page: 页码，从 1 开始
+            page_size: 每页条数（上限 MAX_PAGE_SIZE）
+
+        返回:
+            {"total": int, "items": [fee_rule dict + 风险字段]}
+        """
+        if not self.client:
+            logger.error("数据库不可用")
+            return {"total": 0, "items": []}
+
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), MAX_PAGE_SIZE))
+        start = (page - 1) * page_size
+
+        try:
+            query = (
+                self.client.table("fund_fee_rules")
+                .select(FUND_SUMMARY_FIELDS, count="exact")
+                .eq("fund_type", "of")
+            )
+            kw = self._sanitize_keyword(keyword)
+            if kw:
+                # PostgREST 的 or_ 过滤：代码或名称模糊匹配
+                query = query.or_(f"fund_code.ilike.%{kw}%,fund_name.ilike.%{kw}%")
+            query = query.order("fund_code").range(start, start + page_size - 1)
+
+            result = query.execute()
+            items = result.data or []
+            total = result.count if result.count is not None else len(items)
+            self._attach_risk(items)
+            logger.debug(f"基金目录查询: keyword={keyword!r} page={page} → {len(items)}/{total}")
+            return {"total": total, "items": items}
+        except Exception as e:
+            logger.error(f"查询基金目录失败: {e}")
+            return {"total": 0, "items": []}
+
+    def get_fund_detail(self, fund_code: str) -> Optional[dict]:
+        """
+        查询单只基金的完整交易规则（含费率分档 + 风险画像）。
+
+        返回: fee_rule dict（附加风险字段），查不到返回 None
+        """
+        rule = self.get_fee_rule(fund_code)
+        if rule is None:
+            return None
+        self._attach_risk([rule])
+        return rule
+
+    @staticmethod
+    def _sanitize_keyword(keyword: Optional[str]) -> str:
+        """
+        清理搜索关键词。
+
+        PostgREST 的 or_ 过滤器用逗号/括号分隔表达式，关键词里若含这些字符
+        会破坏过滤语法，故统一剔除，只保留字母数字与中文。
+        """
+        if not keyword:
+            return ""
+        return re.sub(r"[^\w一-鿿]", "", str(keyword).strip())
+
+    def _attach_risk(self, items: list):
+        """给基金行批量附加风险画像字段。查不到的基金不加字段（不臆造风险等级）。"""
+        codes = [i["fund_code"] for i in items if i.get("fund_code")]
+        if not codes:
+            return
+        try:
+            result = (
+                self.client.table("fund_risk_profiles")
+                .select("fund_code, breadth_score, volatility_score, market_score, "
+                        "board_score, risk_level, risk_label")
+                .in_("fund_code", codes)
+                .execute()
+            )
+        except Exception as e:
+            logger.error(f"批量查询风险画像失败: {e}")
+            return
+        risk_by_code = {r["fund_code"]: r for r in (result.data or [])}
+        for item in items:
+            risk = risk_by_code.get(item.get("fund_code"))
+            if not risk:
+                continue
+            item["breadth_score"] = risk.get("breadth_score")
+            item["volatility_score"] = risk.get("volatility_score")
+            item["market_score"] = risk.get("market_score")
+            item["board_score"] = risk.get("board_score")
+            item["risk_level"] = risk.get("risk_level")
+            item["risk_label"] = risk.get("risk_label")
 
     # ==================== 申购费（外扣法，金额分档） ====================
 

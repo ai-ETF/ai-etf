@@ -129,6 +129,40 @@ def test_赎回_持仓清空现金入账(trade_service, supabase_client, user_id
     assert Decimal(str(acct["cash"])) > cash_before
 
 
+def test_确认失败_订单落rejected且本金退回(trade_service, supabase_client, user_id, monkeypatch):
+    """净值取不到 → 确认失败：订单落 rejected、本金退回可用现金。
+
+    端到端回归「status 写库被 CHECK 约束拒绝、异常又被吞掉」那个 bug：
+    单测替身只能镜像约束，真正拒绝非法写入的是数据库本身，所以必须在这里验一次。
+    """
+    with _travel(SUBMIT_DAY):
+        trade_service.apply_purchase(user_id, "110020", Decimal("1000"), price=Decimal("1.5"))
+
+    acct = supabase_client.table("accounts").select("*").eq("user_id", user_id).execute().data[0]
+    cash_after_order = Decimal(str(acct["cash"]))          # 100000 - 1000
+    assert Decimal(str(acct["frozen_cash"])) == Decimal("1000")
+
+    # 确认时取不到净值 → 拒绝确认
+    monkeypatch.setattr(trade_service, "_get_nav", lambda fund_code: None)
+    with _travel(CONFIRM_DAY):
+        r = trade_service.confirm_pending_orders(skip_trading_day_check=True)
+    assert r["processed"] == 1
+
+    # 订单落终态：rejected 是 CHECK 约束内的取值，数据库会真的接受它
+    orders = supabase_client.table("trade_orders").select("*").eq("user_id", user_id).execute().data
+    assert orders[0]["status"] == "rejected"
+    assert "确认失败" in (orders[0]["reject_reason"] or "")
+
+    # 本金退回：现金复原、冻结归零
+    acct = supabase_client.table("accounts").select("*").eq("user_id", user_id).execute().data[0]
+    assert Decimal(str(acct["cash"])) == cash_after_order + Decimal("1000")
+    assert Decimal(str(acct["frozen_cash"])) == Decimal("0")
+
+    # 未建仓
+    positions = supabase_client.table("positions").select("*").eq("user_id", user_id).execute().data
+    assert positions == []
+
+
 def test_查不到规则_拒绝交易(trade_service, user_id):
     with _travel(SUBMIT_DAY):
         r = trade_service.apply_purchase(user_id, "999999", Decimal("1000"), price=Decimal("1.0"))
