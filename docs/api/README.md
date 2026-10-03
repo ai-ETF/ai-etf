@@ -88,6 +88,8 @@ AUTH="Authorization: Bearer $TOKEN"
 | GET | `/api/portfolio/daily-returns` | 🔒 | [05](05-组合交易.md) |
 | GET | `/api/portfolio/auto-invest/config` | 🔒 | [05](05-组合交易.md) |
 | POST | `/api/portfolio/auto-invest/config` | 🔒 | [05](05-组合交易.md) |
+| GET | `/api/portfolio/funds` | 🔒 | [05](05-组合交易.md) |
+| GET | `/api/portfolio/funds/{fund_code}` | 🔒 | [05](05-组合交易.md) |
 | GET | `/api/portfolio/health` | - | [05](05-组合交易.md) |
 | POST | `/api/portfolio/test/apply-purchase` | `X-User-Id` | [05](05-组合交易.md) |
 | POST | `/api/portfolio/test/apply-redeem` | `X-User-Id` | [05](05-组合交易.md) |

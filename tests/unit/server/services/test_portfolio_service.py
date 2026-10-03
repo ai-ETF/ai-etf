@@ -307,6 +307,19 @@ class FakeResult:
         self.count = count
 
 
+class _CheckViolation(Exception):
+    """模拟 PostgREST 因违反 CHECK 约束返回的 400（真实环境为 HTTP 400，不写入）。"""
+
+
+# 镜像基线迁移里的 CHECK 约束 —— 否则单测替身什么状态都收，「写了一个数据库不认的
+# 状态值」这类 bug（曾真实存在：status="failed"）在单测里永远不会暴露。
+_CHECK_CONSTRAINTS = {
+    "trade_orders": {
+        "status": ("pending", "completed", "cancelled", "rejected", "reserved"),
+    },
+}
+
+
 class FakeQuery:
     """模拟 supabase 链式调用：table().select/insert/update/delete().eq/lte().order().limit().range().execute()。"""
 
@@ -351,6 +364,10 @@ class FakeQuery:
         self._filters.append(("lte", col, val))
         return self
 
+    def in_(self, col, vals):
+        self._filters.append(("in", col, list(vals)))
+        return self
+
     def order(self, *_args, **_kwargs):
         return self
 
@@ -365,6 +382,10 @@ class FakeQuery:
     def execute(self):
         if self._c.error is not None:
             raise self._c.error
+        if self._op == "insert":
+            self._check(self._insert_data)
+        elif self._op == "update":
+            self._check(self._update_data)
         rows = self._c.rows.setdefault(self._table, [])
 
         if self._op == "insert":
@@ -404,7 +425,18 @@ class FakeQuery:
                 return False
             if op == "lte" and (rv is None or rv > val):
                 return False
+            if op == "in" and rv not in val:
+                return False
         return True
+
+    def _check(self, data):
+        """按 _CHECK_CONSTRAINTS 校验待写入的取值，违反即抛错（模拟数据库拒绝写入）。"""
+        for col, allowed in _CHECK_CONSTRAINTS.get(self._table, {}).items():
+            value = (data or {}).get(col)
+            if value is not None and value not in allowed:
+                raise _CheckViolation(
+                    f'{self._table}.{col} 违反 CHECK 约束: {value!r} 不在 {allowed} 中'
+                )
 
 
 class FakeClient:
@@ -911,6 +943,182 @@ def test_申购_携带风险提示(monkeypatch):
     assert result["risk_warning"] == {"level": "info"}
 
 
+# ==================== apply_purchase：单日累计申购上限（限大额基金） ====================
+
+
+def _限大额服务(monkeypatch, 既有订单=None, 账户现金=100000.0):
+    """构造带上限规则的 PortfolioService + 内存客户端，既有订单进 trade_orders。
+
+    时间被 _patch_purchase_common 冻结在 2026-01-05 10:00（交易日盘中），
+    confirm_delay=1 ⇒ T 日 = 2026-01-05，本次订单确认日 = 2026-01-06。
+    """
+    rule = dict(RULE, max_purchase_amount=1000.0)
+    account = {"id": "a1", "user_id": "u1", "cash": 账户现金, "frozen_cash": 0}
+    _patch_purchase_common(monkeypatch, rule, account)
+    svc = PortfolioService()
+    svc._client = FakeClient({
+        "accounts": [dict(account)],
+        "trade_orders": list(既有订单 or []),
+    })
+    return svc
+
+
+def _已有订单(金额, status="pending", confirm_date="2026-01-06",
+              fund_code="012348", direction="buy", user_id="u1"):
+    """构造一条 trade_orders 行（字段名与 Supabase 返回一致）。"""
+    return {
+        "id": f"o-{fund_code}-{金额}-{status}-{confirm_date}",
+        "user_id": user_id, "fund_code": fund_code, "direction": direction,
+        "status": status, "amount": 金额, "confirm_date": confirm_date,
+    }
+
+
+# ---------- 单笔维度 ----------
+
+
+def test_申购_单笔即超上限被拒(monkeypatch):
+    """「限大额」基金（如 012348 天弘恒生科技ETF联接A 限购 1000 元）下 5000 元单应被拒。
+
+    该拦截发生在取净值/冻结资金之前 —— 被拒的单不产生任何副作用。
+    """
+    svc = _限大额服务(monkeypatch)
+    result = svc.apply_purchase("u1", "012348", Decimal("5000"))
+    assert result["success"] is False
+    assert "超过该基金单日累计申购上限" in result["message"]
+
+
+def test_申购_恰好等于上限时放行(monkeypatch):
+    """边界：规则是「累计不超过」，金额 == 上限应放行（与最低金额的 < 语义相反）。"""
+    svc = _限大额服务(monkeypatch)
+    assert svc.apply_purchase("u1", "012348", Decimal("1000"))["success"] is True
+
+
+def test_申购_未超上限可成交(monkeypatch):
+    svc = _限大额服务(monkeypatch)
+    assert svc.apply_purchase("u1", "012348", Decimal("500"))["success"] is True
+
+
+def test_申购_上限为空表示无限额(monkeypatch):
+    """开放申购基金该字段为 NULL，不应触发任何上限拦截（且无需查历史订单）。"""
+    account = {"id": "a1", "user_id": "u1", "cash": 10000000.0, "frozen_cash": 0}
+    _patch_purchase_common(monkeypatch, dict(RULE, max_purchase_amount=None), account)
+    svc = PortfolioService()
+    svc._client = FakeClient({"accounts": [dict(account)]})
+    assert svc.apply_purchase("u1", "110020", Decimal("1000000"))["success"] is True
+
+
+# ---------- 「同一 T 日累计」维度（堵拆单绕过） ----------
+
+
+def test_申购_同一交易日多笔累计超上限被拒(monkeypatch):
+    """核心：已申购 600，再下 500 —— 单笔都没超 1000，合计 1100 必须被拒。"""
+    svc = _限大额服务(monkeypatch, 既有订单=[_已有订单(600.0)])
+
+    result = svc.apply_purchase("u1", "012348", Decimal("500"))
+
+    assert result["success"] is False
+    assert "本交易日已申购 600.00 元" in result["message"]
+    assert "超过该基金单日累计申购上限" in result["message"]
+
+
+def test_申购_同一交易日累计刚好用满放行(monkeypatch):
+    """边界：已用 600 + 本次 400 == 1000，闭区间放行。"""
+    svc = _限大额服务(monkeypatch, 既有订单=[_已有订单(600.0)])
+    assert svc.apply_purchase("u1", "012348", Decimal("400"))["success"] is True
+
+
+def test_申购_已完成的订单也计入累计(monkeypatch):
+    """completed 是已受理的申请，必须占用额度。"""
+    svc = _限大额服务(monkeypatch, 既有订单=[_已有订单(600.0, status="completed")])
+    assert svc.apply_purchase("u1", "012348", Decimal("500"))["success"] is False
+
+
+def test_申购_已撤销与已拒订单不占用额度(monkeypatch):
+    """撤销/被拒的申请不占用额度，不应把用户额度锁死。"""
+    svc = _限大额服务(monkeypatch, 既有订单=[
+        _已有订单(900.0, status="cancelled"),
+        _已有订单(900.0, status="rejected"),
+    ])
+    assert svc.apply_purchase("u1", "012348", Decimal("1000"))["success"] is True
+
+
+def test_申购_跨交易日的订单不计入(monkeypatch):
+    """按 T 日分组，不按自然日：确认日不同的订单属于不同 T 日，不累计。
+
+    这正是节假日场景的保护 —— 若按 created_at 自然日分组，长假多笔会被拆散。
+    """
+    svc = _限大额服务(monkeypatch, 既有订单=[_已有订单(900.0, confirm_date="2026-01-07")])
+    assert svc.apply_purchase("u1", "012348", Decimal("900"))["success"] is True
+
+
+def test_申购_其他基金与其他用户的订单不计入(monkeypatch):
+    """额度按「用户 + 基金 + T 日」三者限定。"""
+    svc = _限大额服务(monkeypatch, 既有订单=[
+        _已有订单(900.0, fund_code="110020"),
+        _已有订单(900.0, user_id="u2"),
+        _已有订单(900.0, direction="sell"),
+    ])
+    assert svc.apply_purchase("u1", "012348", Decimal("1000"))["success"] is True
+
+
+# ==================== apply_purchase：申购状态闸门 ====================
+
+
+def _状态服务(monkeypatch, **状态字段):
+    """RULE + 指定状态字段的 PortfolioService（内存客户端，含足额账户）。"""
+    account = {"id": "a1", "user_id": "u1", "cash": 100000.0, "frozen_cash": 0}
+    _patch_purchase_common(monkeypatch, dict(RULE, **状态字段), account)
+    svc = PortfolioService()
+    svc._client = FakeClient({"accounts": [dict(account)]})
+    return svc
+
+
+@pytest.mark.parametrize("状态", ["暂停申购", "封闭期", "认购期"])
+def test_申购_不可申购状态被拒(monkeypatch, 状态):
+    """白名单里有它 ≠ 能买：同步会把真实状态落库，由这里把关。
+
+    提示语要说明「仍可赎回」—— 否则持有者会以为连卖都卖不掉。
+    """
+    result = _状态服务(monkeypatch, subscribe_status=状态).apply_purchase(
+        "u1", "110020", Decimal("1000"))
+
+    assert result["success"] is False
+    assert 状态 in result["message"]
+    assert "仍可赎回" in result["message"]
+
+
+@pytest.mark.parametrize("状态", ["开放申购", "限大额"])
+def test_申购_可申购状态放行(monkeypatch, 状态):
+    svc = _状态服务(monkeypatch, subscribe_status=状态, max_purchase_amount=100000.0)
+    assert svc.apply_purchase("u1", "110020", Decimal("1000"))["success"] is True
+
+
+def test_申购_存量行状态为空按开放申购放行(monkeypatch):
+    """迁移前的存量行没有状态字段（NULL），必须继续可买，不能被新闸门误伤。"""
+    svc = _状态服务(monkeypatch, subscribe_status=None)
+    assert svc.apply_purchase("u1", "110020", Decimal("1000"))["success"] is True
+
+
+def test_申购_限大额但上限为空被拒(monkeypatch):
+    """同步时 MAXSG 解析失败：状态说限大额、上限却是 NULL。
+
+    NULL 不能按「无限额」解释 —— 那等于把一只限购基金当成随便买，
+    宁可提示限额信息不可用（需人工干预，见同步日志与库内查询）。
+    """
+    result = _状态服务(monkeypatch, subscribe_status="限大额",
+                       max_purchase_amount=None).apply_purchase(
+        "u1", "110020", Decimal("1000"))
+
+    assert result["success"] is False
+    assert "限额信息暂不可用" in result["message"]
+
+
+def test_申购_状态闸门先于限额校验(monkeypatch):
+    """暂停申购的基金即使带上限值也直接拒，不该走到累计额度查询。"""
+    svc = _状态服务(monkeypatch, subscribe_status="暂停申购", max_purchase_amount=1000.0)
+    assert svc.apply_purchase("u1", "110020", Decimal("1000"))["success"] is False
+
+
 # ==================== apply_redeem：赎回 ====================
 
 
@@ -971,6 +1179,16 @@ def test_赎回_正常_写卖出订单(monkeypatch):
     assert result["data"]["status"] == "pending"
     assert len(svc._client.rows["trade_orders"]) == 1
     assert svc._client.rows["trade_orders"][0]["direction"] == "sell"
+
+
+@pytest.mark.parametrize("状态", ["暂停申购", "封闭期"])
+def test_赎回_不可申购状态仍可赎回(monkeypatch, 状态):
+    """申购状态只管「买」：已持有的份额必须能退出，否则钱被锁死。"""
+    position = {"id": "p1", "user_id": "u1", "fund_code": "110020", "quantity": 200, "cost_price": 1.5}
+    _patch_redeem_common(monkeypatch, dict(RULE, subscribe_status=状态), position)
+    svc = PortfolioService()
+    svc._client = FakeClient()
+    assert svc.apply_redeem("u1", "110020", Decimal("100"))["success"] is True
 
 
 # ==================== _confirm_one_order：单笔订单确认 ====================
@@ -1082,19 +1300,147 @@ def test_确认批量_全部确认成功(monkeypatch):
     assert sorted(confirmed) == ["o1", "o2"]
 
 
-def test_确认批量_失败订单标记failed(monkeypatch):
+def test_确认批量_失败订单标记为rejected并记录原因(monkeypatch):
+    """确认失败必须落到 CHECK 约束内的取值，否则 UPDATE 会被数据库拒绝。"""
     monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
     monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
 
-    def _boom(order, today, rule=None):
+    def _boom(self, order, today, rule=None):
         raise RuntimeError("confirm fail")
 
     monkeypatch.setattr(PortfolioService, "_confirm_one_order", _boom)
     monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
     svc = PortfolioService()
     svc._client = FakeClient({"trade_orders": [
-        {"id": "o1", "user_id": "u1", "fund_code": "110020", "status": "pending", "confirm_date": "2026-01-05"},
+        {"id": "o1", "user_id": "u1", "fund_code": "110020", "direction": "sell",
+         "status": "pending", "confirm_date": "2026-01-05"},
     ]})
     result = svc.confirm_pending_orders()
     assert result["processed"] == 1
-    assert svc._client.rows["trade_orders"][0]["status"] == "failed"
+    order = svc._client.rows["trade_orders"][0]
+    assert order["status"] == "rejected"
+    assert "confirm fail" in order["reject_reason"]
+
+
+def test_确认批量_状态取值必须落在CHECK约束内():
+    """守卫：非法状态（如历史上的 "failed"）会被替身拒绝 —— 见 _CHECK_CONSTRAINTS。
+
+    替身里的取值列表是手写的、镜像基线迁移 `trade_orders_status_check`，
+    这里再和服务里的 `TRADE_ORDER_STATUSES` 对一次，防止两处声明各自漂移。
+    """
+    assert (set(_CHECK_CONSTRAINTS["trade_orders"]["status"])
+            == set(PortfolioService.TRADE_ORDER_STATUSES))
+
+    svc = PortfolioService()
+    svc._client = FakeClient({"trade_orders": []})
+    with pytest.raises(_CheckViolation):
+        svc.client.table("trade_orders").update({"status": "failed"}).eq("id", "o1").execute()
+    # 约束内的取值正常通过
+    svc.client.table("trade_orders").update({"status": "rejected"}).eq("id", "o1").execute()
+
+
+def test_确认批量_落终态写库失败不静默吞掉(caplog):
+    """标记 rejected 的写库本身失败时，必须留下 ERROR 日志而不是 pass 掉。
+
+    这正是这个 bug 能藏起来的原因：写库被数据库拒绝，异常却没人看得见。
+    """
+    svc = PortfolioService()
+    svc._client = FakeClient({"trade_orders": []})
+    svc._client.error = RuntimeError("db down")
+
+    with caplog.at_level("ERROR"):
+        svc._reject_order({"id": "o1", "direction": "buy"}, RuntimeError("confirm fail"))
+
+    assert "db down" in caplog.text
+    assert "仍为 pending" in caplog.text
+
+
+# ---------- 买单确认失败 → 本金退回 ----------
+
+
+def _买单失败场景(monkeypatch, cash=9000.0, frozen=1000.0, amount=1000.0):
+    """构造一笔已冻结资金的 pending 买单，并让确认过程在建仓之后抛错。"""
+    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
+    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
+    monkeypatch.setattr(portfolio_service, "_now_iso", lambda: "2026-01-06T15:37:00+08:00")
+    monkeypatch.setattr(portfolio_service.PortfolioService, "_get_nav",
+                        lambda self, code: Decimal("1.5000"))
+    monkeypatch.setattr(portfolio_service.PortfolioService, "_write_trade_flow",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("流水写入失败")))
+    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
+
+    order = {
+        "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
+        "direction": "buy", "status": "pending", "confirm_date": "2026-01-06",
+        "amount": amount, "price": 0.0, "quantity": 0.0, "fee": 0.0,
+    }
+    svc = PortfolioService()
+    svc._client = FakeClient({
+        "trade_orders": [order],
+        "accounts": [{"id": "a1", "user_id": "u1", "cash": cash, "frozen_cash": frozen}],
+        "positions": [],
+    })
+    return svc
+
+
+def test_买单确认失败_订单落rejected且本金退回现金(monkeypatch):
+    svc = _买单失败场景(monkeypatch)
+    result = svc.confirm_pending_orders()
+
+    assert result["processed"] == 1
+    assert svc._client.rows["trade_orders"][0]["status"] == "rejected"
+    account = svc._client.rows["accounts"][0]
+    assert account["cash"] == 10000.0      # 9000 + 退回的 1000
+    assert account["frozen_cash"] == 0.0   # 解冻后已无冻结
+    assert svc._client.rows["positions"] == []  # 未建仓
+
+
+def test_买单确认失败_冻结尚未解冻时退款不重复扣冻结(monkeypatch):
+    """失败点在建仓之前时，冻结额里可能还留着这笔钱 —— 退款要把它一起划走。"""
+    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
+    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
+    monkeypatch.setattr(portfolio_service.PortfolioService, "_get_nav",
+                        lambda self, code: None)  # 取不到净值 → 在建仓前就失败
+    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
+
+    svc = PortfolioService()
+    svc._client = FakeClient({
+        "trade_orders": [{
+            "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
+            "direction": "buy", "status": "pending", "confirm_date": "2026-01-06",
+            "amount": 1000.0, "price": 0.0, "quantity": 0.0, "fee": 0.0,
+        }],
+        # 冻结额里除了这笔 1000，还有别人的 500 —— 不能一起退给该用户
+        "accounts": [{"id": "a1", "user_id": "u1", "cash": 9000.0, "frozen_cash": 1500.0}],
+        "positions": [],
+    })
+    svc.confirm_pending_orders()
+
+    assert svc._client.rows["trade_orders"][0]["status"] == "rejected"
+    account = svc._client.rows["accounts"][0]
+    assert account["cash"] == 10000.0        # 本金退回
+    assert account["frozen_cash"] == 500.0   # 只核减本笔的 1000
+
+
+def test_卖单确认失败_不退现金(monkeypatch):
+    """卖单的钱从未离开现金，失败时不能平白加钱。"""
+    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
+    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
+    monkeypatch.setattr(portfolio_service.PortfolioService, "_get_nav",
+                        lambda self, code: Decimal("1.5000"))
+    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
+
+    svc = PortfolioService()
+    svc._client = FakeClient({
+        "trade_orders": [{
+            "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
+            "direction": "sell", "status": "pending", "confirm_date": "2026-01-06",
+            "amount": 0.0, "price": 0.0, "quantity": 100.0, "fee": 0.0,
+        }],
+        "accounts": [{"id": "a1", "user_id": "u1", "cash": 9000.0, "frozen_cash": 0.0}],
+        "positions": [],  # 无持仓 → 确认失败
+    })
+    svc.confirm_pending_orders()
+
+    assert svc._client.rows["trade_orders"][0]["status"] == "rejected"
+    assert svc._client.rows["accounts"][0]["cash"] == 9000.0
