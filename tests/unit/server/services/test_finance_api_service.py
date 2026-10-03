@@ -178,20 +178,20 @@ def test_query_ranking_空缓存返回空列表():
 
 
 def test_refresh_spot_cache_刷新成功(monkeypatch):
-    monkeypatch.setattr("server.services.spot_cache_scheduler._is_trading_time", lambda: True)
+    monkeypatch.setattr("server.services.finance_api_service.is_trading_time", lambda *_: True)
     _install_fake_akshare(monkeypatch, fund_etf_spot_em=_spot_df([{"代码": "512890", "名称": "红利低波ETF", "最新价": 1.5}]))
     assert FinanceApiService.refresh_spot_cache() is True
     assert FinanceApiService._spot_dict is not None
 
 
 def test_refresh_spot_cache_非交易时段且已有缓存_跳过(monkeypatch):
-    monkeypatch.setattr("server.services.spot_cache_scheduler._is_trading_time", lambda: False)
+    monkeypatch.setattr("server.services.finance_api_service.is_trading_time", lambda *_: False)
     FinanceApiService._spot_dict = {"512890": _spot()}
     assert FinanceApiService.refresh_spot_cache() is True  # 返回 True 表示缓存仍有效
 
 
 def test_refresh_spot_cache_异常返回False(monkeypatch):
-    monkeypatch.setattr("server.services.spot_cache_scheduler._is_trading_time", lambda: True)
+    monkeypatch.setattr("server.services.finance_api_service.is_trading_time", lambda *_: True)
     mod = types.ModuleType("akshare")
 
     def _boom(**kw):

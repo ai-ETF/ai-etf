@@ -2,9 +2,11 @@
 行情缓存定时刷新调度器 + Pending 订单确认
 
 独立管理：
-1. 全量 ETF 行情的定时拉取（交易时段 30s）
+1. 全量 ETF 行情的定时拉取（交易时段 30s；交易时段判定见 trading_calendar）
 2. Pending 订单确认（每个交易日 15:37）
-3. 启动时补偿：检查遗漏的 pending 订单并立即确认
+3. 货基万份收益入账（每天 00:05）
+4. 场外基金白名单同步（每天 02:17）
+5. 启动时补偿：检查遗漏的 pending 订单并立即确认
 """
 import asyncio
 import logging
@@ -16,20 +18,6 @@ from apscheduler.triggers.cron import CronTrigger
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
-
-
-def _is_trading_time() -> bool:
-    """判断当前是否为A股交易时段（9:30-15:00，工作日，北京时间）"""
-    from datetime import datetime, timezone, timedelta
-    BEIJING_TZ = timezone(timedelta(hours=8))
-    now = datetime.now(BEIJING_TZ)
-    if now.weekday() >= 5:
-        return False
-    if now.hour < 9 or (now.hour == 9 and now.minute < 30):
-        return False
-    if now.hour >= 15:
-        return False
-    return True
 
 
 async def _warmup_cache():
@@ -71,6 +59,22 @@ async def _credit_money_fund_income_job():
         # 无兜底：明确失败并上抛，不静默跳过（宁可当天不入账）
         logger.error(f"[货基收益] 每日收益入账失败（未入账）: {e}", exc_info=True)
         raise
+
+
+async def _fund_catalog_sync_job():
+    """场外基金白名单同步任务（每天 02:17 执行）。
+
+    全量抓取场外 ETF 联接基金的费率与风险画像，幂等 upsert 进
+    fund_fee_rules + fund_risk_profiles。数千只基金逐只抓取耗时约 20-30 分钟，
+    必须放到线程中执行 —— 直接在事件循环里跑 requests + sleep 会阻塞整个服务。
+    单只基金失败不影响其余基金（run 内部逐只捕获异常）。
+    """
+    from server.services.fund_catalog_sync import FundCatalogSync
+
+    logger.info("[基金同步] 开始同步场外 ETF 联接基金白名单...")
+    svc = FundCatalogSync()
+    result = await asyncio.to_thread(svc.run)
+    logger.info(f"[基金同步] 完成: {result}")
 
 
 async def _startup_pending_compensation():
@@ -122,6 +126,19 @@ def start_scheduler() -> AsyncIOScheduler:
         misfire_grace_time=3600,  # 错过1小时内仍可补执行
     )
     logger.info("货基收益入账任务已注册（每天00:05，1小时容错）")
+
+    # 任务4：场外基金白名单同步（每天 02:17）
+    # 选在凌晨非交易时段：不影响下单，也避开 00:05 的货基收益入账。
+    # 全量抓取耗时较长（数千只基金逐只抓页面），容错窗口给到 2 小时。
+    _scheduler.add_job(
+        _fund_catalog_sync_job,
+        trigger=CronTrigger(hour=2, minute=17),
+        id="fund_catalog_sync",
+        name="场外基金白名单同步（每天02:17）",
+        replace_existing=True,
+        misfire_grace_time=7200,
+    )
+    logger.info("场外基金白名单同步任务已注册（每天02:17，2小时容错）")
 
     _scheduler.start()
 

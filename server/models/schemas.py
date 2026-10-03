@@ -718,3 +718,46 @@ class AutoInvestConfigResponse(BaseModel):
     reserve: float  # 预留金额
     money_fund_code: str  # 货基代码
     money_fund_name: str  # 货基名称
+
+
+# ==================== 场外基金目录（可交易基金） ====================
+
+class OffExchangeFundItem(BaseModel):
+    """场外可交易基金列表项（来自 fund_fee_rules 白名单）"""
+    fund_code: str  # 基金代码
+    fund_name: str  # 基金名称
+    fund_type: Optional[str] = None  # 基金类型（of=场外）
+    share_class: Optional[str] = None  # 份额类别：A/C 等
+
+    min_purchase_amount: Optional[float] = None  # 最低申购金额（元）
+    max_purchase_amount: Optional[float] = None  # 单日累计申购上限（元），空=无限额（「限大额」基金才有值）
+    subscribe_status: Optional[str] = None  # 申购状态：开放申购/限大额可申购，暂停申购/封闭期等只能赎回；空=存量行按可申购处理
+    confirm_delay: Optional[int] = None  # 申购确认 T+N
+    redeem_settle_delay: Optional[int] = None  # 赎回到账 T+N
+
+    management_fee_rate: Optional[float] = None  # 管理费率（小数，0.005=0.5%）
+    custody_fee_rate: Optional[float] = None  # 托管费率
+    sales_service_fee_rate: Optional[float] = None  # 销售服务费率
+
+    # 风险画像（未配置的基金为空）
+    risk_level: Optional[str] = None  # moderate/aggressive/speculative
+    risk_label: Optional[str] = None  # 中文标签
+    breadth_score: Optional[int] = None  # 指数广度 1-3
+    volatility_score: Optional[int] = None  # 波动属性 1-3
+    market_score: Optional[int] = None  # 市场属性 1/3
+    board_score: Optional[int] = None  # 板块特征 1/3
+
+
+class OffExchangeFundListResponse(BaseModel):
+    """场外基金列表响应（分页）"""
+    total: int  # 匹配总数
+    page: int  # 当前页码
+    page_size: int  # 每页条数
+    items: List[OffExchangeFundItem]  # 基金列表
+
+
+class OffExchangeFundDetailResponse(OffExchangeFundItem):
+    """场外基金详情响应：列表项字段 + 费率分档明细"""
+    commission_rate: Optional[float] = None  # 平台佣金费率
+    purchase_fee_tiers: Optional[List[Dict[str, Any]]] = None  # 申购费金额分档
+    redemption_fee_tiers: Optional[List[Dict[str, Any]]] = None  # 赎回费持有天数分档

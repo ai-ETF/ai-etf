@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 KLINE_CACHE_DIR = "/tmp/etf_kline_cache"
 KLINE_CACHE_TTL = 86400  # 一天过期
 
-# 判断是否交易时段（从 spot_cache_scheduler 导入，保持兼容）
-from server.services.spot_cache_scheduler import _is_trading_time
+# 判断是否交易时段（交易日历的唯一来源；A 股交易日 + 9:30-15:00，识别法定节假日）
+from server.services.trading_calendar import beijing_now, is_trading_time
 
 
 class FinanceApiService:
@@ -1090,11 +1090,11 @@ class FinanceApiService:
         """
         强制刷新全量ETF实时行情缓存（供定时任务调用）。
 
-        交易时段（工作日 9:30-15:00）每30秒拉取一次最新数据。
+        交易时段（交易日 9:30-15:00，识别法定节假日）每30秒拉取一次最新数据。
         非交易时段跳过实际拉取，但如果缓存为空则仍然加载一次（首次启动/重启后填充）。
         """
         import akshare as ak
-        if not _is_trading_time() and cls._spot_dict is not None:
+        if not is_trading_time(beijing_now()) and cls._spot_dict is not None:
             logger.debug("[定时任务] 非交易时段，跳过刷新")
             return True  # 返回 True 表示缓存仍有效
 

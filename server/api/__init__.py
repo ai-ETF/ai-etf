@@ -20,7 +20,7 @@ import logging
 
 from fastapi import APIRouter
 
-from . import upload, test, secure_chat, watchlist, portfolio
+from . import upload, test, secure_chat, watchlist, portfolio, off_exchange_funds
 from .market import router as market_router
 from .risk import router as risk_router
 
@@ -33,6 +33,7 @@ router.include_router(secure_chat.router)
 router.include_router(watchlist.router)
 router.include_router(market_router)
 router.include_router(portfolio.router)
+router.include_router(off_exchange_funds.router)
 router.include_router(risk_router)
 
 # 已弃用的 ask 路由不再注册（保留 import 避免破坏旧引用）
@@ -40,6 +41,6 @@ router.include_router(risk_router)
 # router.include_router(ask.router)
 
 __all__ = [
-    "upload", "test", "secure_chat", "watchlist", "portfolio",
+    "upload", "test", "secure_chat", "watchlist", "portfolio", "off_exchange_funds",
     "market_router", "risk_router", "router",
 ]
