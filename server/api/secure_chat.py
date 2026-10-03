@@ -89,6 +89,11 @@ class MessageInfo(BaseModel):
     created_at: Optional[str] = None
 
 
+class RenameChatRequest(BaseModel):
+    """重命名会话请求"""
+    title: str = Field(..., description="新标题", min_length=1, max_length=100)
+
+
 # ========== 登录端点（不需要 JWT）==========
 
 
@@ -399,3 +404,32 @@ async def delete_secure_chat(
         raise HTTPException(status_code=500, detail="删除会话失败")
 
     return {"message": "会话已删除", "chat_id": chat_id}
+
+
+@router.put("/chats/{chat_id}/title")
+async def rename_secure_chat(
+    chat_id: str,
+    req: RenameChatRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    重命名会话（需 JWT 认证）
+
+    会验证会话是否属于当前用户。
+    """
+    repo = get_chat_repo()
+
+    # 检查会话是否存在
+    chat = repo.get_chat(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 验证会话归属：只能改自己的会话
+    if chat.get("user_id") != current_user:
+        raise HTTPException(status_code=403, detail="无权修改此会话")
+
+    success = repo.update_chat_title(chat_id, req.title)
+    if not success:
+        raise HTTPException(status_code=500, detail="重命名会话失败")
+
+    return {"message": "会话已重命名", "chat_id": chat_id}
