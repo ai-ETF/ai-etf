@@ -72,6 +72,15 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(error_msg)
     logger.info("Supabase连接验证成功")
 
+    # E2E 行情数据夹具：只有设置了 E2E_MARKET_FIXTURE 才生效，不设置时这里是空操作。
+    # 必须在启动调度器之前 —— 调度器一上来就会 warmup 拉一次全量行情，
+    # 装晚了那一次拉的还是真实接口（本机拉不到，缓存就是空的）。
+    # 快照文件缺失/非法会在这里直接抛错，让服务起不来：故意失败关闭，
+    # 否则症状退化成「行情又空了」，和夹具要解决的问题长得一模一样，很难查。
+    # 见 server/services/market_fixture.py
+    from server.services.market_fixture import install_if_configured as install_market_fixture
+    install_market_fixture()
+
     # 启动行情缓存调度器（交易时段每30秒拉取全量行情）
     from server.services.spot_cache_scheduler import start_scheduler as start_spot_scheduler, shutdown_scheduler as shutdown_spot_scheduler
     start_spot_scheduler()

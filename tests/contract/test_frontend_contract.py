@@ -304,7 +304,7 @@ def test_c5_文档没有引用不存在的接口():
 def test_c6_全部路由都被显式分类():
     """每条路由必须恰好落在三档之一：已接线 / 未接线 / 非业务。
 
-    这条是 C6 的核心：那 19 个「后端有、前端零入口」的端点**必须被登记**。
+    这条是 C6 的核心：那 21 个「后端有、前端零入口」的端点**必须被登记**。
     哪天有人把前端接上去了，这条会红 —— 提醒同步更新 E2E 白名单与 C1，
     避免「以为没接线其实接了」或反之。
     """
@@ -337,9 +337,9 @@ def test_c6_三档口径不重叠():
 
 @pytest.mark.contract
 def test_c6_未接线端点数量与规划文档一致():
-    """19 这个数字写在 docs/e2e/01 §4.2 里，改动时两边要一起动。"""
-    assert len(UNWIRED_BUSINESS_ENDPOINTS) == 19, (
-        f"未接线端点从 19 变成了 {len(UNWIRED_BUSINESS_ENDPOINTS)}。"
+    """21 这个数字写在 docs/e2e/01 §4.2 里，改动时两边要一起动。"""
+    assert len(UNWIRED_BUSINESS_ENDPOINTS) == 21, (
+        f"未接线端点从 21 变成了 {len(UNWIRED_BUSINESS_ENDPOINTS)}。"
         f"如果确实有人接了线，请同步更新 docs/e2e/01-页面与API调用关系.md §4.2 "
         f"和 §4.1，以及 docs/e2e/03 的 E2E 白名单"
     )

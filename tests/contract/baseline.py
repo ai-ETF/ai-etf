@@ -125,7 +125,7 @@ FRONTEND_CALL_POINTS: tuple[CallPoint, ...] = (
 
 
 # ============================================================================
-# C6：19 个「后端有、前端零入口」的业务端点
+# C6：21 个「后端有、前端零入口」的业务端点
 # 依据 docs/e2e/01-页面与API调用关系.md §4.2。它们禁止被设计成 E2E 用例步骤
 # （前端无入口，跑不通）；但**必须被显式登记** —— 哪天有人接线了，C6 会红，
 # 提醒同步更新 E2E 白名单与 C1。
@@ -151,6 +151,12 @@ UNWIRED_BUSINESS_ENDPOINTS: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/portfolio/daily-returns"),
     ("GET", "/api/portfolio/auto-invest/config"),
     ("POST", "/api/portfolio/auto-invest/config"),
+    # 2026-10-03 合并 dev（PR #18「拓展支持交易基金数」）新增。它们**不是**"前端接了线"，
+    # 而是"后端刚加、前端还没接"：purchase 页至今用硬编码的 TRADEABLE_FUND_CODES
+    # （application/src/config/portfolio.ts，20 个代码），没有调这个接口。
+    # 前端哪天切过来，C6 会红 —— 那正是要的信号，届时同步 01 §4.2/§4.1 与 03 白名单。
+    ("GET", "/api/portfolio/funds"),
+    ("GET", "/api/portfolio/funds/{fund_code}"),
 })
 
 
@@ -246,6 +252,8 @@ AUTH_BASELINE: dict[tuple[str, str], str] = {
     ("GET", "/api/portfolio/health"): "public",
     ("GET", "/api/portfolio/auto-invest/config"): "jwt",
     ("POST", "/api/portfolio/auto-invest/config"): "jwt",
+    ("GET", "/api/portfolio/funds"): "jwt",
+    ("GET", "/api/portfolio/funds/{fund_code}"): "jwt",
     ("POST", "/api/portfolio/test/apply-purchase"): "x_user_id",
     ("POST", "/api/portfolio/test/apply-redeem"): "x_user_id",
     ("GET", "/api/portfolio/test/positions"): "x_user_id",
