@@ -7,7 +7,7 @@
 # 按规范做了"却对不上。手工 rsync 容易漏，而且漏了没人发现，所以固定
 # 成脚本：同步 + 校验一步做完。
 #
-# ai-etf 那份是**唯一真源**：docs/e2e/00-06 在 ai-etf，skill 由它派生。
+# ai-etf 那份是**唯一真源**：docs/e2e/00-07 在 ai-etf，skill 由它派生。
 # 所以永远是 ai-etf → application 单向同步，不要反向拉。
 #
 # 用法：
