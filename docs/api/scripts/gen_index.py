@@ -27,10 +27,20 @@ SKIP_FILES = {"README.md", "_template.md"}
 
 HTTP_METHODS = {"get", "post", "put", "delete", "patch"}
 
+# 认证类接口：公开入口，不属于任何业务模块，统一归入 01-基础与认证.md。
+# ⚠️ 与 needs_auth 的公开判定是同一个集合——两处必须同步修改，
+#    否则生成的 README 总览表会出现「模块归错 / 认证列标反」。
+AUTH_ENDPOINT_PREFIXES = (
+    "/api/secure-chat/login",
+    "/api/secure-chat/register",
+    "/api/secure-chat/refresh",
+    "/api/test",
+)
+
 # 生成 README 总览表时，把路径归到模块文档（按前缀匹配，前面的优先）
 # 根路径 / 单独在 module_for 中处理，不放进前缀，避免 "/" 匹配所有路径。
 MODULE_BY_PREFIX = [
-    (("/api/secure-chat/login", "/api/test"), "01-基础与认证.md"),
+    (AUTH_ENDPOINT_PREFIXES, "01-基础与认证.md"),
     (("/api/secure-chat",), "02-对话与会话.md"),
     (("/api/market",), "03-行情.md"),
     (("/api/watchlist",), "04-自选股.md"),
@@ -100,9 +110,12 @@ def module_for(path: str) -> str:
 
 def needs_auth(method: str, path: str) -> str:
     """认证列：openapi 不会暴露 Depends(get_current_user)，用路径规则近似。"""
-    if path == "/" or path == "/api/secure-chat/login":
+    if path == "/":
         return "-"
-    if path.startswith(("/api/market", "/api/upload", "/api/test")):
+    # 与 MODULE_BY_PREFIX 的 01 组共用同一集合：login / register / refresh / test 均公开
+    if any(path == p or path.startswith(p + "/") for p in AUTH_ENDPOINT_PREFIXES):
+        return "-"
+    if path.startswith(("/api/market", "/api/upload")):
         return "-"
     if path.endswith("/health"):
         return "-"
