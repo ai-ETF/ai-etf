@@ -16,7 +16,12 @@ from pydantic import BaseModel, Field
 from server.auth import get_current_user
 from server.auth.deps import extract_and_verify
 from server.llm import astream_text, get_llm
-from server.services.auth_service import delete_account, logout_user, register_user
+from server.services.auth_service import (
+    delete_account,
+    logout_user,
+    refresh_session_token,
+    register_user,
+)
 from server.storage.chat_repo import get_chat_repo
 from server.storage.supabase_client import get_supabase
 from server.utils.sse import format_sse_event, create_sse_stream_response
@@ -38,6 +43,7 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     """登录响应"""
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
     user_id: str
     expires_in: int
@@ -54,10 +60,25 @@ class RegisterResponse(BaseModel):
     success: bool
     needs_email_confirmation: bool
     access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
     user_id: Optional[str] = None
     expires_in: Optional[int] = None
     message: str
+
+
+class RefreshRequest(BaseModel):
+    """刷新登录态请求"""
+    refresh_token: str = Field(..., description="登录/注册/上次刷新返回的 refresh_token")
+
+
+class RefreshResponse(BaseModel):
+    """刷新登录态响应（轮转开启时 refresh_token 与请求中的不同，前端必须覆盖保存）"""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    user_id: str
+    expires_in: int
 
 
 class DeleteAccountRequest(BaseModel):
@@ -103,6 +124,9 @@ async def login(req: LoginRequest):
     登录接口 —— 调用 Supabase Auth 验证邮箱密码，返回 JWT access_token。
 
     后续所有请求都需要在 Header 中携带此 token。
+
+    同时返回 refresh_token（长效凭证，Supabase 默认 30 天）：access_token 过期后
+    用 POST /secure-chat/refresh 换取新的一对 token，实现免登录。前端需持久化保存。
     """
     supabase = get_supabase()
     if not supabase:
@@ -124,6 +148,7 @@ async def login(req: LoginRequest):
     logger.info(f"用户登录成功: user_id={user.id}")
     return LoginResponse(
         access_token=session.access_token,
+        refresh_token=session.refresh_token,
         user_id=user.id,
         expires_in=session.expires_in or 3600,
     )
@@ -151,6 +176,7 @@ async def register(req: RegisterRequest):
             success=True,
             needs_email_confirmation=False,
             access_token=session.access_token,
+            refresh_token=session.refresh_token,
             user_id=user.id,
             expires_in=session.expires_in or 3600,
             message="注册成功，已自动登录",
@@ -161,6 +187,33 @@ async def register(req: RegisterRequest):
         success=True,
         needs_email_confirmation=True,
         message="注册成功，请前往邮箱完成验证后登录",
+    )
+
+
+# ========== 刷新登录态（不需要 JWT）==========
+
+
+@router.post("/refresh", response_model=RefreshResponse)
+async def refresh(req: RefreshRequest):
+    """
+    刷新登录态 —— 用 refresh_token 换取新的 access_token（免登录的核心）。
+
+    公开接口：调用时 access_token 已过期，无法（也无需）携带 JWT 认证，
+    凭证即为请求体中的 refresh_token 本身。
+
+    Supabase 侧开启了 refresh token 轮转（见 refresh_session_token），返回值中的
+    refresh_token 与请求中的**不同**，前端必须覆盖保存；否则下次刷新会因
+    「旧 token 已被轮转作废」而 401，用户被踢回登录页。
+    """
+    result = refresh_session_token(req.refresh_token)
+    session = result["session"]
+    user = result["user"]
+
+    return RefreshResponse(
+        access_token=session.access_token,
+        refresh_token=session.refresh_token,
+        user_id=user.id,
+        expires_in=session.expires_in or 3600,
     )
 
 

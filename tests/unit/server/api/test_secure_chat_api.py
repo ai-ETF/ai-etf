@@ -5,7 +5,7 @@
 测试方法：FastAPI TestClient + monkeypatch 服务函数 + dependency_overrides 注入固定 user_id，全程不联网、不连 Supabase。
 """
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from server.auth.deps import get_current_user
@@ -14,6 +14,7 @@ from server.api.secure_chat import router
 
 class FakeSession:
     access_token = "token-123"
+    refresh_token = "refresh-123"
     expires_in = 3600
 
 
@@ -72,6 +73,23 @@ def test_login(client):
     data = resp.json()
     assert data["access_token"] == "token-123"
     assert data["user_id"] == "user-123"
+    # 免登录：登录必须下发 refresh_token，否则前端拿不到任何长效凭证
+    assert data["refresh_token"] == "refresh-123"
+
+
+def test_login_未返回session_抛401(client, monkeypatch):
+    """登录成功但无 session（配置漂移等）：不回归成 500/200，仍返回 401。"""
+    class _Auth:
+        @staticmethod
+        def sign_in_with_password(creds):
+            return type("R", (), {"session": None, "user": FakeUser()})()
+
+    class _Supabase:
+        auth = _Auth()
+
+    monkeypatch.setattr("server.api.secure_chat.get_supabase", lambda: _Supabase())
+    resp = client.post("/secure-chat/login", json={"email": "u@e.com", "password": "pass12345"})
+    assert resp.status_code == 401
 
 
 def test_register_邮箱确认模式(client):
@@ -80,6 +98,52 @@ def test_register_邮箱确认模式(client):
     data = resp.json()
     assert data["success"] is True
     assert data["needs_email_confirmation"] is True
+    assert data["refresh_token"] is None
+
+
+def test_register_自动登录_透传refresh_token(client, monkeypatch):
+    monkeypatch.setattr(
+        "server.api.secure_chat.register_user",
+        lambda email, password: {"session": FakeSession(), "user": FakeUser()},
+    )
+    resp = client.post("/secure-chat/register", json={"email": "u@e.com", "password": "pass12345"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["needs_email_confirmation"] is False
+    assert data["access_token"] == "token-123"
+    assert data["refresh_token"] == "refresh-123"
+
+
+# ==================== POST /refresh（免登录核心）====================
+
+
+def test_refresh_成功_返回新的token对(client, monkeypatch):
+    """不携带 Authorization 头也能通过 —— 证明该接口是公开的（access 此时已过期）。"""
+    monkeypatch.setattr(
+        "server.api.secure_chat.refresh_session_token",
+        lambda rt: {"session": FakeSession(), "user": FakeUser()},
+    )
+    resp = client.post("/secure-chat/refresh", json={"refresh_token": "old-refresh"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["access_token"] == "token-123"
+    assert data["refresh_token"] == "refresh-123"
+    assert data["user_id"] == "user-123"
+
+
+def test_refresh_token失效_透传401(client, monkeypatch):
+    def boom(refresh_token):
+        raise HTTPException(status_code=401, detail="登录态已失效，请重新登录")
+
+    monkeypatch.setattr("server.api.secure_chat.refresh_session_token", boom)
+    resp = client.post("/secure-chat/refresh", json={"refresh_token": "dead"})
+    assert resp.status_code == 401
+    assert "重新登录" in resp.json()["detail"]
+
+
+def test_refresh_缺少refresh_token_422(client):
+    resp = client.post("/secure-chat/refresh", json={})
+    assert resp.status_code == 422
 
 
 def test_logout(client, monkeypatch):

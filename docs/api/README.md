@@ -8,7 +8,7 @@
 
 | 模块 | 文件 | 覆盖接口 |
 |------|------|----------|
-| 基础 & 认证 | [01-基础与认证.md](01-基础与认证.md) | 健康检查、注册、登录、退出登录、注销账号 |
+| 基础 & 认证 | [01-基础与认证.md](01-基础与认证.md) | 健康检查、注册、登录、刷新登录态、退出登录、注销账号 |
 | 对话 & 会话 | [02-对话与会话.md](02-对话与会话.md) | LLM 流式对话、会话管理 |
 | 行情 | [03-行情.md](03-行情.md) | spot / ranking / kline / intraday / detail / money-flow / search / categories |
 | 自选股 | [04-自选股.md](04-自选股.md) | watchlist |
@@ -49,6 +49,7 @@ AUTH="Authorization: Bearer $TOKEN"
 | GET | `/api/test/hello` | - | [01](01-基础与认证.md) |
 | POST | `/api/secure-chat/login` | - | [01](01-基础与认证.md) |
 | POST | `/api/secure-chat/register` | - | [01](01-基础与认证.md) |
+| POST | `/api/secure-chat/refresh` | - | [01](01-基础与认证.md) |
 | POST | `/api/secure-chat/logout` | 🔒 | [01](01-基础与认证.md) |
 | POST | `/api/secure-chat/delete-account` | 🔒 | [01](01-基础与认证.md) |
 | POST | `/api/secure-chat` | 🔒 | [02](02-对话与会话.md) |
