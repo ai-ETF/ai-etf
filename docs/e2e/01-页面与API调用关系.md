@@ -43,7 +43,7 @@
 | 位置 | 原文 | 核对结果 | 建议改法 |
 |---|---|---|---|
 | §3「页面 → API」表 · `pages/settings` 行 | 只列 `POST /api/secure-chat/logout` | ❌ 不完整 | 补 `GET /api/portfolio/account`（[settings/index.vue:282](application/src/pages/settings/index.vue#L282) 的 `onShow(loadAccountSummary)`） |
-| §4.2 端点统计 | 「共 57 个端点（56 个唯一路径）」「JWT 必需 23」 | ❌ 少了 1 | 应为 **58 个端点 / 57 个唯一路径**；**JWT 必需 24**。差量正是 `PUT /api/secure-chat/chats/{chat_id}/title`（该端点是在统计之后新增的）。公开 27、`X-User-Id` 7 两项**核对无误** |
+| §4.2 端点统计 | 「共 57 个端点（56 个唯一路径）」「JWT 必需 23」 | ❌ 少了 1 | 应为 **58 个端点 / 57 个唯一路径**；**JWT 必需 24**。差量正是 `PUT /api/secure-chat/chats/{chat_id}/title`（该端点是在统计之后新增的）。公开 27、`X-User-Id` 7 两项**核对无误**。🔁 **2026-10-10：`00` 已按此修订并继续往前走了一步** —— 合并 PR #18 后又加 2 个（`GET /portfolio/funds`、`/funds/{fund_code}`），`00` 现写作 **60 个端点 / 59 个唯一路径 / JWT 必需 26**，与本文件 §四 一致。 |
 | §5「已修复」· ranking 行 | 「前端改传 `top_n`」✅ | ⚠️ 事实成立但**无意义** | 该改动落在 [useMarketQuery.ts:78](application/src/composables/useMarketQuery.ts#L78)，属未被 import 的死代码。建议标注「修在死代码中，前端仍无榜单入口」 |
 | §5「8 个后端接口前端未接线」 | 列 8 项 | ⚠️ 端点级为 21 项 | 见本文 §四；**另需补** `delete-account`、`spot/{code}`、`spot/name/{name}`、`detail/name/{name}`、`kline/name/{name}`、`category/{category}` |
 | §5「README 接口总览表已过时」 | 「缺 register/logout/delete-account…需重跑 gen_index.py」 | ✅ **已解决** | commit `3f2573c`「补齐接口文档」已修，`docs/api/README.md` 现列 **58 行**、含 `PUT .../title`。该项可从已知问题中移除 |
@@ -175,7 +175,7 @@
 
 补充事实（用于断言设计）：
 
-- `expireAuthAndRedirect` 有 **`redirecting` 互斥锁**（[auth.ts:181-197](application/src/utils/auth.ts#L181-L197)），首跳后 `setTimeout 250ms` 再 `reLaunch`，`complete` 后 300ms 解锁。→ **E2E 断言必须给 ≥600ms 的等待窗口**，否则会读到"还没跳"的假失败。
+- `expireAuthAndRedirect` 有 **`redirecting` 互斥锁**（[auth.ts:181-197](application/src/utils/auth.ts#L181-L197)），首跳后 `setTimeout 250ms` 再 `reLaunch`，`complete` 后 300ms 解锁。→ **E2E 断言必须给 ≥600ms 的等待窗口**，否则会读到"还没跳"的假失败。⚠️ 这个 600ms 是**断言时的等待下限**（等应用自己跳完），**不是**「我们发导航之前该静置多久」——后者实测要 **2500ms**（`application/e2e/README.md` §6.6）：旗标没复位就推它，这次踢人会被静默吞掉。**别把两个数混用。**
 - ⚠️ 后端 `get_current_user` 的签名是 `Header(...)`（必填，[deps.py:41](ai-etf/server/auth/deps.py#L41)）→ **完全不传 `Authorization` 头会得到 422，不是 401**。前端不会触发这一分支（本地没过期就一定带 token），但接口级用例要注意。
 - token 有效期：`AUTH_SESSION_TTL_MS = 1h`，且 `expireTime = min(now+1h, now+serverTTL, jwt.exp)`（[auth.ts:93-107](application/src/utils/auth.ts#L93-L107)）。后端登录返回 `expires_in: 3600`。
 - 登出后原 token **服务端即时失效**（内存黑名单，`401 令牌已注销`），但**进程重启会失效**（`docs/api/01` §5）。
@@ -232,14 +232,17 @@ data: {"type":"error","message":"<文本>"}\n\n    ← 异常时
 
 ## 六、需确认（不要当成事实用）
 
+> ⚠️ **本表的编号只在本文件内有效。** `01` / `03` / `04` 三份文档**各自有一套 #1 起编的编号，互相不通**（例如同样都是「#5」，`01` 指的是弹窗驱动、`03` 指的是 Supabase 邮件确认）。跨文件引用时**必须写明是哪个文件的 #N**，光写「需确认 #6」等于没写。
+> 已知的重复登记：**「大模型 mock 开关」这一个问题在三处都记了** —— `01` §六 #6、`03` §八 #6、`04` §八 #11。
+
 | # | 事项 | 为什么重要 | 问谁 |
 |---|---|---|---|
 | 1 | **前端在微信开发者工具里打开的到底是哪个目录**（仓库根 `project.config.json` 有 `appid`，但 `dist/` 从未构建、也未见 `miniprogramRoot`） | 决定 automator 的 `projectPath` 与 `cliPath` | 前端同学 |
 | 2 | ~~[settings/index.vue:310](application/src/pages/settings/index.vue#L310) 用 `uni.switchTab` 跳自选页，但 `pages.json` 无 `tabBar` 段 → 静态判断**会失败**~~ | **✅ 已结案（2026-09-24 真机实测：确实点不动）** → 见 §六之二 | ~~前端同学~~ |
 | 3 | ~~`.env.development` / `.env.production` 均为 **0 字节**，`API_BASE` 硬编码 `https://ai-etf.xyz`~~ | **✅ 已解决（2026-09-21）**：`API_BASE` 已改为读 `import.meta.env.VITE_API_BASE`，两个 `.env` 已填值并推送（`chore/configurable-api-base`）。⚠️ 仍待 Windows 侧实测 | ~~前端同学~~ |
 | 4 | 生产环境 `.env` 是否设了 `ENV=production` | 决定线上能否用 `test/*` 夹具（我**不能读** `.env`，也无法看到线上环境变量） | 后端作者（自己） |
-| 5 | `uni.showModal({editable:true})`（重命名）在 automator 下能否驱动 | P2 的重命名步骤能否自动化，见 `03` §SSE/弹窗 | 需实机验证 |
-| 6 | 后端是否提供 LLM mock/短路开关 | 决定 P2 能否进 CI（否则每次跑都真实调 LLM） | 后端作者（自己）——**当前未发现此类开关** |
+| 5 | ~~`uni.showModal({editable:true})`（重命名）在 automator 下能否驱动~~ | **✅ 已结案（2026-10-10 实跑）**：弹窗**驱动不了**（原生输入框 automator 敲不了字），但**桩掉之后照样能验** —— 用 `withNativeModal(program, {confirm:true, content:'…'})` 从**外部**喂 `content`，再用 `readNativeModalCalls` 读回 `editable` / `placeholderText` 参数。P2-04 已实跑通过 | ~~需实机验证~~ |
+| 6 | 后端是否提供 LLM mock/短路开关 | ⚠️ **口径已变**：P2 已在 2026-10-10 用**测试侧造流**（`helpers/streamMock.js`）写完并全绿，**不再需要这个开关才能写用例**。现在它只决定**要不要让"真实后端 + 假模型"那条路进 CI** | 后端作者（自己）——**当前未发现此类开关** |
 
 ---
 
@@ -269,6 +272,11 @@ data: {"type":"error","message":"<文本>"}\n\n    ← 异常时
   **内部先滚动再点击**，不要让每条用例各滚一次。
 - **待办**：同属线上体验缺陷。改法是加 `position: fixed; bottom: 0; left: 0; right: 0;` + 合适的 `z-index`，
   但会让**所有页面**底部需要留白 → **要不要改需前端同学定**，不要替他们决定。
+
+> 🔗 **本节两条已收进统一缺陷台账**（2026-10-10）：① → [00 §五 **D-02**](00-背景与已知问题.md)，② → [00 §五 **D-03**](00-背景与已知问题.md)。
+> 台账里另有 4 条：**D-01** 赎回拦截挡掉合法操作（后端，用例侧见 [03 §二 P1-04](03-E2E用例清单.md)）、
+> **D-04** 登录过期清存储早于跳转旗标 + 被吞无兜底、**D-05** 净值历史忽略基金代码、**D-06** K 线缓存命中带浮点噪声。
+> **6 条都只登记、不修。**
 
 ---
 
