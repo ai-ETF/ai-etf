@@ -45,6 +45,10 @@ class FinanceApiService:
     _fund_list_cache_time: float = 0
     FUND_LIST_CACHE_TTL = 3600  # 基金列表变化极小，缓存1小时
 
+    # 详情接口默认返回的净值条数：约 2 年交易日，覆盖前端「近1月~近2年」走势区间
+    DEFAULT_NAV_LIMIT = 500
+    MAX_NAV_LIMIT = 5000
+
     def __init__(self):
         pass
 
@@ -488,12 +492,13 @@ class FinanceApiService:
 
     # ==================== ETF详细信息查询方法（新增） ====================
 
-    def query_detail(self, fund_code: str) -> Optional[Dict]:
+    def query_detail(self, fund_code: str, nav_limit: int = DEFAULT_NAV_LIMIT) -> Optional[Dict]:
         """
         查询ETF详细信息（完整版）
 
         参数:
             fund_code: 基金代码（如 "512890"）
+            nav_limit: 返回的历史净值条数上限；None 表示返回全量
 
         返回:
             ETF详细信息字典，包含：基本信息、实时行情、费率、规模等
@@ -513,8 +518,8 @@ class FinanceApiService:
         if spot:
             result["realtime"] = spot
 
-        # 3. 历史净值（最近5条）
-        nav_history = self._query_nav_history(fund_code, limit=5)
+        # 3. 历史净值（默认近2年，够前端切分多月/年区间走势）
+        nav_history = self._query_nav_history(fund_code, limit=nav_limit)
         if nav_history:
             result["nav_history"] = nav_history
 
@@ -571,32 +576,69 @@ class FinanceApiService:
             logger.error(f"查询ETF详细概览失败: {e}")
             return None
 
-    def _query_nav_history(self, fund_code: str, limit: int = 5) -> List[Dict]:
-        """查询历史净值记录"""
+    def _query_nav_history(self, fund_code: str, limit: int = None) -> List[Dict]:
+        """
+        查询历史净值记录（场内 ETF 与场外基金走同一个数据源）。
+
+        数据源选型（勿改回 fund_etf_fund_info_em）：
+        - ak.fund_etf_fund_info_em 必须显式传 fund，漏传会静默返回 511280 的净值；
+          且其响应表结构已被上游改动，akshare 1.18.64 下解析必抛
+          ValueError: Length mismatch: Expected axis has 14 elements, new values have 13 elements。
+        - fund_open_fund_info_em 按 symbol 查询，场内场外均可用（110020/512890 实测），
+          走 fund.eastmoney.com（生产服务器可达），返回全量历史。
+
+        参数:
+            fund_code: 基金代码
+            limit: 只取最近 N 条；None 表示全量（老基金可达数千条）
+
+        返回:
+            [{"date", "nav", "accumulated_nav", "daily_growth"}]；取不到时返回 []
+        """
         try:
             import akshare as ak
-            df = ak.fund_etf_fund_info_em()
-
-            if df.empty:
+            logger.info(f"查询历史净值: {fund_code}, limit={limit}")
+            nav_df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+            if nav_df is None or nav_df.empty:
+                logger.warning(f"历史净值为空: {fund_code}")
                 return []
 
-            # 筛选最近的记录
-            df = df.tail(limit)
+            # 累计净值需单独取一次（open 接口不混合返回）；取不到只留空，不影响单位净值
+            accumulated = self._query_accumulated_nav(fund_code)
+
+            if limit:
+                nav_df = nav_df.tail(limit)
 
             results = []
-            for _, row in df.iterrows():
+            for _, row in nav_df.iterrows():
+                date = str(row.get("净值日期", ""))
                 results.append({
-                    "date": str(row.get("净值日期", "")),
-                    "nav": float(row.get("单位净值", 0)) if pd.notna(row.get("单位净值")) else None,
-                    "accumulated_nav": float(row.get("累计净值", 0)) if pd.notna(row.get("累计净值")) else None,
-                    "daily_growth": float(row.get("日增长率", 0)) if pd.notna(row.get("日增长率")) else None,
+                    "date": date,
+                    "nav": self._safe_float(row.get("单位净值")),
+                    "accumulated_nav": accumulated.get(date),
+                    "daily_growth": self._safe_float(row.get("日增长率")),
                 })
 
+            logger.info(f"返回历史净值 {len(results)} 条: {fund_code}")
             return results
 
         except Exception as e:
-            logger.error(f"查询历史净值失败: {e}")
+            logger.error(f"查询历史净值失败 ({fund_code}): {e}")
             return []
+
+    def _query_accumulated_nav(self, fund_code: str) -> Dict[str, Optional[float]]:
+        """取累计净值走势，返回 {净值日期: 累计净值}；失败返回空字典（不阻断单位净值）"""
+        try:
+            import akshare as ak
+            df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
+            if df is None or df.empty:
+                return {}
+            return {
+                str(row.get("净值日期", "")): self._safe_float(row.get("累计净值"))
+                for _, row in df.iterrows()
+            }
+        except Exception as e:
+            logger.warning(f"累计净值取值失败 ({fund_code}): {e}")
+            return {}
 
     # ==================== ETF搜索/筛选方法（新增） ====================
 

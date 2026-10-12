@@ -51,12 +51,62 @@ def _reset_spot_dict():
 
 
 def _install_fake_akshare(monkeypatch, **dfs):
-    """把 akshare 替换为返回录制样本 DataFrame 的假模块。"""
+    """把 akshare 替换为返回录制样本 DataFrame 的假模块。
+
+    注意：此替身用 `**kw` 吞掉全部入参，**不校验调用方传了什么**。
+    测「参数是否传对」的场景必须改用 _install_nav_akshare（会记录入参）。
+    """
     mod = types.ModuleType("akshare")
     for name, df in dfs.items():
         setattr(mod, name, lambda df=df, **kw: df)
     monkeypatch.setitem(sys.modules, "akshare", mod)
     return mod
+
+
+def _nav_df(rows):
+    """构造单位净值走势 DataFrame（列名同 akshare fund_open_fund_info_em 单位净值走势）。"""
+    return pd.DataFrame([
+        {"净值日期": date, "单位净值": nav, "日增长率": growth} for date, nav, growth in rows
+    ])
+
+
+def _acc_nav_df(rows):
+    """构造累计净值走势 DataFrame（列名同 akshare 的累计净值走势）。"""
+    return pd.DataFrame([{"净值日期": date, "累计净值": nav} for date, nav in rows])
+
+
+def _install_nav_akshare(monkeypatch, unit_df, acc_df=None, overview_df=None, calls=None):
+    """替身 fund_open_fund_info_em：按 indicator 返回样本，并**记录每次调用的入参**。
+
+    与 _install_fake_akshare 的关键区别是「参数敏感」：
+    - 入参被记录进 calls，测里可断言 symbol 就是被请求的那只基金
+      （历史缺陷正是漏传基金代码，旧替身对传不传一视同仁，导致该缺陷测不出来）；
+    - fund_etf_fund_info_em 被替换成「一调用就抛错」，防止回退到该已失效接口。
+    """
+    calls = [] if calls is None else calls
+    if overview_df is None:
+        overview_df = pd.DataFrame([{
+            "基金代码": "512890", "基金全称": "华泰柏瑞中证红利低波动ETF", "基金简称": "红利低波ETF",
+        }])
+    mod = types.ModuleType("akshare")
+
+    def fund_open_fund_info_em(symbol=None, indicator=None, **kw):
+        calls.append({"symbol": symbol, "indicator": indicator})
+        if "累计" in (indicator or ""):
+            return acc_df if acc_df is not None else pd.DataFrame()
+        return unit_df
+
+    def fund_etf_fund_info_em(*a, **kw):
+        raise AssertionError(
+            "fund_etf_fund_info_em 已不可用（上游表结构变更且必须显式传 fund），"
+            "历史净值请走 fund_open_fund_info_em"
+        )
+
+    mod.fund_open_fund_info_em = fund_open_fund_info_em
+    mod.fund_etf_fund_info_em = fund_etf_fund_info_em
+    mod.fund_overview_em = lambda df=overview_df, **kw: df
+    monkeypatch.setitem(sys.modules, "akshare", mod)
+    return mod, calls
 
 
 # ==================== 纯函数 ====================
@@ -346,22 +396,72 @@ def test_get_category_funds_返回分类下基金():
 
 def test_query_detail_返回详情(monkeypatch):
     FinanceApiService._spot_dict = {"512890": _spot()}
-    _install_fake_akshare(
+    _, calls = _install_nav_akshare(
         monkeypatch,
-        fund_overview_em=pd.DataFrame([{"基金代码": "512890", "基金全称": "华泰柏瑞中证红利低波动ETF", "基金简称": "红利低波ETF"}]),
-        fund_etf_fund_info_em=pd.DataFrame([{"净值日期": "2026-01-05", "单位净值": 1.5, "累计净值": 1.5, "日增长率": 0.5}]),
+        unit_df=_nav_df([("2026-01-05", 1.5, 0.5), ("2026-01-06", 1.52, 1.33)]),
+        acc_df=_acc_nav_df([("2026-01-05", 1.5), ("2026-01-06", 1.52)]),
     )
     detail = FinanceApiService().query_detail("512890")
+
     assert detail["code"] == "512890"
     assert "realtime" in detail
+    assert [i["date"] for i in detail["nav_history"]] == ["2026-01-05", "2026-01-06"]
     assert detail["nav_history"][0]["nav"] == 1.5
+    assert detail["nav_history"][0]["daily_growth"] == 0.5
+    assert detail["nav_history"][1]["accumulated_nav"] == 1.52
+    # 净值必须按被请求的基金代码取（历史缺陷：漏传代码取到默认基金 511280）
+    assert [c["symbol"] for c in calls] == ["512890", "512890"]
 
 
-def test_query_detail_无数据返回None(monkeypatch):
+def test_query_detail_净值按请求代码取_不落默认基金(monkeypatch):
+    """回归守卫：旧实现用 fund_etf_fund_info_em() 不传代码，会静默返回 511280 的净值。"""
+    _, calls = _install_nav_akshare(monkeypatch, unit_df=_nav_df([("2026-01-05", 9.99, 0.0)]))
+    detail = FinanceApiService().query_detail("110020")
+
+    assert calls and all(c["symbol"] == "110020" for c in calls)
+    assert detail["nav_history"][0]["nav"] == 9.99
+
+
+def test_query_detail_默认返回近2年条数_可按参数收窄(monkeypatch):
+    rows = [
+        (d.strftime("%Y-%m-%d"), 1.0 + i / 1000, 0.1)
+        for i, d in enumerate(pd.date_range("2024-01-01", periods=600, freq="D"))
+    ]
+    _install_nav_akshare(monkeypatch, unit_df=_nav_df(rows))
+    svc = FinanceApiService()
+
+    assert len(svc.query_detail("512890")["nav_history"]) == FinanceApiService.DEFAULT_NAV_LIMIT
+    assert len(svc.query_detail("512890", nav_limit=10)["nav_history"]) == 10
+    # 取的是最近 N 条，不是最早 N 条
+    assert svc.query_detail("512890", nav_limit=1)["nav_history"][0]["date"] == rows[-1][0]
+
+
+def test_query_detail_概览与净值皆空返回None(monkeypatch):
     FinanceApiService._spot_dict = None
-    _install_fake_akshare(
-        monkeypatch,
-        fund_overview_em=pd.DataFrame(),
-        fund_etf_fund_info_em=pd.DataFrame(),
-    )
+    _install_nav_akshare(monkeypatch, unit_df=pd.DataFrame(), overview_df=pd.DataFrame())
     assert FinanceApiService().query_detail("999999") is None
+
+
+def test_query_nav_history_累计净值缺失不影响单位净值(monkeypatch):
+    _install_nav_akshare(monkeypatch, unit_df=_nav_df([("2026-01-05", 1.5, 0.5)]), acc_df=pd.DataFrame())
+    nav = FinanceApiService()._query_nav_history("512890")
+    assert nav == [{"date": "2026-01-05", "nav": 1.5, "accumulated_nav": None, "daily_growth": 0.5}]
+
+
+def test_query_nav_history_上游异常返回空列表(monkeypatch):
+    """上游报错（网络/表结构变更）时只降级为空，不能让详情接口整体 500。"""
+    mod = types.ModuleType("akshare")
+
+    def boom(**kw):
+        raise ValueError("Length mismatch: Expected axis has 14 elements")
+
+    mod.fund_open_fund_info_em = boom
+    monkeypatch.setitem(sys.modules, "akshare", mod)
+    assert FinanceApiService()._query_nav_history("512890") == []
+
+
+def test_query_nav_history_全量返回(monkeypatch):
+    """limit=None（全量）不截断，供需要完整历史（如近2年以上）的调用方使用。"""
+    rows = [(f"2026-01-{d:02d}", 1.0 + d / 100, 0.1) for d in range(1, 29)]
+    _install_nav_akshare(monkeypatch, unit_df=_nav_df(rows))
+    assert len(FinanceApiService()._query_nav_history("512890", limit=None)) == len(rows)

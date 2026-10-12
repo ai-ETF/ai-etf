@@ -100,8 +100,10 @@ def _block_outbound_network(request, monkeypatch):
     等所有 HTTP 客户端（它们最终都落到 socket.connect）。
 
     eval 测试（真实 LLM）需访问 Anthropic API，跳过守卫。
+    integration_net 测试（真实上游契约）同样需要出网，跳过守卫 —— 这类测试**必须**
+    同时标 `integration`（否则会被默认的 `-m 'not integration'` 漏进来当联网单测跑）。
     """
-    if request.node.get_closest_marker("eval"):
+    if request.node.get_closest_marker("eval") or request.node.get_closest_marker("integration_net"):
         yield
         return
 
