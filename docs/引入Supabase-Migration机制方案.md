@@ -41,12 +41,12 @@ Supabase **数据库密码**（Postgres 密码，非 service_role key）。`link
 - `db pull` 不写迁移历史表，因此必须把基线标记为已应用，否则后续 `db push` 会重复执行基线导致「表已存在」报错
 - `supabase migration repair --status applied <基线version> --linked`（version 取迁移文件名时间戳前缀）
 
-### 5. 归档旧 SQL 文件到 `/legacy_sql` 目录
-- 新建 `docs/legacy_sql/` 目录（位于 `/docs` 下），将 `sql/` 下 22 个文件全部移入：
-  - 20 个已跟踪文件用 `git mv sql/X.sql docs/legacy_sql/X.sql`
-  - 2 个未跟踪文件用 `mv sql/X.sql docs/legacy_sql/X.sql`
+### 5. 移除旧 SQL 文件
+- 原计划将 `sql/` 下 22 个文件归档至 `docs/legacy_sql/`，实际也曾按此归档。
+- **后续已整体删除**：旧库结构经多轮迁移后与现库完全脱节，`legacy_sql/` 已无参考价值；
+  其内容可从 Git 历史（commit `971b213`）完整取回。
 - 删除空的 `sql/` 目录
-- 保留作历史参考，不参与新迁移流程
+- 旧脚本不参与新迁移流程；现库结构的唯一权威来源是 `supabase/migrations/`。
 
 ### 6. Seed 数据（可选，建议）
 - `db pull` 只含 schema 不含数据。当前参考数据（`fund_fee_rules` 费率表、风险等级表等）已在远端

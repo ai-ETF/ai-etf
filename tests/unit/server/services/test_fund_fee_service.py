@@ -4,7 +4,7 @@
 所测功能：申购费选档与计算、赎回费计算、白名单校验、费率规则查询、读值兜底
 测试方法：依赖注入（rule 参数 / 替换 svc._client），全程不联网、不连 Supabase。
 
-费率样本取自真实配置 docs/legacy_sql/fund_fee_rules_seed.sql。
+费率样本取自真实配置 supabase/seed.sql。
 
 覆盖范围说明（规则缺失一律「直接暴露错误」，不做默认值兜底）：
 - 申购侧 purchase_fee_tiers 缺失/为空  → calc_purchase_fee 返回 None（拒绝交易）
