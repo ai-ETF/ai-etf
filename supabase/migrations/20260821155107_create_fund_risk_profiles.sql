@@ -26,7 +26,7 @@ COMMENT ON COLUMN public.fund_risk_profiles.risk_level IS '基金风险等级：
 COMMENT ON COLUMN public.fund_risk_profiles.risk_label IS '基金风险等级中文标签：中等风险/较高风险/高风险';
 
 -- 种子数据（20 只白名单基金）
--- 来源：docs/legacy_sql/seed_fund_risk_levels.sql（fund_code+四维分+risk_level 一致）
+-- 来源：生产库 fund_risk_profiles 现有数据导出（fund_code+四维分+risk_level 一致）
 -- risk_label 按 fund_risk_scores.RISK_LABELS 映射写死，避免运行时计算
 INSERT INTO public.fund_risk_profiles
   (fund_code, breadth_score, volatility_score, market_score, board_score, risk_level, risk_label)
