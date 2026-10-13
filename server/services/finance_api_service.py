@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # K线文件缓存目录
 KLINE_CACHE_DIR = "/tmp/etf_kline_cache"
 KLINE_CACHE_TTL = 86400  # 一天过期
+KLINE_SOURCE = "sina"  # 当前行情数据源标识（用于缓存文件名隔离，换源时同步修改）
 
 # 判断是否交易时段（交易日历的唯一来源；A 股交易日 + 9:30-15:00，识别法定节假日）
 from server.services.trading_calendar import beijing_now, is_trading_time
@@ -39,6 +40,11 @@ class FinanceApiService:
     _spot_dict: Optional[dict[str, dict]] = None  # {"512890": {...行情dict...}, ...}
     _spot_cache_time: float = 0
     CACHE_TTL = 30  # 缓存有效期（秒），盘中30秒刷新一次
+
+    # 刷新失败退避：上游不可达时不再每 30 秒空转（见 refresh_spot_cache）
+    _consecutive_failures: int = 0
+    _next_retry_at: float = 0
+    MAX_BACKOFF = 1800  # 退避上限（秒）
 
     # 基金列表缓存（类级别，全生命周期共享）
     _fund_list_cache: Optional[list] = None
@@ -248,6 +254,29 @@ class FinanceApiService:
         match = re.search(r"(\d+(?:\.\d+)?)\s*%", rate_str)
         return f"{match.group(1)}%" if match else rate_str
 
+    # ==================== 数据源适配（新浪） ====================
+
+    @staticmethod
+    def _strip_market_prefix(code: str) -> str:
+        """去掉新浪代码的市场前缀：sh512890 / sz159915 → 512890（裸码原样返回）
+
+        项目内部一律用裸 6 位代码作键（_spot_dict 的键、各接口入参），
+        只有新浪接口本身需要带 sh/sz 前缀。
+        """
+        c = str(code).strip().lower()
+        if c[:2] in ("sh", "sz", "bj") and len(c) > 6:
+            return c[2:]
+        return c
+
+    @staticmethod
+    def _to_sina_symbol(fund_code: str) -> str:
+        """裸 6 位代码 → 新浪代码：512890 → sh512890，159915 → sz159915"""
+        c = str(fund_code).strip().lower()
+        if c[:2] in ("sh", "sz", "bj"):
+            return c
+        # 上交所：5(ETF/基金)、6(股票)；深交所：0/1(基金)、3(创业板)
+        return ("sh" if c[:1] in ("5", "6") else "sz") + c
+
     # ==================== 实时行情缓存（哈希表） ====================
 
     @classmethod
@@ -259,10 +288,10 @@ class FinanceApiService:
 
     @classmethod
     def _rebuild_spot_dict(cls, df: pd.DataFrame) -> None:
-        """从 DataFrame 构建 代码→行情 哈希表"""
+        """从全市场快照构建 代码→行情 哈希表（键为不带市场前缀的 6 位代码）"""
         d = {}
         for _, row in df.iterrows():
-            code = str(row.get('代码', ''))
+            code = cls._strip_market_prefix(str(row.get('代码', '')))
             if code:
                 d[code] = cls._format_spot_data(row)
         cls._spot_dict = d
@@ -325,7 +354,14 @@ class FinanceApiService:
     @staticmethod
     def _format_spot_data(row) -> Dict:
         """
-        格式化单行行情数据（支持 pandas Series 或 dict 输入）
+        格式化单行行情数据（新浪全市场快照，支持 pandas Series 或 dict 输入）
+
+        数据源：ak.fund_etf_category_sina(symbol="ETF基金")
+        列：代码 名称 最新价 涨跌额 涨跌幅 买入 卖出 昨收 今开 最高 最低 成交量 成交额
+
+        新浪不提供的字段（换手率/量比/内外盘/委比/主力净流入/份额/市值）统一填 0.0，
+        以保持响应契约（MarketData 的行情字段是非 Optional 的 float）。
+        振幅可由「最高/最低/昨收」还原，不依赖上游。
 
         参数:
             row: pandas Series 或 dict
@@ -348,48 +384,53 @@ class FinanceApiService:
                 return default
             return str(val)
 
+        prev_close = safe_float(row.get('昨收', 0))
+        high = safe_float(row.get('最高', 0))
+        low = safe_float(row.get('最低', 0))
+
         return {
-            # 基础信息
-            "code": safe_str(row.get('代码', '')),
+            # 基础信息（快照即当日数据，数据日期取请求时的北京日期）
+            "code": FinanceApiService._strip_market_prefix(safe_str(row.get('代码', ''))),
             "name": safe_str(row.get('名称', '')),
-            "data_date": safe_str(row.get('数据日期', '')),
-            "update_time": safe_str(row.get('更新时间', '')),
+            "data_date": beijing_now().strftime("%Y-%m-%d"),
+            "update_time": "",
 
             # 基础行情
             "price": safe_float(row.get('最新价', 0)),
             "change": safe_float(row.get('涨跌额', 0)),
             "change_pct": safe_float(row.get('涨跌幅', 0)),
-            "prev_close": safe_float(row.get('昨收', 0)),
+            "prev_close": prev_close,
 
             # 日内行情
-            "open": safe_float(row.get('开盘价', 0)),
-            "high": safe_float(row.get('最高价', 0)),
-            "low": safe_float(row.get('最低价', 0)),
-            "amplitude": safe_float(row.get('振幅', 0)),
+            "open": safe_float(row.get('今开', 0)),
+            "high": high,
+            "low": low,
+            # 新浪不提供振幅，按 (最高-最低)/昨收 还原
+            "amplitude": round((high - low) / prev_close * 100, 4) if prev_close else 0.0,
 
             # 成交数据
             "volume": safe_float(row.get('成交量', 0)),
             "amount": safe_float(row.get('成交额', 0)),
-            "turnover_rate": safe_float(row.get('换手率', 0)),
-            "volume_ratio": safe_float(row.get('量比', 0)),
+            "turnover_rate": 0.0,  # 新浪列表不提供
+            "volume_ratio": 0.0,   # 新浪列表不提供
 
             # 盘口数据
-            "bid_price": safe_float(row.get('买一', 0)),
-            "ask_price": safe_float(row.get('卖一', 0)),
-            "outer_vol": safe_float(row.get('外盘', 0)),
-            "inner_vol": safe_float(row.get('内盘', 0)),
-            "order_ratio": safe_float(row.get('委比', 0)),
+            "bid_price": safe_float(row.get('买入', 0)),
+            "ask_price": safe_float(row.get('卖出', 0)),
+            "outer_vol": 0.0,      # 新浪列表不提供
+            "inner_vol": 0.0,      # 新浪列表不提供
+            "order_ratio": 0.0,    # 新浪列表不提供
 
-            # 资金流向
-            "main_inflow": safe_float(row.get('主力净流入-净额', 0)),
-            "main_inflow_pct": safe_float(row.get('主力净流入-净占比', 0)),
+            # 资金流向（新浪列表不提供，恒为 0——前端「资金流向」入口需隐藏）
+            "main_inflow": 0.0,
+            "main_inflow_pct": 0.0,
 
-            # 市值数据
-            "latest_shares": safe_float(row.get('最新份额', 0)),
-            "float_mv": safe_float(row.get('流通市值', 0)),
-            "total_mv": safe_float(row.get('总市值', 0)),
+            # 市值数据（新浪列表不提供）
+            "latest_shares": 0.0,
+            "float_mv": 0.0,
+            "total_mv": 0.0,
 
-            # 标记数据来源
+            # 标记数据来源（保持与既有契约一致，不随数据源改名）
             "source": "api",
         }
 
@@ -405,6 +446,10 @@ class FinanceApiService:
     ) -> List[Dict]:
         """
         查询ETF历史K线数据（带文件缓存，历史数据只增不改，可缓存1天）
+
+        数据源：ak.fund_etf_hist_sina（新浪只有日线，周/月线由日线重采样，见 _resample_kline）
+        缓存的是**归一化后的内部列名**（date/open/close/... ），不再缓存上游原始列，
+        避免换源后命中旧缓存导致列名对不上。
 
         参数:
             fund_code: 基金代码（如 "512890"）
@@ -424,10 +469,17 @@ class FinanceApiService:
             try:
                 import akshare as ak
                 logger.info(f"查询K线数据: {fund_code}, period={period}")
-                df = ak.fund_etf_hist_em(symbol=fund_code, period=period, adjust='')
-                if df.empty:
+                symbol = self._to_sina_symbol(fund_code)
+                df = ak.fund_etf_hist_sina(symbol=symbol)
+                if df is None or df.empty:
                     logger.warning(f"K线数据为空: {fund_code}")
                     return []
+                # 先归一化成内部列名（并补出涨跌额/涨跌幅/振幅），再按需重采样
+                df = self._normalize_kline(df)
+                if period in ("weekly", "monthly"):
+                    df = self._resample_kline(df, period)
+                elif period != "daily":
+                    logger.warning(f"未知K线周期 {period}，按日线返回")
                 self._save_kline_cache(fund_code, period, df)
             except Exception as e:
                 logger.error(f"查询K线数据失败: {e}")
@@ -435,29 +487,36 @@ class FinanceApiService:
 
         # 日期过滤
         if start_date:
-            df = df[df['日期'] >= start_date]
+            df = df[df['date'] >= start_date]
         if end_date:
-            df = df[df['日期'] <= end_date]
+            df = df[df['date'] <= end_date]
 
         # 数量限制
         if limit:
             df = df.tail(limit)
 
-        # 转换为列表
+        # 转换为列表（NaN → 0.0，保证 KlineData 的非 Optional float 契约）
+        def num(val) -> float:
+            try:
+                f = float(val)
+            except (TypeError, ValueError):
+                return 0.0
+            return 0.0 if f != f else f
+
         results = []
         for _, row in df.iterrows():
             results.append({
-                "date": str(row['日期']),
-                "open": float(row['开盘']),
-                "close": float(row['收盘']),
-                "high": float(row['最高']),
-                "low": float(row['最低']),
-                "volume": float(row['成交量']),
-                "amount": float(row['成交额']),
-                "amplitude": float(row['振幅']),
-                "change_pct": float(row['涨跌幅']),
-                "change": float(row['涨跌额']),
-                "turnover_rate": float(row['换手率']),
+                "date": str(row['date']),
+                "open": num(row['open']),
+                "close": num(row['close']),
+                "high": num(row['high']),
+                "low": num(row['low']),
+                "volume": num(row['volume']),
+                "amount": num(row['amount']),
+                "amplitude": num(row['amplitude']),
+                "change_pct": num(row['change_pct']),
+                "change": num(row['change']),
+                "turnover_rate": num(row['turnover_rate']),
             })
 
         logger.info(f"返回K线数据: {len(results)} 条")
@@ -898,14 +957,80 @@ class FinanceApiService:
         except (ValueError, TypeError):
             return None
 
+    # ==================== K线归一化 / 重采样 ====================
+
+    @staticmethod
+    def _with_derived_kline_fields(df: pd.DataFrame) -> pd.DataFrame:
+        """补出涨跌额/涨跌幅/振幅（相对上一根收盘计算），换手率无来源填 0"""
+        prev_close = df["close"].shift(1)
+        df["change"] = (df["close"] - prev_close).fillna(0.0)
+        df["change_pct"] = ((df["close"] - prev_close) / prev_close * 100).fillna(0.0).round(4)
+        df["amplitude"] = ((df["high"] - df["low"]) / prev_close * 100).fillna(0.0).round(4)
+        df["turnover_rate"] = 0.0
+        return df
+
+    @staticmethod
+    def _normalize_kline(df: pd.DataFrame) -> pd.DataFrame:
+        """把上游日K归一化成内部列名，并补出 change / change_pct / amplitude
+
+        新浪原始列：date open high low close volume amount postVol postAmt
+        内部列：    date open high low close volume amount change change_pct amplitude turnover_rate
+        """
+        out = pd.DataFrame({
+            "date": pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d"),
+            "open": pd.to_numeric(df["open"], errors="coerce"),
+            "high": pd.to_numeric(df["high"], errors="coerce"),
+            "low": pd.to_numeric(df["low"], errors="coerce"),
+            "close": pd.to_numeric(df["close"], errors="coerce"),
+            "volume": pd.to_numeric(df["volume"], errors="coerce"),
+            "amount": pd.to_numeric(df["amount"], errors="coerce"),
+        })
+        # 上游顺序不保证；升序是 K 线契约（重采样、涨跌幅都依赖前一根）
+        out = out.sort_values("date").reset_index(drop=True)
+        return FinanceApiService._with_derived_kline_fields(out)
+
+    @staticmethod
+    def _resample_kline(df: pd.DataFrame, period: str) -> pd.DataFrame:
+        """日线 → 周线(W-FRI) / 月线(ME)
+
+        新浪只有日线接口，周/月线由日线聚合：open=区间首、high=区间最高、
+        low=区间最低、close=区间末、volume/amount=求和，再重算涨跌幅/振幅。
+
+        日期取区间内**最后一个实际交易日**（同 Yahoo/多数行情源），不用区间末日标签：
+        用 W-FRI/ME 的区间末日会把本周标成还没到的周五（如今天 10-13 标出 10-16），
+        前端按日期过滤或画时间轴会把它当越界数据丢掉。
+        """
+        rule = {"weekly": "W-FRI", "monthly": "ME"}[period]
+        indexed = df.set_index(pd.to_datetime(df["date"]))
+        indexed["_d"] = indexed.index  # 取组内最后一个交易日用的辅助列
+        agg = indexed.resample(rule).agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+            "amount": "sum",
+            "_d": "last",
+        }).dropna(subset=["close"])
+        out = pd.DataFrame({
+            "date": agg["_d"].dt.strftime("%Y-%m-%d"),
+            "open": agg["open"].to_numpy(),
+            "high": agg["high"].to_numpy(),
+            "low": agg["low"].to_numpy(),
+            "close": agg["close"].to_numpy(),
+            "volume": agg["volume"].to_numpy(),
+            "amount": agg["amount"].to_numpy(),
+        })
+        return FinanceApiService._with_derived_kline_fields(out)
+
     # ==================== K线文件缓存方法 ====================
 
     @staticmethod
     def _kline_cache_path(fund_code: str, period: str) -> str:
-        """K线缓存文件路径"""
+        """K线缓存文件路径（文件名带数据源标识，避免换源后与旧缓存串味）"""
         os.makedirs(KLINE_CACHE_DIR, exist_ok=True)
         safe_code = fund_code.replace("/", "_")
-        return f"{KLINE_CACHE_DIR}/{safe_code}_{period}.json"
+        return f"{KLINE_CACHE_DIR}/{safe_code}_{period}_{KLINE_SOURCE}.json"
 
     @staticmethod
     def _load_kline_cache(fund_code: str, period: str) -> Optional[pd.DataFrame]:
@@ -920,6 +1045,11 @@ class FinanceApiService:
                 os.remove(path)
                 return None
             df = pd.read_json(path, orient="split")
+            # read_json 会把 date 列从字符串还原成 Timestamp，str() 后变成
+            # "2026-10-12 00:00:00" —— 与未命中缓存时（"%Y-%m-%d"）格式不一致。
+            # 统一回纯日期，保证缓存命中与否返回同一契约。
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
             logger.info(f"K线缓存命中: {fund_code} {period} ({len(df)} 条)")
             return df
         except Exception as e:
@@ -942,37 +1072,45 @@ class FinanceApiService:
         """
         查询当日分时图数据
 
-        优先从 AkShare 分钟接口获取，失败则用日K线模拟。
+        数据源：ak.stock_zh_a_minute（新浪）——返回约 1970 根的**滚动窗口**，跨多个
+        交易日，必须按「今天」过滤，否则分时图会把十几天的走势画成一天。
+        取不到当日数据时，降级用实时行情 + 日K线模拟。
 
         参数:
             fund_code: 基金代码
 
         返回:
             分时数据列表，每条包含：time(时间), price(价格), avg_price(均价),
-            volume(成交量), amount(成交额), change_pct(累计涨跌幅)
+            volume(成交量), amount(成交额), change_pct(相对昨收的累计涨跌幅)
         """
-        # 方案1: 尝试从分钟K线获取
+        # 方案1: 新浪分钟线，只取当日
         try:
             import akshare as ak
-            df = ak.fund_etf_hist_min_em(symbol=fund_code, period='1', adjust='')
+            symbol = self._to_sina_symbol(fund_code)
+            df = ak.stock_zh_a_minute(symbol=symbol, period='1', adjust='')
             if df is not None and not df.empty:
-                results = []
-                for _, row in df.iterrows():
-                    results.append({
-                        "time": str(row.get('时间', '')),
-                        "price": self._safe_float(row.get('收盘', 0)),
-                        "open": self._safe_float(row.get('开盘', 0)),
-                        "high": self._safe_float(row.get('最高', 0)),
-                        "low": self._safe_float(row.get('最低', 0)),
-                        "volume": self._safe_float(row.get('成交量', 0)),
-                        "amount": self._safe_float(row.get('成交额', 0)),
-                    })
-                if results:
-                    # 计算均价和涨跌幅
-                    first_price = results[0]["price"] or 0
-                    for r in results:
-                        r["avg_price"] = r["amount"] / r["volume"] if r["volume"] else r["price"]
-                        r["change_pct"] = round(((r["price"] - first_price) / first_price) * 100, 2) if first_price else 0
+                today = beijing_now().strftime("%Y-%m-%d")
+                df = df[df['day'].astype(str).str.startswith(today)]
+                if not df.empty:
+                    prev_close = self._prev_close_for_intraday(fund_code)
+                    results = []
+                    for _, row in df.iterrows():
+                        price = self._safe_float(row.get('close', 0)) or 0
+                        volume = self._safe_float(row.get('volume', 0)) or 0
+                        amount = self._safe_float(row.get('amount', 0)) or 0
+                        # day 形如 "2026-10-13 09:31:00"，只保留 HH:MM
+                        stamp = str(row.get('day', ''))
+                        results.append({
+                            "time": stamp[11:16] if len(stamp) >= 16 else stamp,
+                            "price": price,
+                            "open": self._safe_float(row.get('open', 0)),
+                            "high": self._safe_float(row.get('high', 0)),
+                            "low": self._safe_float(row.get('low', 0)),
+                            "volume": volume,
+                            "amount": amount,
+                            "avg_price": round(amount / volume, 4) if volume else price,
+                            "change_pct": round((price - prev_close) / prev_close * 100, 2) if prev_close else 0,
+                        })
                     logger.info(f"获取分时图数据(真实): {fund_code}, {len(results)} 条")
                     return results
         except Exception as e:
@@ -980,6 +1118,22 @@ class FinanceApiService:
 
         # 方案2: 用实时行情 + 日K线模拟当日分时走势
         return self._generate_intraday_fallback(fund_code)
+
+    def _prev_close_for_intraday(self, fund_code: str) -> float:
+        """取昨收价（分时涨跌幅的基准）：优先实时快照，其次日K里今天之前的最后一根
+
+        盘中新浪日K不含当日未收盘的 K 线，收盘后才含；所以按「日期 < 今天」
+        取最后一根，盘中/盘后都拿到真正的昨收。
+        """
+        spot = self._ensure_spot_dict().get(fund_code)
+        if spot and spot.get("prev_close"):
+            return spot["prev_close"]
+
+        today = beijing_now().strftime("%Y-%m-%d")
+        for bar in reversed(self.query_kline(fund_code, period='daily', limit=10)):
+            if str(bar.get("date", "")) < today:
+                return bar.get("close") or 0
+        return 0
 
     def _generate_intraday_fallback(self, fund_code: str) -> List[Dict]:
         """生成模拟分时走势（基于当日实时行情和昨日K线）"""
@@ -1132,24 +1286,42 @@ class FinanceApiService:
         """
         强制刷新全量ETF实时行情缓存（供定时任务调用）。
 
+        数据源：ak.fund_etf_category_sina（新浪）。
+
         交易时段（交易日 9:30-15:00，识别法定节假日）每30秒拉取一次最新数据。
         非交易时段跳过实际拉取，但如果缓存为空则仍然加载一次（首次启动/重启后填充）。
+
+        失败退避：上游不可达时不再每 30 秒空转。连续失败 n 次后，退避
+        min(30 × 2^(n-1), MAX_BACKOFF) 秒；退避期内直接返回 False 且不发请求。
+        （此前无退避，一次持续 3 周的上游故障导致 24h×120 次/天 的无效请求。）
         """
-        import akshare as ak
+        if time.time() < cls._next_retry_at:
+            logger.debug(f"[定时任务] 退避中，{int(cls._next_retry_at - time.time())}s 后重试")
+            return False
+
         if not is_trading_time(beijing_now()) and cls._spot_dict is not None:
             logger.debug("[定时任务] 非交易时段，跳过刷新")
             return True  # 返回 True 表示缓存仍有效
 
         try:
+            import akshare as ak
             now = time.time()
-            logger.info(f"[定时任务] 正在刷新全量ETF实时行情...")
-            df = ak.fund_etf_spot_em()
+            logger.info("[定时任务] 正在刷新全量ETF实时行情（新浪）...")
+            df = ak.fund_etf_category_sina(symbol="ETF基金")
             cls._spot_cache_time = now
             # 同步构建哈希表
             cls._rebuild_spot_dict(df)
+            cls._consecutive_failures = 0
+            cls._next_retry_at = 0
             logger.info(f"[定时任务] 刷新成功，共 {len(df)} 只ETF")
             return True
         except Exception as e:
-            logger.error(f"[定时任务] 刷新失败: {e}")
+            cls._consecutive_failures += 1
+            backoff = min(30 * (2 ** (cls._consecutive_failures - 1)), cls.MAX_BACKOFF)
+            cls._next_retry_at = time.time() + backoff
+            logger.error(
+                f"[定时任务] 刷新失败（连续 {cls._consecutive_failures} 次，"
+                f"{backoff}s 后重试）: {e}"
+            )
             # 保留旧缓存不覆盖
             return False

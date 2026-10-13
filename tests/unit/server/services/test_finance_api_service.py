@@ -9,6 +9,7 @@
 """
 import sys
 import types
+from datetime import datetime
 
 import pandas as pd
 import pytest
@@ -45,9 +46,14 @@ def _spot_df(rows):
 def _reset_spot_dict():
     FinanceApiService._spot_dict = None
     FinanceApiService._fund_list_cache = None
+    # 刷新退避是类级状态，不重置会漏进后续用例（前一个用例失败会挡住后一个的刷新）
+    FinanceApiService._consecutive_failures = 0
+    FinanceApiService._next_retry_at = 0
     yield
     FinanceApiService._spot_dict = None
     FinanceApiService._fund_list_cache = None
+    FinanceApiService._consecutive_failures = 0
+    FinanceApiService._next_retry_at = 0
 
 
 def _install_fake_akshare(monkeypatch, **dfs):
@@ -228,10 +234,15 @@ def test_query_ranking_空缓存返回空列表():
 
 
 def test_refresh_spot_cache_刷新成功(monkeypatch):
+    """新浪返回带 sh/sz 前缀的代码，入缓存时必须剥成裸码（接口入参用裸码）。"""
     monkeypatch.setattr("server.services.finance_api_service.is_trading_time", lambda *_: True)
-    _install_fake_akshare(monkeypatch, fund_etf_spot_em=_spot_df([{"代码": "512890", "名称": "红利低波ETF", "最新价": 1.5}]))
+    _install_fake_akshare(monkeypatch, fund_etf_category_sina=_spot_df([
+        {"代码": "sh512890", "名称": "红利低波ETF", "最新价": 1.5},
+        {"代码": "sz159915", "名称": "创业板ETF", "最新价": 2.5},
+    ]))
     assert FinanceApiService.refresh_spot_cache() is True
-    assert FinanceApiService._spot_dict is not None
+    assert sorted(FinanceApiService._spot_dict) == ["159915", "512890"]
+    assert FinanceApiService._consecutive_failures == 0
 
 
 def test_refresh_spot_cache_非交易时段且已有缓存_跳过(monkeypatch):
@@ -247,42 +258,101 @@ def test_refresh_spot_cache_异常返回False(monkeypatch):
     def _boom(**kw):
         raise RuntimeError("net fail")
 
-    mod.fund_etf_spot_em = _boom
+    mod.fund_etf_category_sina = _boom
     monkeypatch.setitem(sys.modules, "akshare", mod)
     assert FinanceApiService.refresh_spot_cache() is False
+
+
+def test_refresh_spot_cache_失败后退避_不空转(monkeypatch):
+    """上游不可达时不能每 30 秒重试：退避期内直接返回 False 且不再打上游。
+
+    历史事故：行情源被拒后无退避，24h×120 次/天 连续打了 3 周又 6 万次。
+    """
+    monkeypatch.setattr("server.services.finance_api_service.is_trading_time", lambda *_: True)
+    calls = []
+    mod = types.ModuleType("akshare")
+
+    def _boom(**kw):
+        calls.append(1)
+        raise RuntimeError("net fail")
+
+    mod.fund_etf_category_sina = _boom
+    monkeypatch.setitem(sys.modules, "akshare", mod)
+
+    assert FinanceApiService.refresh_spot_cache() is False
+    assert FinanceApiService._consecutive_failures == 1
+    assert FinanceApiService._next_retry_at > 0
+    assert FinanceApiService.refresh_spot_cache() is False  # 退避期内
+    assert len(calls) == 1, "退避期内不应再请求上游"
 
 
 # ==================== query_kline / 缓存 ====================
 
 
 def _kline_df(dates=("2026-01-05", "2026-01-06")):
+    """构造日K DataFrame（列名同 akshare fund_etf_hist_sina）。"""
     return pd.DataFrame([
-        {"日期": d, "开盘": 1.5, "收盘": 1.6, "最高": 1.7, "最低": 1.4,
-         "成交量": 100000, "成交额": 150000, "振幅": 20.0, "涨跌幅": 6.67, "涨跌额": 0.1, "换手率": 1.0}
+        {"date": d, "open": 1.5, "close": 1.6, "high": 1.7, "low": 1.4,
+         "volume": 100000, "amount": 150000, "postVol": None, "postAmt": None}
         for d in dates
     ])
 
 
 def test_query_kline_从akshare获取(monkeypatch, tmp_path):
     monkeypatch.setattr(finance_api, "KLINE_CACHE_DIR", str(tmp_path))
-    _install_fake_akshare(monkeypatch, fund_etf_hist_em=_kline_df())
+    _install_fake_akshare(monkeypatch, fund_etf_hist_sina=_kline_df())
     results = FinanceApiService().query_kline("512890", period="daily")
     assert len(results) == 2
     assert results[0]["date"] == "2026-01-05"
     assert results[0]["close"] == 1.6
 
 
+def test_query_kline_由日线补出涨跌幅与振幅(monkeypatch, tmp_path):
+    """新浪日K没有涨跌幅/振幅列，必须由相邻收盘价现算（首根无前收 → 0）。"""
+    monkeypatch.setattr(finance_api, "KLINE_CACHE_DIR", str(tmp_path))
+    daily = pd.DataFrame([
+        {"date": "2026-01-05", "open": 1.0, "high": 1.2, "low": 0.9, "close": 1.0, "volume": 10, "amount": 100},
+        {"date": "2026-01-06", "open": 1.0, "high": 1.5, "low": 1.0, "close": 1.1, "volume": 20, "amount": 200},
+    ])
+    _install_fake_akshare(monkeypatch, fund_etf_hist_sina=daily)
+    out = FinanceApiService().query_kline("512890")
+    assert out[0]["change"] == 0.0 and out[0]["change_pct"] == 0.0 and out[0]["amplitude"] == 0.0
+    assert out[1]["change"] == pytest.approx(0.1)
+    assert out[1]["change_pct"] == pytest.approx(10.0)      # (1.1-1.0)/1.0
+    assert out[1]["amplitude"] == pytest.approx(50.0)       # (1.5-1.0)/1.0
+
+
+def test_query_kline_周线由日线重采样(monkeypatch, tmp_path):
+    """新浪只有日线接口，周/月线聚合：open=首、high=最高、low=最低、close=末、volume/amount=求和。"""
+    monkeypatch.setattr(finance_api, "KLINE_CACHE_DIR", str(tmp_path))
+    daily = pd.DataFrame([
+        {"date": "2026-01-05", "open": 1.0, "high": 1.2, "low": 0.9, "close": 1.1, "volume": 10, "amount": 100},
+        {"date": "2026-01-06", "open": 1.1, "high": 1.5, "low": 1.0, "close": 1.4, "volume": 20, "amount": 200},
+        {"date": "2026-01-12", "open": 1.4, "high": 1.6, "low": 1.3, "close": 1.5, "volume": 30, "amount": 300},
+    ])
+    _install_fake_akshare(monkeypatch, fund_etf_hist_sina=daily)
+    weekly = FinanceApiService().query_kline("512890", period="weekly")
+    assert len(weekly) == 2
+    assert (weekly[0]["open"], weekly[0]["high"], weekly[0]["low"], weekly[0]["close"]) == (1.0, 1.5, 0.9, 1.4)
+    assert weekly[0]["volume"] == 30  # 10 + 20
+    assert weekly[0]["amount"] == 300
+    # 日期取区间内最后一个**实际交易日**，不是 W-FRI 的周五：01-05 那周只有 05/06，
+    # 若按区间末日标会得到 01-09，本周还会标出没到的未来周五，前端按日期过滤会丢数据
+    assert [w["date"] for w in weekly] == ["2026-01-06", "2026-01-12"]
+
+
 def test_query_kline_日期过滤与limit(monkeypatch, tmp_path):
     monkeypatch.setattr(finance_api, "KLINE_CACHE_DIR", str(tmp_path))
-    _install_fake_akshare(monkeypatch, fund_etf_hist_em=_kline_df(("2026-01-05", "2026-01-06", "2026-01-07")))
+    _install_fake_akshare(monkeypatch, fund_etf_hist_sina=_kline_df(("2026-01-05", "2026-01-06", "2026-01-07")))
     # start_date 过滤后剩 [06, 07]，limit 用 tail 取最近 1 条 → 07
     results = FinanceApiService().query_kline("512890", start_date="2026-01-06", limit=1)
     assert len(results) == 1
     assert results[0]["date"] == "2026-01-07"
 
 
-def test_query_kline_空数据返回空列表(monkeypatch):
-    _install_fake_akshare(monkeypatch, fund_etf_hist_em=pd.DataFrame())
+def test_query_kline_空数据返回空列表(monkeypatch, tmp_path):
+    monkeypatch.setattr(finance_api, "KLINE_CACHE_DIR", str(tmp_path))
+    _install_fake_akshare(monkeypatch, fund_etf_hist_sina=pd.DataFrame())
     assert FinanceApiService().query_kline("512890") == []
 
 
@@ -293,6 +363,9 @@ def test_kline缓存_保存后能加载(monkeypatch, tmp_path):
     loaded = FinanceApiService._load_kline_cache("512890", "daily")
     assert loaded is not None
     assert len(loaded) == 2
+    # read_json 会把 date 还原成 Timestamp，str() 后带 " 00:00:00"，
+    # 与未命中缓存时（"%Y-%m-%d"）不一致 —— 缓存命中与否必须返回同一格式
+    assert [str(d) for d in loaded["date"]] == ["2026-01-05", "2026-01-06"]
 
 
 def test_kline缓存_不存在返回None(monkeypatch, tmp_path):
@@ -303,19 +376,35 @@ def test_kline缓存_不存在返回None(monkeypatch, tmp_path):
 # ==================== query_intraday / fallback ====================
 
 
-def _min_kline_df():
+def _min_kline_df(days=("2026-01-05 09:31:00", "2026-01-05 09:32:00", "2026-01-06 09:31:00")):
+    """构造分钟 DataFrame（列名同 akshare stock_zh_a_minute），默认跨两个交易日。"""
     return pd.DataFrame([
-        {"时间": "09:31", "开盘": 1.5, "收盘": 1.51, "最高": 1.52, "最低": 1.49, "成交量": 1000, "成交额": 1500},
-        {"时间": "09:32", "开盘": 1.51, "收盘": 1.52, "最高": 1.53, "最低": 1.50, "成交量": 2000, "成交额": 3000},
+        {"day": d, "open": 1.5, "close": 1.51, "high": 1.52, "low": 1.49, "volume": 1000, "amount": 1500}
+        for d in days
     ])
 
 
-def test_query_intraday_真实分钟数据(monkeypatch):
-    _install_fake_akshare(monkeypatch, fund_etf_hist_min_em=_min_kline_df())
+def test_query_intraday_真实分钟数据_只取当日(monkeypatch, tmp_path):
+    """新浪分钟接口返回约 1970 根的滚动窗口（跨多个交易日），必须按当日过滤。
+
+    不过滤会把十几天的走势画成一天——这是换源时最容易踩的坑。
+    """
+    monkeypatch.setattr(finance_api, "KLINE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(finance_api, "beijing_now", lambda: datetime(2026, 1, 5, 10, 0))
+    _install_fake_akshare(monkeypatch, stock_zh_a_minute=_min_kline_df())
     results = FinanceApiService().query_intraday("512890")
-    assert len(results) == 2
-    assert results[0]["time"] == "09:31"
-    assert "change_pct" in results[0]
+    assert len(results) == 2  # 01-06 那根被当日过滤掉
+    assert [r["time"] for r in results] == ["09:31", "09:32"]
+    assert all("change_pct" in r for r in results)
+
+
+def test_query_intraday_涨跌幅以昨收为基准(monkeypatch, tmp_path):
+    monkeypatch.setattr(finance_api, "KLINE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(finance_api, "beijing_now", lambda: datetime(2026, 1, 5, 10, 0))
+    FinanceApiService._spot_dict = {"512890": _spot(prev_close=1.0, price=1.51)}
+    _install_fake_akshare(monkeypatch, stock_zh_a_minute=_min_kline_df())
+    results = FinanceApiService().query_intraday("512890")
+    assert results[0]["change_pct"] == pytest.approx(51.0)  # (1.51 - 1.00) / 1.00
 
 
 def test_query_intraday_分钟失败走模拟回退(monkeypatch):
@@ -326,7 +415,7 @@ def test_query_intraday_分钟失败走模拟回退(monkeypatch):
     def _boom(**kw):
         raise RuntimeError("no min data")
 
-    mod.fund_etf_hist_min_em = _boom
+    mod.stock_zh_a_minute = _boom
     monkeypatch.setitem(sys.modules, "akshare", mod)
     results = FinanceApiService().query_intraday("512890")
     assert len(results) == 240  # 模拟 240 个时间点

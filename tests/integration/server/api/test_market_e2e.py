@@ -3,6 +3,9 @@
 模块名称：行情查询 API 路由
 所测功能：真实 AKShare 样本（录制）→ _format_spot_data 列名映射 → _spot_dict 缓存 → 路由响应的纵向切片
 使用的测试方法：TestClient + 真实 app + 录制的 AKShare 样本种入类级缓存（离线回放，不出网）
+
+样本来源：`ak.fund_etf_category_sina(symbol="ETF基金")` 的前 50 行（数据源于 2026-10-13
+由东财 push2 换成新浪，样本同日重录；为保证用例取得到 588710，样本中含该只的真实行）。
 """
 import pickle
 import sys
@@ -18,7 +21,7 @@ SAMPLE_PATH = "tests/integration/fixtures/akshare/spot_sample.pkl"
 
 @pytest.fixture
 def spot_cache():
-    """把录制的真实 AKShare 样本 DataFrame 种入 FinanceApiService._spot_dict。"""
+    """把录制的真实新浪样本 DataFrame 种入 FinanceApiService._spot_dict。"""
     from server.services.finance_api_service import FinanceApiService
 
     with open(SAMPLE_PATH, "rb") as f:
