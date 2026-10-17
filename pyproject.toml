@@ -56,7 +56,12 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-m 'not integration and not eval'"
+# --import-mode=importlib：tests/unit 与 tests/integration 下各有一个**同名**测试文件
+# （test_fund_catalog_sync.py），而包级 __init__.py 只有 tests/ 一层 ——
+# 默认的 prepend 模式会在收集阶段直接中止（一个用例都跑不起来）。
+# importlib 模式按「相对 rootdir 的路径」给模块命名，同名文件不再冲突。
+# 2026-10-12 实测：656 passed, 31 skipped, 92 deselected。
+addopts = "-m 'not integration and not eval' --import-mode=importlib"
 markers = [
     "unit: 单元测试（默认运行，禁网、禁外部 IO）",
     "integration: 集成测试（需本地 Supabase 等真实资源，默认不跑）",
