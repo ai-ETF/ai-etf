@@ -81,9 +81,13 @@ jobs:
 
       - name: 导出本地栈连接信息
         run: |
-          supabase status -o env > /tmp/supabase.env
-          echo "TEST_SUPABASE_URL=$(grep '^API_URL=' /tmp/supabase.env | cut -d= -f2-)" >> "$GITHUB_ENV"
-          echo "TEST_SUPABASE_SERVICE_ROLE_KEY=$(grep '^SERVICE_ROLE_KEY=' /tmp/supabase.env | cut -d= -f2-)" >> "$GITHUB_ENV"
+          # ⚠️ `supabase status -o env` 的值自带双引号：API_URL="http://127.0.0.1:54321"
+          # 直接 grep | cut 会把引号一起写进环境变量 → 测试侧报
+          # `SupabaseException: Invalid URL`（2026-10-17 首跑就是这么红的，9 秒结束）。
+          # 用 eval 让 shell 吃掉引号，再写进 GITHUB_ENV。
+          eval "$(supabase status -o env)"
+          echo "TEST_SUPABASE_URL=$API_URL" >> "$GITHUB_ENV"
+          echo "TEST_SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY" >> "$GITHUB_ENV"
 
       - name: 跑集成测试
         run: poetry run pytest -m integration tests/integration -q
