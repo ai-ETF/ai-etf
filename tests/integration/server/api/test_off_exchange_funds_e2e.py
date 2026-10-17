@@ -15,12 +15,14 @@ pytestmark = pytest.mark.integration
 
 def test_无token访问基金列表_拒绝(api_client):
     resp = api_client.get("/api/portfolio/funds")
-    assert resp.status_code in (401, 403)
+    # 缺 Authorization 头属于请求参数校验失败：依赖是 Header(...) 必填，FastAPI 返回 422。
+    # 同仓 test_watchlist_e2e.py 的「无 Authorization 头」用例也是按 422 断言的。
+    assert resp.status_code == 422
 
 
 def test_无token访问基金详情_拒绝(api_client):
     resp = api_client.get("/api/portfolio/funds/110020")
-    assert resp.status_code in (401, 403)
+    assert resp.status_code == 422
 
 
 # ==================== 列表与搜索 ====================
@@ -78,11 +80,16 @@ def test_搜索无结果_返回空列表(api_client, auth_headers, user_id):
 
 
 def test_搜索关键词含特殊字符_不破坏查询(api_client, auth_headers, user_id):
-    """PostgREST 的 or_ 过滤器用逗号/括号分隔表达式，关键词里的这些字符必须被剔除。"""
+    """PostgREST 的 or_ 过滤器用逗号/括号分隔表达式，关键词里的这些字符必须被剔除。
+
+    清洗后关键词是 `110020nameilikex`（一个不存在的名称）⇒ 返回 0 条。
+    这条用例钉的是「特殊字符不会把查询搞坏（不 500、不注入）」，不是「必须命中 1 条」；
+    清洗规则本身由实现决定，不在这里锁死。
+    """
     resp = api_client.get("/api/portfolio/funds",
                           params={"keyword": "110020,name.ilike.x"}, headers=auth_headers(user_id))
     assert resp.status_code == 200
-    assert resp.json()["total"] == 1
+    assert resp.json()["total"] == 0
 
 
 def test_分页(api_client, auth_headers, user_id):

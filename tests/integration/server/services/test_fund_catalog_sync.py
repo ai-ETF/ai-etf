@@ -9,6 +9,8 @@
 
 注：真实抓取（天天基金页面）由单元测试覆盖解析规则；此处只验证落库与读回链路。
 """
+import uuid
+
 import pytest
 
 from decimal import Decimal
@@ -215,7 +217,9 @@ def test_限大额基金超上限申购被拒(supabase_client, 同步服务, mon
     fee_svc = FundFeeService()
     assert fee_svc.is_supported("T90001") is True
 
-    result = PortfolioService().apply_purchase("限大额测试用户", "T90001", Decimal("5000"))
+    # user_id 必须是合法 UUID：单日累计上限校验会先查 trade_orders，
+    # 中文占位名会让 PostgREST 直接报 22P02（invalid input syntax for type uuid）。
+    result = PortfolioService().apply_purchase(str(uuid.uuid4()), "T90001", Decimal("5000"))
     assert result["success"] is False
     assert "超过该基金单日累计申购上限" in result["message"]
 

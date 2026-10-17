@@ -3,16 +3,21 @@ name: 集成测试
 # 干什么：在 GitHub 的 Ubuntu 机器上起一个本地 Supabase（Docker），跑
 # `pytest -m integration tests/integration`（当前 90 条）。
 #
-# ⚠️ 目前**只允许手动触发**（Actions 页面点 "Run workflow"）。
-#    原因：有 7 条固定失败（PR #18 带来，见 docs/integration/03 与 06），
-#    现在挂到 push/PR 上会每次都红，制造假信号。
-#    等这 7 条处理完，再取消 `workflow_dispatch` 下面的注释。
+# ⚠️ 只挂了 `test/e2e` 这一个分支的 push，**不要往默认分支（dev）上合**，
+#    也先不要挂 pull_request：本分支还有 3 条已知的真 bug（详情接口 500，
+#    见 docs/integration/03 与 06），挂到 PR 上会每次都红，制造假信号。
+#    为什么不用「Actions 页面点 Run workflow」：workflow_dispatch 的按钮
+#    只在**默认分支**上有该文件时才出现，而本文件只存在于 test/e2e。
+#    push 触发不挑默认分支，所以先用它当「手动跑一次」的替代。
+#    等 3 条真 bug 修掉、`test/e2e` 合并进 dev 后，再改成 pull_request。
 #
 # 为什么 E2E 不能放 CI：E2E 要 Windows + 微信开发者工具图形界面 + 本地后端，
 # Linux runner 上必然失败。集成测试只依赖 Linux + Docker，所以可以跑。
 
 on:
-  workflow_dispatch: # 手动触发；稳定后再加 push / pull_request
+  push:
+    branches: [test/e2e] # 临时：本分支 push 就跑；默认分支是 dev，手动按钮在这里点不到
+  workflow_dispatch: # 文件合进默认分支后，保留手动兜底
 
 jobs:
   integration:
