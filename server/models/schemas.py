@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from datetime import date
 from typing import Optional, List, Dict, Any
 
 
@@ -489,6 +490,13 @@ class RedeemRequest(BaseModel):
     fund_code: str  # 基金代码
     quantity: float  # 赎回份额
     price: Optional[float] = None  # 净值（不传则自动获取）
+
+
+class BackdateOrderRequest(BaseModel):
+    """[开发] 回填 pending 订单确认日请求（仅供 E2E 造「已确认持仓」用）"""
+    fund_code: str  # 基金代码
+    target_date: Optional[date] = None  # 目标确认日，不传 = 北京时间当天
+    direction: str = "buy"  # 订单方向，默认买单
 
 
 class OrderResult(BaseModel):

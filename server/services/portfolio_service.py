@@ -1101,6 +1101,82 @@ class PortfolioService:
             logger.error(f"确认 pending 订单失败: {e}", exc_info=True)
             return {"status": "error", "message": str(e), "processed": 0}
 
+    # ==================== E2E 造状态（仅供测试端点调用） ====================
+
+    def backdate_pending_order(self, user_id: str, fund_code: str,
+                               target_date: date, direction: str = "buy") -> dict:
+        """把某用户某基金**最早的一笔** pending 订单的确认日改到指定日期。
+
+        **这个方法是给 E2E 造状态用的，不是业务能力。** 存在的理由：
+        买单落库的 confirm_date = 受理日 + confirm_delay 个交易日（本仓库所有基金的
+        confirm_delay 都 ≥ 1，见 supabase/seed.sql），所以「申购 → 已确认持仓」这条
+        链路在**一次 E2E 会话内**永远走不完；而赎回拦截（:784-803）的前提恰恰是
+        「该基金已有已确认持仓 + 有一笔 pending 买单」。把确认日改到过去再调
+        confirm_pending_orders()，就能在会话内得到这个状态。
+
+        ⚠️ 只改 confirm_date，**不动 created_at**：确认只按 `status='pending'` +
+        `confirm_date <= today` 挑选（见 confirm_pending_orders），created_at 不参与。
+        也因此这里没有乐观锁问题 —— 改完由确认流程自己把 status 翻成终态。
+
+        取「最早的一笔」是为了让调用方可预测：先下的那笔被确认、后下的那笔仍是 pending，
+        不需要先拿到 order_id（apply_purchase 的返回值里没有 order_id）。
+        """
+        if not self.client:
+            return {"success": False, "message": "数据库不可用", "data": None}
+
+        try:
+            result = (
+                self.client.table("trade_orders")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("fund_code", fund_code)
+                .eq("direction", direction)
+                .eq("status", "pending")
+                .order("created_at")
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            logger.error(f"回填确认日失败（查询订单）: {e}", exc_info=True)
+            return {"success": False, "message": f"查询 pending 订单失败: {e}", "data": None}
+
+        orders = result.data or []
+        if not orders:
+            return {
+                "success": False,
+                "message": (f"没有找到用户 {user_id} 的 pending {direction} 订单"
+                            f"（fund_code={fund_code}），无法回填确认日"),
+                "data": None,
+            }
+
+        order = orders[0]
+        old_confirm_date = order.get("confirm_date")
+        try:
+            (
+                self.client.table("trade_orders")
+                .update({
+                    "confirm_date": target_date.isoformat(),
+                    "updated_at": _now_iso(),
+                })
+                .eq("id", order["id"])
+                .execute()
+            )
+        except Exception as e:
+            logger.error(f"回填确认日失败（更新订单 {order.get('id')}）: {e}", exc_info=True)
+            return {"success": False, "message": f"更新确认日失败: {e}", "data": None}
+
+        logger.info(f"[E2E] 回填确认日: order={order['id']}, "
+                    f"{old_confirm_date} → {target_date.isoformat()}")
+        return {
+            "success": True,
+            "message": f"确认日已回填: {old_confirm_date} → {target_date.isoformat()}",
+            "data": {
+                "order_id": order["id"],
+                "old_confirm_date": old_confirm_date,
+                "new_confirm_date": target_date.isoformat(),
+            },
+        }
+
     def _reject_order(self, order: dict, error: Exception) -> None:
         """把确认失败的订单落为 rejected，并记录原因。
 

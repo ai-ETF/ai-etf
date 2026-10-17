@@ -173,7 +173,7 @@ NON_BUSINESS_ENDPOINTS: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/watchlist/health"),
     ("GET", "/api/portfolio/health"),
     ("GET", "/api/risk/health"),
-    # 开发专用（7，X-User-Id，仅非生产可用）
+    # 开发专用（8，X-User-Id；**默认不注册**，要 ENABLE_TEST_ENDPOINTS=1 才挂载）
     ("POST", "/api/portfolio/test/apply-purchase"),
     ("POST", "/api/portfolio/test/apply-redeem"),
     ("GET", "/api/portfolio/test/positions"),
@@ -181,6 +181,7 @@ NON_BUSINESS_ENDPOINTS: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/portfolio/test/trade-flow"),
     ("POST", "/api/portfolio/test/snapshot"),
     ("GET", "/api/portfolio/test/daily-returns"),
+    ("POST", "/api/portfolio/test/backdate-order"),
     # 范围外（3，软工作业遗迹，组长已确认不测）
     ("POST", "/api/upload"),
     ("POST", "/api/upload/process-file-from-edge"),
@@ -189,14 +190,18 @@ NON_BUSINESS_ENDPOINTS: frozenset[tuple[str, str]] = frozenset({
 
 
 # X-User-Id 端点清单（C3 用）：必须全部经由 `_get_test_user` 守卫，
-# 且该守卫在 ENV=production 下返回 404。依据 server/api/portfolio.py:50-56。
+# 且该守卫在 ENV=production 下返回 404。依据 server/api/portfolio.py:81-87。
+# 另有一道更强的保护：整组默认不注册（`_test_endpoints_enabled`），见 C3 的开关用例。
 X_USER_ID_ENDPOINTS: frozenset[tuple[str, str]] = frozenset(
     ep for ep in NON_BUSINESS_ENDPOINTS if ep[1].startswith("/api/portfolio/test/")
 )
 
 
 # ============================================================================
-# C2：每个路由的鉴权分级基线（2026-09-24 由 server.app 实测导出，共 58 条）
+# C2：每个路由的鉴权分级基线（2026-09-24 由 server.app 实测导出；2026-10-13 为 61 条）
+#
+# ⚠️ 读这份基线的前提：测试进程必须开着 ENABLE_TEST_ENDPOINTS（见 conftest.py 第 0 步），
+#    否则 /api/portfolio/test/* 那 8 条不在 app.routes 里，会被 C2 判成「路由被删了」。
 #
 # 分级口径：
 #   jwt        — 依赖 `get_current_user`，或显式声明了必填 `authorization` header
@@ -261,6 +266,7 @@ AUTH_BASELINE: dict[tuple[str, str], str] = {
     ("GET", "/api/portfolio/test/trade-flow"): "x_user_id",
     ("POST", "/api/portfolio/test/snapshot"): "x_user_id",
     ("GET", "/api/portfolio/test/daily-returns"): "x_user_id",
+    ("POST", "/api/portfolio/test/backdate-order"): "x_user_id",
 
     ("GET", "/api/risk/questionnaire"): "jwt",
     ("POST", "/api/risk/submit"): "jwt",

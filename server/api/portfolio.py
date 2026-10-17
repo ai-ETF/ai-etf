@@ -12,6 +12,7 @@
 - GET  /portfolio/health         — 健康检查（公开）
 
 开发环境：/api/portfolio/test/* 端点免 JWT 认证，用 X-User-Id header 指定用户。
+**这组端点默认不注册**，必须显式设 ENABLE_TEST_ENDPOINTS=1 才挂载（见 _test_endpoints_enabled）。
 """
 import logging
 import os
@@ -25,6 +26,7 @@ from server.auth import get_current_user
 from server.models.schemas import (
     PurchaseRequest,
     RedeemRequest,
+    BackdateOrderRequest,
     OrderResponse,
     OrderResult,
     RiskWarning,
@@ -45,6 +47,34 @@ from server.services.portfolio_service import PortfolioService
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
+
+# 开发测试端点（/api/portfolio/test/*）在下面单独挂到这个子路由上，末尾按开关决定是否并入 router。
+# 刻意不放 router 上：整组能否对外存在必须由一处代码说了算，而不是散在 8 个装饰器上。
+# 刻意不带 prefix：include_router 时父 router 的前缀会再叠一次，带上会变成 /api/portfolio/portfolio/test/*
+test_router = APIRouter()
+
+
+#: ENABLE_TEST_ENDPOINTS 的「真」取值（大小写不敏感，前后空白忽略）
+_TEST_ENDPOINT_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _test_endpoints_enabled() -> bool:
+    """是否挂载 /api/portfolio/test/* 这组开发端点。**默认关**。
+
+    为什么要有这个开关：这组端点免 JWT，只要带一个 X-User-Id 就能替任意用户下单、
+    赎回、改订单确认日。原先唯一的保护是「ENV 不是 production」—— 那要求部署的人
+    记得设对 ENV，而「非生产但公网可达」的机器（测试服、演示机）一旦漏设，整组就
+    对全网敞开。改成默认不注册：忘了设开关的后果是「E2E 跑不了」，而不是「数据库
+    被人改」，失败方向是安全的。
+
+    跑 E2E / 本地调试时必须显式开：
+
+        ENABLE_TEST_ENDPOINTS=1 poetry run uvicorn server.app:app --port 8000
+
+    注意这是「注册与否」的开关，在 import 期读一次；改了必须重启进程才生效。
+    _get_test_user 里的 ENV=production → 404 保留不动，作为第二道防线。
+    """
+    return os.getenv("ENABLE_TEST_ENDPOINTS", "").strip().lower() in _TEST_ENDPOINT_TRUTHY
 
 
 def _get_test_user(x_user_id: Optional[str] = Header(None)) -> str:
@@ -242,7 +272,7 @@ async def set_auto_invest_config(
 # ==================== 开发测试端点（免 JWT，用 X-User-Id header） ====================
 
 
-@router.post("/test/apply-purchase", response_model=OrderResponse, tags=["portfolio-dev"])
+@test_router.post("/test/apply-purchase", response_model=OrderResponse, tags=["portfolio-dev"])
 async def test_apply_purchase(
     req: PurchaseRequest,
     user_id: str = Depends(_get_test_user),
@@ -266,7 +296,7 @@ async def test_apply_purchase(
     )
 
 
-@router.post("/test/apply-redeem", response_model=OrderResponse, tags=["portfolio-dev"])
+@test_router.post("/test/apply-redeem", response_model=OrderResponse, tags=["portfolio-dev"])
 async def test_apply_redeem(
     req: RedeemRequest,
     user_id: str = Depends(_get_test_user),
@@ -289,7 +319,7 @@ async def test_apply_redeem(
     )
 
 
-@router.get("/test/positions", response_model=PositionListResponse, tags=["portfolio-dev"])
+@test_router.get("/test/positions", response_model=PositionListResponse, tags=["portfolio-dev"])
 async def test_list_positions(
     include_quote: bool = Query(True),
     user_id: str = Depends(_get_test_user),
@@ -306,7 +336,7 @@ async def test_list_positions(
     )
 
 
-@router.get("/test/account", response_model=AccountSummaryResponse, tags=["portfolio-dev"])
+@test_router.get("/test/account", response_model=AccountSummaryResponse, tags=["portfolio-dev"])
 async def test_account_summary(
     user_id: str = Depends(_get_test_user),
 ):
@@ -315,7 +345,7 @@ async def test_account_summary(
     return svc.account_summary(user_id=user_id)
 
 
-@router.get("/test/trade-flow", response_model=TradeFlowResponse, tags=["portfolio-dev"])
+@test_router.get("/test/trade-flow", response_model=TradeFlowResponse, tags=["portfolio-dev"])
 async def test_query_trade_flow(
     fund_code: Optional[str] = Query(None),
     direction: Optional[str] = Query(None),
@@ -342,7 +372,7 @@ async def test_query_trade_flow(
     )
 
 
-@router.post("/test/snapshot", response_model=SnapshotResponse, tags=["portfolio-dev"])
+@test_router.post("/test/snapshot", response_model=SnapshotResponse, tags=["portfolio-dev"])
 async def test_take_snapshot(
     user_id: str = Depends(_get_test_user),
 ):
@@ -358,7 +388,7 @@ async def test_take_snapshot(
     )
 
 
-@router.get("/test/daily-returns", response_model=DailyReturnResponse, tags=["portfolio-dev"])
+@test_router.get("/test/daily-returns", response_model=DailyReturnResponse, tags=["portfolio-dev"])
 async def test_get_daily_returns(
     days: int = Query(30, ge=1, le=365),
     user_id: str = Depends(_get_test_user),
@@ -368,3 +398,44 @@ async def test_get_daily_returns(
     result = svc.get_daily_returns(user_id=user_id, days=days)
     items = [DailyReturnItem(**item) for item in result["items"]]
     return DailyReturnResponse(items=items)
+
+
+@test_router.post("/test/backdate-order", response_model=dict, tags=["portfolio-dev"])
+async def test_backdate_order(
+    req: BackdateOrderRequest,
+    user_id: str = Depends(_get_test_user),
+):
+    """[开发] 把某基金最早一笔 pending 买单的确认日改到过去（免 JWT）。
+
+    存在的理由见 PortfolioService.backdate_pending_order 的 docstring：
+    E2E 一次会话内造不出「已确认持仓」（买单确认日必然 ≥ 次日），而赎回拦截
+    的前提正是「已有已确认持仓 + 有 pending 买单」。改完确认日再调
+    POST /api/portfolio/confirm-pending 即可得到该状态。
+    """
+    from server.services.portfolio_service import _beijing_date
+
+    svc = PortfolioService()
+    result = svc.backdate_pending_order(
+        user_id=user_id,
+        fund_code=req.fund_code,
+        target_date=req.target_date or _beijing_date(),
+        direction=req.direction,
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+# ==================== 开发测试端点：按开关决定是否并入 router ====================
+# 必须放在本模块末尾：上面的 8 个端点要先把路由注册到 test_router，这里才能整组并入。
+# 关掉开关时它们**不进 app.routes**，也就不会出现在 /docs 与 openapi.json 里，
+# 请求直接 404（不是「挂上了但拒绝」）。
+if _test_endpoints_enabled():
+    router.include_router(test_router)
+    logger.warning(
+        "ENABLE_TEST_ENDPOINTS 已开启：/api/portfolio/test/* 共 %d 个免 JWT 端点已注册，"
+        "任何带 X-User-Id 的请求都能替该用户下单/赎回。只在本地与专用测试环境开。",
+        len(test_router.routes),
+    )
+else:
+    logger.info("ENABLE_TEST_ENDPOINTS 未开启，/api/portfolio/test/* 不注册（默认行为）")

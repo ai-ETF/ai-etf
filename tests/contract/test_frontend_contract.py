@@ -201,7 +201,7 @@ def test_c2_鉴权分级未被改动(key):
 
 @pytest.mark.contract
 def test_c3_所有x_user_id端点都挂了守卫():
-    """7 个 /api/portfolio/test/* 必须全部经由 `_get_test_user`。
+    """8 个 /api/portfolio/test/* 必须全部经由 `_get_test_user`。
 
     只测 `_get_test_user` 本身是不够的 —— 如果哪天新增一个 test/* 端点忘了挂守卫，
     它就会绕过生产环境保护。
@@ -212,6 +212,31 @@ def test_c3_所有x_user_id端点都挂了守卫():
             f"{key[0]} {key[1]} 没有依赖 _get_test_user，"
             f"在 ENV=production 下不会被关闭"
         )
+
+
+@pytest.mark.contract
+def test_c3_测试端点开关默认关闭(monkeypatch):
+    """`ENABLE_TEST_ENDPOINTS` 不设（或设成假值）时必须是关的 —— 这是那道硬防线。
+
+    为什么不能只靠"测 `app.routes` 里没有 test/*"：本测试进程为了让 C2/C5/C6 能读到
+    这 8 条路由，在 conftest 里把开关打开了（`import server.app` 之前就设好了，改不了）。
+    所以这里直接测判定函数本身，绕开"app 已经 import 完"这个既成事实。
+
+    失效方式很坏：谁把 `_test_endpoints_enabled()` 改成恒 `True`，或者往
+    `_TEST_ENDPOINT_TRUTHY` 里塞个 `""`，公网可达的测试服就又变成免鉴权写库了。
+    """
+    from server.api.portfolio import _test_endpoints_enabled
+
+    monkeypatch.delenv("ENABLE_TEST_ENDPOINTS", raising=False)
+    assert _test_endpoints_enabled() is False, "不设开关时必须默认关闭"
+
+    for falsy in ("", "  ", "0", "false", "False", "no", "off", "2", "enabled"):
+        monkeypatch.setenv("ENABLE_TEST_ENDPOINTS", falsy)
+        assert _test_endpoints_enabled() is False, f"{falsy!r} 不该被当成开启"
+
+    for truthy in ("1", "true", "TRUE", "True", " Yes ", "yes", "on", "ON"):
+        monkeypatch.setenv("ENABLE_TEST_ENDPOINTS", truthy)
+        assert _test_endpoints_enabled() is True, f"{truthy!r} 应该被当成开启"
 
 
 @pytest.mark.contract
