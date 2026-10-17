@@ -1,0 +1,54 @@
+name: 契约测试
+
+# 干什么：每次 push / PR 自动跑前后端契约测试（L3 层）。
+# 它不联网、不碰数据库，是本仓库唯一适合放进 CI 的一层 —— 秒级、确定性、零外部依赖。
+#
+# ⚠️ 不要在这里加 E2E：那要 Windows + 微信开发者工具开着界面 + 本地后端，跑在 GitHub 的
+#    Linux 机器上必然失败，只会制造一个常年发红的假信号。（分层依据见 docs/e2e/02）
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: # 允许在网页上手动点一次
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 与本机实测环境一致（本机 linux 上跑的 Python 3.12.3）。
+          # pyproject 里写的是 ^3.10，锁文件是在 3.12 上解出来的。
+          python-version: "3.12"
+
+      # poetry 是本仓库规定的依赖管理方式（见 CLAUDE.md：禁止直接改环境）。
+      # 2.4.1 与本机一致；pipx 是 GitHub 镜像上预装的，用它装 CLI 不算"管理项目依赖"。
+      - name: 安装 poetry
+        run: pipx install poetry==2.4.1
+
+      - name: 让虚拟环境落在仓库内（这样下面才能缓存它）
+        run: poetry config virtualenvs.in-project true
+
+      - name: 缓存虚拟环境
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('poetry.lock') }}
+
+      # ⚠️ 这一步慢（要拉 torch 的 CPU 轮子，几百 MB），因为契约测试虽然只用
+      #    fastapi + pytest，但它 import 的是真的 server.app，依赖树得齐全。
+      #    首次跑约几分钟，之后命中缓存就快了。
+      - name: 安装依赖
+        run: poetry install --no-root
+
+      # ⚠️ 这里**故意**只指 tests/contract 这个目录，不是 `pytest` 全量：
+      #    本工作流的职责就是契约层（前后端字段/路由对齐），跑得快、失败指向明确。
+      #    曾因 tests/unit 与 tests/integration 下有同名测试文件而无法全量收集；
+      #    该问题已于 2026-10-12 在 pyproject 用 --import-mode=importlib 解决，
+      #    但本工作流不因此扩到全量 —— 单元/集成各有自己的运行方式。
+      #    分层依据见 docs/e2e/02-核心路径与分层策略.md。
+      - name: 跑契约测试
+        run: poetry run pytest tests/contract -q
