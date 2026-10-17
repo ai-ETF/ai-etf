@@ -98,6 +98,7 @@ AUTH="Authorization: Bearer $TOKEN"
 | GET | `/api/portfolio/test/trade-flow` | `X-User-Id` | [05](05-组合交易.md) |
 | POST | `/api/portfolio/test/snapshot` | `X-User-Id` | [05](05-组合交易.md) |
 | GET | `/api/portfolio/test/daily-returns` | `X-User-Id` | [05](05-组合交易.md) |
+| POST | `/api/portfolio/test/backdate-order` | `X-User-Id` | [05](05-组合交易.md) |
 | GET | `/api/risk/health` | - | [06](06-风险测评.md) |
 | GET | `/api/risk/questionnaire` | 🔒 | [06](06-风险测评.md) |
 | POST | `/api/risk/submit` | 🔒 | [06](06-风险测评.md) |

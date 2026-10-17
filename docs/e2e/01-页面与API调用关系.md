@@ -10,6 +10,10 @@
 > 前端**零调用点**（`application/src` 里搜不到），故计入 §4.2。
 > §四 与 §4.2 已按新数列出；§一 结论 ② 与 §二 末行同步更新。
 > 标着 2026-09-20 的原始核对数字（§二 前两行、§4.3）**保留不动**——那是当时对 `00` 的比对记录，改了就成了假账。
+
+> **2026-10-13 增量复核**：后端端点数 **60 → 61**，唯一路径 **59 → 60**；新增 `POST /api/portfolio/test/backdate-order`（`X-User-Id`，开发专用）。
+> 同一批改动给整组 `/api/portfolio/test/*` 加了**默认关闭的注册开关** `ENABLE_TEST_ENDPOINTS`（§4.3 与 §5.4 已同步）。
+> 上面的历史行同样**保留不动**。⚠️ 端点数只统计**开关打开时**的 `app.routes`；关着时是 53。
 > 这次改动的数量断言由契约测试 `test_c6_未接线端点数量与规划文档一致` 守着（`== 21`），改一边不改另一边会红。
 
 > **2026-10-05 §3「调用点」列重新锚定**：给 `application/src` 补 E2E 元素 id（任务 T3）时顺手核了一遍行号，
@@ -28,7 +32,7 @@
 | # | 结论 | 影响 |
 |---|---|---|
 | 1 | `00` 文档的 10 个页面映射**基本准确**，仅缺 **1 处**：`pages/settings` 还调 `GET /api/portfolio/account` | 补进映射表 |
-| 2 | **后端 60 个端点，只有 23 个有前端活跃调用点**（`00` 说的「8 个未接线」是**族级**口径，端点级实际是 **21 个业务端点无前端入口**） | 候选路径必须按本文 §四 的白名单挑 |
+| 2 | **后端 61 个端点，只有 23 个有前端活跃调用点**（`00` 说的「8 个未接线」是**族级**口径，端点级实际是 **21 个业务端点无前端入口**） | 候选路径必须按本文 §四 的白名单挑 |
 | 3 | ⭐ `POST /api/secure-chat/delete-account`（注销账号）**在 ✅要测范围内，但前端根本没有入口** | 注销**不能**设计成 E2E 路径步骤，只能做接口级测试 |
 | 4 | ⭐ `00` 说的「`ranking` 传 `limit` 已修」**修在了死代码里**：`/api/market/ranking` 唯一调用点是 `useMarketQuery.ts`，而该文件**没有任何页面 import** | 前端**没有任何涨幅榜入口**，`ranking` 实际等同未接线 |
 | 5 | `api/modules/market.ts` 的 `getSpot()` 已导出但**无人 import** → `GET /api/market/spot/{code}` 也未接线 | 同 4，勿设计进用例 |
@@ -46,7 +50,7 @@
 | §4.2 端点统计 | 「共 57 个端点（56 个唯一路径）」「JWT 必需 23」 | ❌ 少了 1 | 应为 **58 个端点 / 57 个唯一路径**；**JWT 必需 24**。差量正是 `PUT /api/secure-chat/chats/{chat_id}/title`（该端点是在统计之后新增的）。公开 27、`X-User-Id` 7 两项**核对无误**。🔁 **2026-10-10：`00` 已按此修订并继续往前走了一步** —— 合并 PR #18 后又加 2 个（`GET /portfolio/funds`、`/funds/{fund_code}`），`00` 现写作 **60 个端点 / 59 个唯一路径 / JWT 必需 26**，与本文件 §四 一致。 |
 | §5「已修复」· ranking 行 | 「前端改传 `top_n`」✅ | ⚠️ 事实成立但**无意义** | 该改动落在 [useMarketQuery.ts:78](application/src/composables/useMarketQuery.ts#L78)，属未被 import 的死代码。建议标注「修在死代码中，前端仍无榜单入口」 |
 | §5「8 个后端接口前端未接线」 | 列 8 项 | ⚠️ 端点级为 21 项 | 见本文 §四；**另需补** `delete-account`、`spot/{code}`、`spot/name/{name}`、`detail/name/{name}`、`kline/name/{name}`、`category/{category}` |
-| §5「README 接口总览表已过时」 | 「缺 register/logout/delete-account…需重跑 gen_index.py」 | ✅ **已解决** | commit `3f2573c`「补齐接口文档」已修，`docs/api/README.md` 现列 **58 行**、含 `PUT .../title`。该项可从已知问题中移除 |
+| §5「README 接口总览表已过时」 | 「缺 register/logout/delete-account…需重跑 gen_index.py」 | ✅ **已解决** | commit `3f2573c`「补齐接口文档」已修，`docs/api/README.md` **现列 61 行**（10-10 时 60 行、更早 58 行；10-13 加 `backdate-order` 后为 61），含 `PUT .../title`。该项可从已知问题中移除 |
 | §3 注「`useMarketQuery.ts` 的 `askQuestion` 未被任何页面 import」 | — | ✅ 复核正确 | 保持 |
 
 ---
@@ -99,7 +103,9 @@
 
 ---
 
-## 四、后端 60 端点 × 前端接线情况（E2E 白名单）
+## 四、后端 61 端点 × 前端接线情况（E2E 白名单）
+
+> ⚠️ 端点数只统计**开关打开时**（`ENABLE_TEST_ENDPOINTS=1`）的 `app.routes`；关着时 53。口径与 `00` §2 一致。
 
 > 口径：**有前端活跃调用点 = 可进 E2E 路径**；「无入口」= 前端无任何可达调用，**禁止**设计成 E2E 用例步骤。
 
@@ -153,12 +159,12 @@
 | `GET /api/portfolio/funds` | **2026-10-03 新增**（PR #18）。搜得到基金但**没有页面调它** —— 申购页至今用硬编码白名单 `TRADEABLE_FUND_CODES`（[portfolio.ts:2-6](application/src/config/portfolio.ts#L2-L6)，20 个代码） |
 | `GET /api/portfolio/funds/{fund_code}` | 同上。⚠️ 与 `market/search` 不是一回事：这条查的是**场外可交易基金**（含费率分档/申购状态），`market` 查的是**场内 ETF 行情** |
 
-### 4.3 其余 16 个（非业务，探针用）
+### 4.3 其余 17 个（非业务，探针用）
 
 | 类别 | 端点 |
 |---|---|
 | 健康检查（6） | `GET /`、`GET /api/test/hello`、`GET /api/market/health`、`GET /api/watchlist/health`、`GET /api/portfolio/health`、`GET /api/risk/health` |
-| 开发专用（7） | `POST /api/portfolio/test/apply-purchase`、`/apply-redeem`、`GET /test/positions`、`/test/account`、`/test/trade-flow`、`POST /test/snapshot`、`GET /test/daily-returns`（`X-User-Id`，**仅非生产可用**，见 §五） |
+| 开发专用（8） | `POST /api/portfolio/test/apply-purchase`、`/apply-redeem`、`GET /test/positions`、`/test/account`、`/test/trade-flow`、`POST /test/snapshot`、`GET /test/daily-returns`、`POST /test/backdate-order`（`X-User-Id`；**默认不注册**，要设 `ENABLE_TEST_ENDPOINTS=1` 才挂载，见 §五） |
 | 范围外（3） | `/api/upload`、`/api/upload/process-file-from-edge`、`/api/upload/health`（软工作业遗迹，不测） |
 
 ---
@@ -219,14 +225,21 @@ data: {"type":"error","message":"<文本>"}\n\n    ← 异常时
 
 ### 5.4 测试夹具的可用性
 
-- `/api/portfolio/test/*`（7 个，`X-User-Id`）**仅非生产可用**：`os.getenv("ENV").lower() == "production"` → 404（[portfolio.py:50-56](ai-etf/server/api/portfolio.py#L50-L56)）。
-- 本地 `.env` **不含 `ENV`**（只有 `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_JWT_SECRET`）→ `os.getenv("ENV","")` 为空 → **本地必然非生产 → test/\* 可用**。
+- `/api/portfolio/test/*`（**8 个**，`X-User-Id`）**默认根本不注册**。~~`os.getenv("ENV").lower() == "production"` → 404~~（[portfolio.py:81-87](ai-etf/server/api/portfolio.py#L81-L87)）**这条守卫仍在，但已不是第一道**。
+  🔄 **2026-10-13 收紧**：整组由 `_test_endpoints_enabled()` 控制，**必须显式设 `ENABLE_TEST_ENDPOINTS=1` 才挂到 router 上**（[portfolio.py:44-70](ai-etf/server/api/portfolio.py#L44-L70)）。关着的时候它们**不进 `app.routes`**，也就**不出现在 `/docs` 与 `openapi.json`**，请求直接 404 —— 是「不存在」，不是「存在但拒绝」。
+  **为什么改**：原先唯一的保护是「`ENV` 不等于 `production`」，而那要求**部署的人记得设对 `ENV`**。测试服/演示机这类「非生产但公网可达」的机器一旦漏设，任何人带个 `X-User-Id` 就能替该用户下单、赎回、改订单确认日。改成默认关之后，**漏设的后果是「E2E 跑不了」而不是「数据被人改」** —— 失败方向是安全的。
+  第 8 个端点是 **2026-10-13 新增的 `test/backdate-order`**（见下）。启动命令因此变成：
+  ```bash
+  ENABLE_TEST_ENDPOINTS=1 poetry run uvicorn server.app:app --port 8000
+  ```
+- 本地 `.env` **不含 `ENV`**，也不含 `ENABLE_TEST_ENDPOINTS`（只有 `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_JWT_SECRET`）→ 两个变量都得在**启动命令里给**，别指望 `.env` 兜底。
 - ⚠️ `test/*` 与正式端点走**同一个** `PortfolioService`，因此 `test/apply-purchase` **同样是 pending** → 它**不能**用来"造出已确认持仓"。
+- ✅ **2026-10-13 补充：`test/backdate-order` 就是为绕开上面这条而加的**。它不改任何业务语义，只把某基金**最早一笔** pending 买单的 `confirm_date` 改到指定日期（缺省 = 北京时间当天），之后调 `POST /api/portfolio/confirm-pending`（**带该用户 JWT**，不用 dev 端点）就能确认掉它、建出**已确认持仓**。回填走 HTTP 而不是夹具直连库 —— 夹具的设计红线是「不碰库、只用 HTTP」（[e2e_fixture.py:22-25](ai-etf/docs/e2e/scripts/e2e_fixture.py#L22-L25)），直连库会同时破坏这条和「测试进程不持有数据库密钥」。
 - ⚠️ **"已确认持仓"并非完全造不出来——有两条路，都有代价**：
   1. **货基自动申购（合法接口，立即确认）**：`_auto_invest_money_fund` 在 `apply_purchase` 之后**直接**调 `_confirm_money_fund_order`（[portfolio_service.py:134-165](ai-etf/server/services/portfolio_service.py#L134-L165)），绕过确认日门控 → 会话内即可得到 `000198` 的**已确认**持仓。开关由 `POST /portfolio/auto-invest/config` 打开（**前端零调用 → 只能作夹具**，且 UI 无入口），随后任意一次 `GET /account` 触发（[portfolio_service.py:982-988](ai-etf/server/services/portfolio_service.py#L982-L988)）。
      ⚠️ **两个坑**：① `000198` **不在前端白名单**，用它做标的无法走 UI 买入；② `_auto_invest_money_fund` 只在「已有货基持仓」时跳过（[:143-145](ai-etf/server/services/portfolio_service.py#L143-L145)），而 `account_summary` **先**跑自动申购**再**读 `cash` → **全额赎回后钱会被立刻重新申购成货基，「可用现金变多」在 UI 上根本看不到**。
-  2. **改库回填 `confirm_date`**：直接改库，最直白，但纯造状态。
-  **为什么"申购→确认后建仓"仍然不做 E2E**：不是"造不出来"，而是**收益低于已有集成测试**（见 [03 §二.1](03-E2E用例清单.md)）——那句话是取舍，不是不可能。
+  2. **回填 `confirm_date`**：纯造状态，最直白。**2026-10-13 已落地**，但不是「夹具直连库」，而是后端开发端点 `POST /api/portfolio/test/backdate-order`（夹具与 JS 侧都只发 HTTP）—— 详见 [03 §二.1.1](03-E2E用例清单.md)。P1-04（赎回拦截）就是用它造出前置状态的。
+  **为什么"申购→确认后建仓"仍然不做 E2E**：不是"造不出来"，而是**收益低于已有集成测试**（见 [03 §二.1](03-E2E用例清单.md)）——那句话是取舍，不是不可能。（**回填的用途是给别人当前置状态，不是为它单独立用例**。）
 
 ---
 
