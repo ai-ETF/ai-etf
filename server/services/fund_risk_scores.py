@@ -1,7 +1,7 @@
 """
 基金风险等级计算（纯工具模块，不存储基金数据）
 
-规则见 docs/基金风险等级划分设计文档.md
+规则见 docs/20-设计/风控/基金风险等级划分.md
 
 使用方式：
     from server.services.fund_risk_scores import calc_risk_level, get_risk_label

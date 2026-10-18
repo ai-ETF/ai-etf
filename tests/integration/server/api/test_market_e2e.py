@@ -36,7 +36,7 @@ def nav_akshare(monkeypatch):
     """离线替身 akshare，服务 /detail 的历史净值与概览，并记录净值接口的入参。
 
     走替身而非真实网络：集成测试有出网守卫，且「上游改版」不属于本层要断言的内容
-    （真实上游由 integration_net 契约测试负责，见 docs/integration/00-集成测试规划.md §8.4）。
+    （真实上游由 integration_net 契约测试负责，见 docs/50-测试/集成测试/00-集成测试规划.md §8.4）。
     """
     calls = []
     mod = types.ModuleType("akshare")
