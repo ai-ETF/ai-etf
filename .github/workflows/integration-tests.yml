@@ -19,6 +19,12 @@ on:
     branches: [test/e2e] # 临时：本分支 push 就跑；默认分支是 dev，手动按钮在这里点不到
   workflow_dispatch: # 文件合进默认分支后，保留手动兜底
 
+  # ⚠️ 等 `off_exchange_funds.py:95` 那 3 条详情 500 修掉、本 job 变绿后再启用下面这段，
+  #    同时把上面的 `push: [test/e2e]` 删掉（或者留着当兜底也行）。
+  #    现在就启用的话，每个 PR 都会红，而且是跟 PR 内容无关的假信号。
+  # pull_request:
+  #   branches: [dev]
+
 jobs:
   integration:
     runs-on: ubuntu-latest
