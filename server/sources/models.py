@@ -75,6 +75,9 @@ class FailureKind(str, Enum):
     PARSE_ERROR = "PARSE_ERROR"
     SCHEMA_DRIFT = "SCHEMA_DRIFT"
     INVALID_REQUEST = "INVALID_REQUEST"
+    # 源实现未按契约包装的异常（KeyError / TypeError 等代码缺陷）。
+    # 默认按接口级处理：只降级该源并继续换源，日志以 ERROR + 堆栈暴露。
+    UNEXPECTED = "UNEXPECTED"
 
 
 # 域级失败：连接层被拒 / 超时 / 限速 —— 整个域名可疑，该域名下所有源一起熔断。

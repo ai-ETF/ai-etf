@@ -8,6 +8,7 @@
     for src in pick("history"):
         try: return src.fetch_history(code)
         except SourceError: record_failure(...); continue
+        except Exception: record_failure(UNEXPECTED); continue  # 记 ERROR + 堆栈
     raise AllSourcesFailed(...)        # 绝不静默返回空
 """
 import threading
@@ -93,13 +94,16 @@ class SourceRouter:
 
         源返回全市场数据，路由器按 `codes` 过滤（源不做白名单过滤，G5）。
         返回 `{code: [点, ...]}`；某个代码不在源的覆盖范围内时该 key 缺席。
+
+        「零命中」仍算成功（返回 `{}`，不抛 `AllSourcesFailed`），但请求非空
+        却过滤后为空时记 `batch_empty` WARNING，便于发现上游窗口/格式漂移。
         """
         normalized = [str(code).strip() for code in codes if str(code).strip()]
         if not normalized:
             raise ValueError("codes 不能为空")
 
         wanted = set(normalized)
-        result, _ = self._run(
+        result, source = self._run(
             CAP_BATCH,
             None,
             lambda source: source.fetch_latest_batch(normalized),
@@ -110,6 +114,17 @@ class SourceRouter:
             if code not in wanted or not points:
                 continue
             filtered[code] = sorted(points, key=lambda p: p.nav_date)
+        if not filtered:
+            # 保持「批量空结果 = 成功」的契约（调用方据此继续降级），
+            # 但请求非空却零命中通常是上游窗口/格式漂移，必须留痕。
+            events.log_batch_empty(
+                capability=CAP_BATCH,
+                source=source.meta.name,
+                domain=source.meta.domain,
+                requested=len(normalized),
+                returned=len(result),
+                sample=normalized[:5],
+            )
         return filtered
 
     def fetch_calendar(self) -> CalendarData:
@@ -192,6 +207,35 @@ class SourceRouter:
                     elapsed_ms=elapsed_ms,
                     error=error.message,
                     code=code,
+                )
+                self._health.record_failure(source, error)
+                tried.append({
+                    "source": source.meta.name,
+                    "kind": error.kind.value,
+                    "error": error.message,
+                })
+                previous_failed = source.meta.name
+                continue
+            except Exception as exc:
+                # 源实现未按契约包装异常（KeyError / TypeError / NotImplementedError 等）。
+                # 按接口级失败处理：只软降级该源，继续换源；日志 MUST 带堆栈，
+                # 否则代码缺陷会被伪装成普通上游失败。
+                error = SourceError(
+                    source.meta.name,
+                    FailureKind.UNEXPECTED,
+                    f"{type(exc).__name__}: {exc}",
+                )
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                events.log_source_result(
+                    capability=operation,
+                    source=source.meta.name,
+                    domain=source.meta.domain,
+                    ok=False,
+                    kind=error.kind.value,
+                    elapsed_ms=elapsed_ms,
+                    error=error.message,
+                    code=code,
+                    exc_info=True,
                 )
                 self._health.record_failure(source, error)
                 tried.append({

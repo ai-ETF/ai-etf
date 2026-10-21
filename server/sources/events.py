@@ -16,13 +16,17 @@ logger = logging.getLogger(__name__)
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 
-def _emit(event: str, level: int, **fields: Any) -> None:
+def _emit(event: str, level: int, *, exc_info: bool = False, **fields: Any) -> None:
     payload = {
         "event": event,
         "ts": datetime.now(BEIJING_TZ).isoformat(timespec="seconds"),
         **fields,
     }
-    logger.log(level, json.dumps(payload, ensure_ascii=False, default=str))
+    logger.log(
+        level,
+        json.dumps(payload, ensure_ascii=False, default=str),
+        exc_info=exc_info,
+    )
 
 
 def log_source_result(
@@ -34,11 +38,21 @@ def log_source_result(
     kind: Optional[str] = None,
     error: Optional[str] = None,
     code: Optional[str] = None,
+    exc_info: bool = False,
 ) -> None:
-    """单次取数结果。成功 DEBUG（高频），失败 WARNING。"""
+    """单次取数结果。成功 DEBUG（高频），普通失败 WARNING。
+
+    `exc_info=True` 表示源抛了未按契约包装的异常（`FailureKind.UNEXPECTED`）：
+    按 ERROR 记录并附完整堆栈，避免代码缺陷被当成普通上游失败。
+    """
+    if exc_info:
+        level = logging.ERROR
+    else:
+        level = logging.DEBUG if ok else logging.WARNING
     _emit(
         "source_result",
-        logging.DEBUG if ok else logging.WARNING,
+        level,
+        exc_info=exc_info,
         capability=capability,
         source=source,
         domain=domain,
@@ -47,6 +61,32 @@ def log_source_result(
         elapsed_ms=elapsed_ms,
         error=error,
         code=code,
+    )
+
+
+def log_batch_empty(
+    capability: str,
+    source: str,
+    domain: str,
+    requested: int,
+    returned: int,
+    sample: list[str],
+) -> None:
+    """批量请求非空、但过滤后一个代码都没命中。
+
+    批量源本来就是「成功但可能零命中」，不能升级成 `AllSourcesFailed`；
+    但零命中往往意味着源窗口/格式漂移（如 `showday` 变成空、代码列错位），
+    必须留一条 WARNING 供运维发现。
+    """
+    _emit(
+        "batch_empty",
+        logging.WARNING,
+        capability=capability,
+        source=source,
+        domain=domain,
+        requested=requested,
+        returned=returned,
+        sample=sample,
     )
 
 

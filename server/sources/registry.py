@@ -70,16 +70,18 @@ def default_sources() -> list[Source]:
     from server.sources.em_lsjz import EmLsjzSource
     from server.sources.em_mobile import EmMobileSource
     from server.sources.em_pingzhongdata import EmPingzhongdataSource
-    from server.sources.sina_index_daily import SinaIndexDailySource
     from server.sources.sina_trade_date import SinaTradeDateSource
 
+    # `sina_index_daily` 故意不注册（设计文档 §6.2 / Q3）：
+    # 它只能给出已发生的交易日，没有未来日期；若作为备源，主源失败时
+    # Router 会自动切过去，导致「下一交易日 / 跨年确认日」越界。
+    # 实现保留，仅供历史区间核对与解析单测。
     return [
         EmPingzhongdataSource(),
         EmFundJjjzSource(),
         EmLsjzSource(),
         EmMobileSource(),
         SinaTradeDateSource(),
-        SinaIndexDailySource(),
     ]
 
 
