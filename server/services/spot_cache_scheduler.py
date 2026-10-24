@@ -21,10 +21,20 @@ _scheduler: AsyncIOScheduler | None = None
 
 
 async def _warmup_cache():
-    """启动时异步预热行情缓存"""
+    """启动时异步预热行情缓存。
+
+    行情时段判断依赖交易日历；日历未就绪时会抛 `CalendarUnavailable`。
+    这是 fire-and-forget 任务，必须在这里记录失败，否则异常只会变成
+    「Task exception was never retrieved」。
+    """
     from server.services.finance_api_service import FinanceApiService
     logger.info("[预热] 开始首次全量行情加载...")
-    success = FinanceApiService.refresh_spot_cache()
+    try:
+        success = FinanceApiService.refresh_spot_cache()
+    except Exception as exc:
+        logger.error("[预热] 首次全量行情加载失败（交易日历不可用或上游异常）: %s",
+                     exc, exc_info=True)
+        return
     if success:
         logger.info("[预热] 全量行情加载完成")
     else:

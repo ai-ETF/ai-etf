@@ -104,6 +104,17 @@ def test_默认源清单覆盖净值与日历五源():
     assert "sina_index_daily" not in {s.meta.name for s in sources}
 
 
+def test_交易日历能力只注册一个源():
+    """日历单源约束：第二个 CAP_CALENDAR 源会启用自动换源（日历文档 §5）。"""
+    from server.sources.models import CAP_CALENDAR
+
+    calendar_sources = [
+        s.meta.name for s in default_sources() if CAP_CALENDAR in s.meta.capabilities
+    ]
+
+    assert calendar_sources == ["sina_trade_date"]
+
+
 def test_默认源域名符合设计文档():
     domains = {s.meta.name: s.meta.domain for s in default_sources()}
 

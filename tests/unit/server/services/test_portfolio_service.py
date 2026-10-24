@@ -3,8 +3,8 @@
 模块名称：server/services/portfolio_service.py
 所测功能（分批添加）：
   - 时间工具：_parse_time（时区归一）、_is_before_cutoff（15:00 截止）、
-    _is_trading_day（交易日，需 akshare 替身）、_next_trading_day（下一交易日）
-测试方法：纯函数直测 + sys.modules 注入 akshare 替身（避免真实联网/重导入），全程不联网、不连 Supabase。
+    _is_trading_day（交易日，注入日历快照）、_next_trading_day（下一交易日）
+测试方法：纯函数直测 + 注入假日历快照，全程不联网、不连 Supabase。
 """
 import json
 import sys
@@ -20,32 +20,13 @@ import server.services.fund_fee_service as fee_svc_mod
 import server.services.fund_risk_service as fund_risk_service_mod
 import server.services.portfolio_service as portfolio_service
 import server.services.risk_service as risk_service_mod
+import server.services.trading_calendar as trading_calendar
+from server.services.trading_calendar_cache import CalendarUnavailable
 from server.services.portfolio_service import (
     MONEY_FUND_CODE,
     PortfolioService,
     _parse_time,
 )
-
-
-# ==================== akshare 替身 ====================
-
-
-class _FakeTradeCalendar:
-    """模拟 akshare.tool_trade_date_hist_sina() 返回的 DataFrame（支持 iterrows + 下标取值）。"""
-
-    def __init__(self, trade_dates):
-        self._rows = [{"trade_date": d} for d in trade_dates]
-
-    def iterrows(self):
-        for i, row in enumerate(self._rows):
-            yield i, row
-
-
-def _patch_trade_calendar(monkeypatch, trade_dates):
-    """把 akshare 模块替换为只含交易日历的假模块。"""
-    mod = types.ModuleType("akshare")
-    mod.tool_trade_date_hist_sina = lambda: _FakeTradeCalendar(trade_dates)
-    monkeypatch.setitem(sys.modules, "akshare", mod)
 
 
 # ==================== _parse_time：时区归一 ====================
@@ -93,39 +74,39 @@ def test_9点30_在截止前():
 # ==================== _is_trading_day：交易日 ====================
 
 
-def test_交易日_日历命中(monkeypatch):
-    _patch_trade_calendar(monkeypatch, ["2026-01-05", "2026-01-06"])
+def test_交易日_日历命中():
+    trading_calendar.install_snapshot(["2026-01-05", "2026-01-06"])
     assert PortfolioService._is_trading_day(date(2026, 1, 5)) is True
 
 
-def test_非交易日_日历未命中(monkeypatch):
-    _patch_trade_calendar(monkeypatch, ["2026-01-05", "2026-01-06"])
+def test_非交易日_日历未命中():
+    trading_calendar.install_snapshot(
+        ["2026-01-05"], coverage_start=date(2026, 1, 1), coverage_end=date(2026, 1, 31)
+    )
     assert PortfolioService._is_trading_day(date(2026, 1, 10)) is False
 
 
-def test_akshare异常_回退工作日判断(monkeypatch):
-    mod = types.ModuleType("akshare")
-
-    def _boom():
-        raise RuntimeError("network fail")
-
-    mod.tool_trade_date_hist_sina = _boom
-    monkeypatch.setitem(sys.modules, "akshare", mod)
-    assert PortfolioService._is_trading_day(date(2026, 1, 5)) is True   # 周一
-    assert PortfolioService._is_trading_day(date(2026, 1, 10)) is False  # 周六
+def test_日历未就绪_抛CalendarUnavailable():
+    """无兜底：不会退化回「周一至周五」。"""
+    with pytest.raises(CalendarUnavailable):
+        PortfolioService._is_trading_day(date(2026, 1, 5))
 
 
 # ==================== _next_trading_day：下一交易日 ====================
 
 
-def test_next_trading_day_返回下一个交易日(monkeypatch):
-    _patch_trade_calendar(monkeypatch, ["2026-01-06"])
+def test_next_trading_day_返回下一个交易日():
+    trading_calendar.install_snapshot(["2026-01-06"])
     assert PortfolioService._next_trading_day(date(2026, 1, 5)) == date(2026, 1, 6)
 
 
-def test_next_trading_day_无交易日时返回次日(monkeypatch):
-    _patch_trade_calendar(monkeypatch, [])
-    assert PortfolioService._next_trading_day(date(2026, 1, 5)) == date(2026, 1, 6)
+def test_next_trading_day_14天无交易日_抛错():
+    """删除 d+1 兜底后，日历数据可疑必须显式失败。"""
+    trading_calendar.install_snapshot(
+        [], coverage_start=date(2026, 1, 1), coverage_end=date(2026, 3, 1)
+    )
+    with pytest.raises(RuntimeError):
+        PortfolioService._next_trading_day(date(2026, 1, 5))
 
 
 # ==================== 风控净值替身 ====================

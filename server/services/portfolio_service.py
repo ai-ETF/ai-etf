@@ -26,6 +26,10 @@ from server.services.fund_fee_service import (
     LIMITED_SUBSCRIBE_STATUS,
     PURCHASABLE_SUBSCRIBE_STATUSES,
 )
+from server.services.trading_calendar import (
+    CalendarOutOfCoverage,
+    CalendarUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -459,9 +463,8 @@ class PortfolioService:
         """判断是否为 A 股交易日
 
         委托给 server.services.trading_calendar（全项目唯一日历来源）：
-        日历按北京日期缓存，避免了原先「每次调用都请求一次新浪日历」的问题 ——
-        `_next_trading_day` 是在循环里调它的，一次最多 14 次网络请求，
-        而 `apply_purchase` 又会多次调用 `_next_trading_day`。
+        只读进程内 DB 快照，不触网。快照未就绪抛 `CalendarUnavailable`，
+        日期越界抛 `CalendarOutOfCoverage` —— 不猜值。
         """
         from server.services.trading_calendar import is_trading_day
         return is_trading_day(d)
@@ -473,12 +476,19 @@ class PortfolioService:
 
     @staticmethod
     def _next_trading_day(d: date) -> date:
-        """获取下一个交易日"""
+        """获取下一个交易日。
+
+        不设「d+1」兜底：14 天内找不到交易日说明日历数据异常（覆盖不足或数据
+        错误），必须显式失败；日期越界时 `_is_trading_day` 会先抛
+        `CalendarOutOfCoverage`。
+        """
         for i in range(1, 15):
             nd = d + timedelta(days=i)
             if PortfolioService._is_trading_day(nd):
                 return nd
-        return d + timedelta(days=1)
+        raise RuntimeError(
+            f"14 天内未找到交易日（基准日 {d.isoformat()}），交易日历数据可疑"
+        )
 
     # ==================== 手续费计算（接受 rule 参数避免重复查询） ====================
 
@@ -709,6 +719,10 @@ class PortfolioService:
                 "risk_warning": risk_warning,
             }
 
+        except (CalendarUnavailable, CalendarOutOfCoverage):
+            # 日历不可用/越界是系统性问题，不是业务失败：上抛给 API 层映射 503，
+            # 不伪装成「申购失败」的 400。
+            raise
         except Exception as e:
             logger.error(f"申购失败: {e}", exc_info=True)
             return {"success": False, "message": f"申购失败: {str(e)}", "data": None}
@@ -870,6 +884,8 @@ class PortfolioService:
                 },
             }
 
+        except (CalendarUnavailable, CalendarOutOfCoverage):
+            raise
         except Exception as e:
             logger.error(f"赎回失败: {e}", exc_info=True)
             return {"success": False, "message": f"赎回失败: {str(e)}", "data": None}
@@ -1043,7 +1059,13 @@ class PortfolioService:
             return {"status": "error", "message": "数据库不可用"}
 
         today = _beijing_date()
-        is_trading = self._is_trading_day(today)
+        # 启动补偿/手动触发必须绕开日历：即使日历未就绪也要确认已到期订单，
+        # 否则「先补偿、后刷新日历」的运维顺序无法执行（日历不可用时下单会报错，
+        # 但已有 pending 订单仍应按期确认）。
+        if skip_trading_day_check:
+            is_trading = True
+        else:
+            is_trading = self._is_trading_day(today)
 
         try:
             query = (
@@ -1080,6 +1102,10 @@ class PortfolioService:
                     rule = rules_map.get(order.get("fund_code"))
                     self._confirm_one_order(order, today, rule=rule)
                     confirmed += 1
+                except (CalendarUnavailable, CalendarOutOfCoverage):
+                    # 日历不可用/越界不是单笔订单的错：不能拒绝并退款，
+                    # 必须让整个确认任务失败，由人工处理日历后重跑。
+                    raise
                 except Exception as e:
                     rejected += 1
                     logger.error(f"确认订单失败 {order.get('id')}: {e}", exc_info=True)
@@ -1097,6 +1123,10 @@ class PortfolioService:
                 "processed": confirmed + rejected,
             }
 
+        except (CalendarUnavailable, CalendarOutOfCoverage):
+            # 日历错误必须保持异常语义（不降级成 {"status": "error"}），
+            # 让调度器把本轮任务标记为失败，而不是静默返回。
+            raise
         except Exception as e:
             logger.error(f"确认 pending 订单失败: {e}", exc_info=True)
             return {"status": "error", "message": str(e), "processed": 0}
