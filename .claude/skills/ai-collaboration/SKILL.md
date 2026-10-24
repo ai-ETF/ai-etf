@@ -1,6 +1,7 @@
 ---
 name: ai-collaboration
 description: 在本仓库做功能开发、缺陷修复、技术调研，或用户说「按 SOP 协作 / 文档驱动 / 先设计后实现」时使用。它不规定开发流程，只约束六个最容易失控的转折点：先理解再实现、取舍交给人、先改文档再改代码、不擅自动范围、每轮回填文档。
+disable-model-invocation: true
 ---
 
 # Vibe Coding 协作协议
