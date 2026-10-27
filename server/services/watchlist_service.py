@@ -36,14 +36,13 @@ class WatchlistService:
             return {"success": False, "message": "数据库连接失败", "item": None}
 
         try:
-            # 未提供名称时自动获取
+            # 未提供名称时从基金主数据补（2026-10-26：不再从实时行情快照取名称）
             if not fund_name:
-                from server.services.finance_api_service import FinanceApiService
+                from server.services.fund_meta_service import FundMetaService
 
-                svc = FinanceApiService()
-                spot_data = svc.query_spot(fund_code)
-                if spot_data:
-                    fund_name = spot_data.get("name", "")
+                meta = FundMetaService().get(fund_code)
+                if meta is not None:
+                    fund_name = meta.fund_name
 
             # 检查是否已存在
             existing = (
@@ -127,12 +126,12 @@ class WatchlistService:
             return {"success": False, "message": f"移除失败: {str(e)}"}
 
     def list(self, user_id: str, include_quote: bool = True) -> dict:
-        """
-        查询自选股列表
+        """查询自选股列表。
 
         参数:
             user_id: 用户 UUID（来自 JWT）
-            include_quote: 是否包含实时行情
+            include_quote: 是否附带最新净值（2026-10-26 起由实时行情改为
+                DB 最新净值；`include_quote=False` 时不查）
 
         返回:
             {"total": int, "items": list}
@@ -152,24 +151,17 @@ class WatchlistService:
 
             items = [self._format_item(item) for item in result.data]
 
-            # 需要实时行情时批量获取
             if include_quote and items:
-                from server.services.finance_api_service import FinanceApiService
+                from server.services.fund_nav_service import FundNavService
 
-                svc = FinanceApiService()
-                quotes = {}
-
+                latest = FundNavService().get_latest_batch(
+                    [item["fund_code"] for item in items]
+                )
                 for item in items:
-                    quote = svc.query_spot(item["fund_code"])
-                    if quote:
-                        quotes[item["fund_code"]] = quote
-
-                for item in items:
-                    quote = quotes.get(item["fund_code"])
-                    if quote:
-                        item["price"] = quote.get("price")
-                        item["change_pct"] = quote.get("change_pct")
-                        item["change"] = quote.get("change")
+                    nav = latest.get(item["fund_code"])
+                    if nav is not None:
+                        item["nav"] = float(nav.unit_nav)
+                        item["nav_date"] = nav.nav_date.isoformat()
 
             logger.info(f"查询自选股列表: user={user_id}, total={len(items)}")
             return {"total": len(items), "items": items}
@@ -218,7 +210,7 @@ class WatchlistService:
             }
 
     def _format_item(self, data: dict) -> dict:
-        """格式化数据库记录为返回格式"""
+        """格式化数据库记录为返回格式（净值字段由 `list()` 按需填充）"""
         return {
             "id": data.get("id", ""),
             "user_id": data.get("user_id", ""),
@@ -226,7 +218,6 @@ class WatchlistService:
             "fund_name": data.get("fund_name", ""),
             "sort_order": data.get("sort_order", 0),
             "created_at": data.get("created_at", ""),
-            "price": None,
-            "change_pct": None,
-            "change": None,
+            "nav": None,
+            "nav_date": None,
         }

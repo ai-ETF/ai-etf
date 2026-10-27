@@ -2,7 +2,10 @@
 
 模块名称：APScheduler 定时任务
 所测功能：确认任务 / 启动补偿任务直调后，pending 订单 → completed + 持仓建仓的真实 DB 流转
-使用的测试方法：本地 Supabase 栈 + 合成 user_id + 冻结时钟 + mock _get_nav（类级）
+使用的测试方法：本地 Supabase 栈 + 合成 user_id + 冻结时钟 + mock _confirm_nav（类级）
+
+净值读取已改为只读 DB（FundNavService），本测试聚焦 DB 资金流转，
+故直接把 `_confirm_nav` 打成固定净值，不依赖 fund_nav 表内容。
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -19,14 +22,18 @@ CONFIRM_DAY = datetime(2026, 9, 15, 14, 0, tzinfo=BEIJING)
 
 @pytest.fixture
 def trade_env(portfolio_service, monkeypatch):
-    """类级 mock _get_nav，使任务函数内部新建的 PortfolioService 也返回固定净值。"""
+    """类级 mock 净值读取，使任务函数内部新建的 PortfolioService 也返回固定净值。
+
+    - `_latest_nav`：下单预估（本测试显式传 price，实际不走）
+    - `_confirm_nav`：确认日净值（订单确认的主路径）
+    """
     from server.services.portfolio_service import PortfolioService
 
-    monkeypatch.setattr(
-        PortfolioService,
-        "_get_nav",
-        lambda self, fc: Decimal("1.0000") if fc == "000198" else Decimal("1.5"),
-    )
+    def _固定净值(self, fc):
+        return Decimal("1.0000") if fc == "000198" else Decimal("1.5")
+
+    monkeypatch.setattr(PortfolioService, "_latest_nav", _固定净值)
+    monkeypatch.setattr(PortfolioService, "_confirm_nav", lambda self, order: _固定净值(self, order["fund_code"]))
     return portfolio_service
 
 
@@ -60,7 +67,7 @@ def test_启动补偿_确认遗漏订单(trade_env, supabase_client, user_id):
     with _travel(SUBMIT_DAY):
         trade_env.apply_purchase(user_id, "110020", Decimal("1000"), price=Decimal("1.5"))
 
-    # 启动补偿 skip_trading_day_check=True，但仍要求 confirm_date <= today，
+    # 启动补偿用 before_today=False（含今天），但仍要求 confirm_date <= today，
     # 故时钟推进到确认日 09-15（订单 confirm_date 也是 09-15）
     with _travel(CONFIRM_DAY):
         asyncio.run(_startup_pending_compensation())

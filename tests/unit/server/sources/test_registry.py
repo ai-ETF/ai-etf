@@ -90,7 +90,6 @@ def test_空注册表检索返回空列表(registry):
 
 
 def test_默认源清单覆盖净值与日历五源():
-    """`sina_index_daily` 按 §6.2 决策不注册：它给不出未来交易日。"""
     sources = default_sources()
 
     assert [s.meta.name for s in sources] == [
@@ -101,7 +100,6 @@ def test_默认源清单覆盖净值与日历五源():
         "sina_trade_date",
     ]
     assert len({s.meta.name for s in sources}) == 5
-    assert "sina_index_daily" not in {s.meta.name for s in sources}
 
 
 def test_交易日历能力只注册一个源():
@@ -123,7 +121,6 @@ def test_默认源域名符合设计文档():
     assert domains["em_lsjz"] == "api.fund.eastmoney.com"
     assert domains["em_mobile"] == "fundmobapi.eastmoney.com"
     assert domains["sina_trade_date"] == "finance.sina.com.cn"
-    assert "sina_index_daily" not in domains
 
 
 def test_get_router返回进程内单例():

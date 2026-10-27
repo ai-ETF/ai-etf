@@ -10,7 +10,7 @@
 |------|------|----------|
 | 基础 & 认证 | [01-基础与认证.md](01-基础与认证.md) | 健康检查、注册、登录、刷新登录态、退出登录、注销账号 |
 | 对话 & 会话 | [02-对话与会话.md](02-对话与会话.md) | LLM 流式对话、会话管理 |
-| 行情 | [03-行情.md](03-行情.md) | spot / ranking / kline / intraday / detail / money-flow / search / categories |
+| 行情 | [03-行情.md](03-行情.md) | kline / intraday / detail / search |
 | 自选股 | [04-自选股.md](04-自选股.md) | watchlist |
 | 组合交易 | [05-组合交易.md](05-组合交易.md) | portfolio：申购 / 赎回 / 持仓 / 流水 / 快照 / 定投 / `test/*` 开发接口 |
 | 风险测评 | [06-风险测评.md](06-风险测评.md) | risk：问卷 / 提交 / 画像 |
@@ -63,22 +63,13 @@ AUTH="Authorization: Bearer $TOKEN"
 | DELETE | `/api/watchlist/clear` | 🔒 | [04](04-自选股.md) |
 | GET | `/api/watchlist/health` | - | [04](04-自选股.md) |
 | GET | `/api/market/health` | - | [03](03-行情.md) |
-| GET | `/api/market/spot/{fund_code}` | - | [03](03-行情.md) |
-| GET | `/api/market/spot/name/{fund_name}` | - | [03](03-行情.md) |
-| GET | `/api/market/ranking` | - | [03](03-行情.md) |
 | GET | `/api/market/kline/{fund_code}` | - | [03](03-行情.md) |
 | GET | `/api/market/kline/name/{fund_name}` | - | [03](03-行情.md) |
 | GET | `/api/market/intraday/{fund_code}` | - | [03](03-行情.md) |
 | GET | `/api/market/intraday/name/{fund_name}` | - | [03](03-行情.md) |
 | GET | `/api/market/detail/{fund_code}` | - | [03](03-行情.md) |
 | GET | `/api/market/detail/name/{fund_name}` | - | [03](03-行情.md) |
-| GET | `/api/market/money-flow/{fund_code}` | - | [03](03-行情.md) |
-| GET | `/api/market/money-flow/name/{fund_name}` | - | [03](03-行情.md) |
-| GET | `/api/market/money-flow/ranking` | - | [03](03-行情.md) |
 | GET | `/api/market/search` | - | [03](03-行情.md) |
-| POST | `/api/market/filter` | - | [03](03-行情.md) |
-| GET | `/api/market/categories` | - | [03](03-行情.md) |
-| GET | `/api/market/category/{category}` | - | [03](03-行情.md) |
 | POST | `/api/portfolio/apply-purchase` | 🔒 | [05](05-组合交易.md) |
 | POST | `/api/portfolio/apply-redeem` | 🔒 | [05](05-组合交易.md) |
 | GET | `/api/portfolio/positions` | 🔒 | [05](05-组合交易.md) |

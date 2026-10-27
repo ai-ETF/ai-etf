@@ -37,10 +37,8 @@ check "组合模块健康"       "curl -s '$API/api/portfolio/health'"          
 check "自选股模块健康"     "curl -s '$API/api/watchlist/health'"             '"ok"'
 check "行情模块健康"       "curl -s '$API/api/market/health'"                '"ok"'
 check "风险模块健康"       "curl -s '$API/api/risk/health'"                  '"ok"'
-check "实时行情"           "curl -s '$API/api/market/spot/512890'"           '"code"'
-check "涨幅榜"             "curl -s '$API/api/market/ranking?top_n=5'"       '"items"'
+check "基金详情"           "curl -s '$API/api/market/detail/110020'"         '"code"'
 check "搜索"               "curl -s --get '$API/api/market/search' --data-urlencode 'keyword=红利' --data-urlencode 'top_n=5'" '"items"'
-check "高级筛选"           "curl -s -X POST '$API/api/market/filter' -H 'Content-Type: application/json' -d '{\"keyword\":\"ETF\",\"top_n\":5}'" '"items"'
 
 echo ""
 echo "=== 结果: $PASS 通过, $FAIL 失败 ==="

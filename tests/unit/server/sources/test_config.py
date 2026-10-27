@@ -21,7 +21,6 @@ _ENV_NAMES = (
     "SOURCE_DENYLIST",
     "NAV_SOURCE_PRIORITY",
     "CALENDAR_SOURCE_PRIORITY",
-    "CATALOG_SOURCE_PRIORITY",
 )
 
 
@@ -124,14 +123,13 @@ def test_denylist过滤空白项(clean_env, monkeypatch):
 
 def test_偏好覆盖按环境变量顺序合并(clean_env, monkeypatch):
     monkeypatch.setenv("NAV_SOURCE_PRIORITY", "em_lsjz, em_pingzhongdata")
-    monkeypatch.setenv("CALENDAR_SOURCE_PRIORITY", "sina_index_daily")
-    monkeypatch.setenv("CATALOG_SOURCE_PRIORITY", "")
+    monkeypatch.setenv("CALENDAR_SOURCE_PRIORITY", "sina_trade_date")
 
     config = AdapterConfig.from_env()
 
     assert override_rank(config, "em_lsjz") == 0
     assert override_rank(config, "em_pingzhongdata") == 1
-    assert override_rank(config, "sina_index_daily") == 2
+    assert override_rank(config, "sina_trade_date") == 2
     assert override_rank(config, "em_mobile") is None
 
 

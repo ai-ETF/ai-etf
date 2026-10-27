@@ -8,12 +8,14 @@
 - 单元测试用替身 DataFrame，上游表结构一变（加列、akshare 解析器写死列名）照样全绿；
 - 集成测试有出网守卫，按设计看不见任何外部依赖的变化。
 真实故障（akshare 1.18.64 的 fund_etf_fund_info_em 抛 Length mismatch；生产服务器到
-push2*.eastmoney.com 被应用层拒绝，导致 /spot、/ranking、/kline、分时全空 3 周）
+push2*.eastmoney.com 被应用层拒绝，导致 /kline、分时全空 3 周）
 正是这两层都照不到的盲区。
 
-数据源分工（2026-10-13 起）：
-- 行情（实时/榜单/K线/分时）→ 新浪，见 docs/20-设计/行情/行情数据源.md；
-- 净值与概览（/detail）→ 东财 fund.eastmoney.com，该域名生产可达，未改。
+数据源分工（2026-10-26 起）：
+- 净值 → 只读 DB（`fund_nav`），**不再有上游回退**，因此本文件不再测净值上游；
+  目录外代码（场内 ETF）直接抛 `FundNotSupported`，见 `test_目录外代码_不回退上游`；
+- K线/分时 → 新浪，见 docs/20-设计/行情/行情数据源.md；
+- 详情概览（/detail）→ 东财 fund.eastmoney.com，该域名生产可达，未改。
 
 运行方式（**默认不跑**，需真实出网，且行情用例要跑在能访问新浪 hq.sinajs.cn 的机器上）：
     poetry run pytest tests/integration/server/services/test_upstream_contract.py -m integration_net
@@ -25,7 +27,7 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.integration_net]
 
-# 场内 ETF + 场外基金各一只：两类基金走同一净值接口，任一失效都该被抓到
+# 场内 ETF + 场外基金各一只：详情概览对两类代码都要能取到
 FUND_CODES = ["512890", "110020"]
 
 
@@ -36,16 +38,16 @@ def svc():
     return FinanceApiService()
 
 
-@pytest.mark.parametrize("fund_code", FUND_CODES)
-def test_历史净值_按代码返回且字段可解析(svc, fund_code):
-    """上游净值接口必须按传入代码返回，且单位/累计净值、日增长率都解析得出来。"""
-    nav = svc._query_nav_history(fund_code, limit=5)
+def test_目录外代码_不回退上游(svc):
+    """2026-10-26 决策：目录外代码（场内 ETF 等）不查净值、不回退上游。
 
-    assert len(nav) == 5, f"{fund_code} 未取到净值，上游接口可能已变更或不可达"
-    assert all(item["date"] and item["nav"] is not None for item in nav)
-    assert all(item["daily_growth"] is not None for item in nav)
-    # 累计净值允许缺失（单独一次请求），但取到时要等于或大于单位净值（分红过的基金更大）
-    assert all(item["accumulated_nav"] is None or item["accumulated_nav"] >= item["nav"] for item in nav)
+    若哪天又给 `_query_nav_history` 加回 `fund_open_fund_info_em` 回退，
+    这条会立刻失败——这是「搜不到、买不了，却在详情页看得见」的防线。
+    """
+    from server.services.fund_nav_service import FundNotSupported
+
+    with pytest.raises(FundNotSupported):
+        svc._query_nav_history("512890", limit=5)
 
 
 @pytest.mark.parametrize("fund_code", FUND_CODES)
@@ -56,26 +58,6 @@ def test_详情概览_字段可解析(svc, fund_code):
     assert overview, f"{fund_code} 未取到概览"
     assert overview["full_name"]
     assert overview["net_asset_scale"]
-
-
-def test_实时行情_全市场快照可达(svc):
-    """环境哨兵：服务器出口到新浪行情域名必须可达。
-
-    生产服务器自 2026-07-28 起被东财 push2* 应用层拒绝（TCP/TLS 通、HTTP 请求被立即
-    断开），/spot、/ranking、/kline、分时全空达 3 周。此断言就是为了让这类环境问题在
-    部署后立刻暴露，而不是等前端报障。
-    """
-    from server.services.finance_api_service import FinanceApiService
-
-    assert FinanceApiService.refresh_spot_cache(), (
-        "全量行情刷新失败：确认服务器能访问新浪行情接口（fund_etf_category_sina / hq.sinajs.cn）"
-    )
-    spot = FinanceApiService().query_spot("512890")
-    assert spot, "行情缓存里没有 512890，行情数据源可能异常"
-    # 价格/昨收必须有值——源里取不到的字段（换手率、主力净流入等）允许为 0
-    assert spot["price"] > 0, f"512890 最新价为 0，行情解析可能出错: {spot}"
-    assert spot["prev_close"] > 0, "昨收为 0，振幅与分时涨跌幅都会失真"
-    assert spot["data_date"], "data_date 不应为空"
 
 
 def test_K线_日线与周线都可取到(svc):

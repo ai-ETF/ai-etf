@@ -1,23 +1,25 @@
 """
 场外 ETF 联接基金白名单批量同步
 
-背景：`fund_fee_rules` 表是场外基金交易的唯一准入点（查不到规则即拒绝交易），
+背景：白名单是场外基金交易的唯一准入点（没有交易规则即拒绝交易），
 原本 21 条靠手工维护，无法覆盖市面上大部分场外基金。本模块把它升级为
 「程序化白名单同步」：
 
-    全量基金列表 -> 筛出 ETF 联接基金 -> 逐只抓费率/基础信息
-    -> 推导风险画像 -> 幂等 upsert 进 fund_fee_rules + fund_risk_profiles
+    全量基金列表 -> 筛出 ETF 联接基金 -> 逐只抓基础信息/费率
+    -> 推导风险画像与 QDII -> 一次 RPC 写 fund + fund_trade_rule + fund_risk_profiles
 
 数据来源与解析规则见 server/services/fund_fee_source.py（已用现有 21 条种子回归验证）。
 
 准入原则（与 fund_fee_service「交易规则不能靠猜」一致）：
 - 申购状态**如实落库**（开放申购/限大额/暂停申购/封闭期…），能否申购由交易侧按
-  subscribe_status 判定（portfolio_service.apply_purchase）；只有状态本身抓不到才整只跳过
+  subscribe_status 判定（portfolio_service.apply_purchase）；只有状态本身抓不到才不写规则
 - 限大额的「单日累计申购上限」来自 MAXSG 字段并落库，交易时校验
-- 申购或赎回费率分档抓不到/为空的不写入 —— 宁可不支持，也不用默认费率兜底
-- 运作费率/申购起点都是 fund_fee_rules 的 NOT NULL 列：销售服务费率缺失按「A 类=0」的
-  业务事实落 0.0；其余（管理费/托管费/申购起点）缺失即 fail-closed 跳过。**不允许写入裸
-  None** —— 显式 NULL 会覆盖列 DEFAULT 并触发 23502，让整轮同步中止（见 build_fee_rule）
+- 申购或赎回费率分档抓不到/为空的不写交易规则 —— 宁可不支持，也不用默认费率兜底
+- 运作费率/申购起点都是 fund_trade_rule 的 NOT NULL 列：销售服务费率缺失按「A 类=0」的
+  业务事实落 0.0；其余（管理费/托管费/申购起点）缺失即 fail-closed 不写规则。**不允许写入裸
+  None** —— 显式 NULL 会触发 23502，让整批 RPC 回滚（见 build_trade_rule）
+- **元数据与交易规则独立失败**：基础信息ok 就先写 `fund`，jjfl 失败只影响交易规则
+  （存储设计 §3.6.3）；基础信息也抓不到才整只跳过（保留旧行）
 - 货币基金不适用（净值恒 1.0、无申购起点），由 portfolio_service.MONEY_FUND_CODE 特例维护
 
 T+N 采用「按类别判定」而非逐只抓页面：jjfl 页对所有基金都显示 T+1（QDII 也是），
@@ -124,27 +126,51 @@ def resolve_delays(market_score: int) -> tuple:
     return CONFIRM_DELAY_DOMESTIC, SETTLE_DELAY_DOMESTIC
 
 
-def build_fee_rule(code: str, jjfl: dict, basic: dict, risk: dict) -> Optional[dict]:
+def build_fund(code: str, basic: dict, risk: dict) -> dict:
+    """组装 `fund` 主数据的一行（身份 / 静态描述 / QDII 推导依据）。
+
+    只依赖 `fetch_basic_info` 的返回：基础信息抓不到时调用方不应调用本函数
+    （R9：元数据抓取失败不覆盖旧行）。
     """
-    组装 fund_fee_rules 的一行。数据不完整（缺分档）返回 None，不写库。
+    basic = basic or {}
+    fund_name = basic.get("fund_name") or code
+    return {
+        "fund_code": code,
+        "fund_name": fund_name,
+        "ftype": basic.get("ftype") or None,
+        "manager_company": basic.get("manager_company"),
+        "fund_manager": basic.get("fund_manager"),
+        "tracking_index": basic.get("index_name") or None,
+        "tracking_index_code": basic.get("index_code") or None,
+        "establish_date": basic.get("establish_date"),
+        "net_asset_scale": basic.get("net_asset_scale"),
+        "risk_level_code": basic.get("risk_level_code"),
+        "is_qdii": risk["is_qdii"],
+        "qdii_reason": risk["qdii_reason"],
+        "metadata_source": "mobile_basic",
+    }
+
+
+def build_trade_rule(code: str, jjfl: dict, basic: dict, risk: dict) -> Optional[dict]:
+    """
+    组装 `fund_trade_rule` 的一行。数据不完整（缺分档）返回 None，不写库。
 
     参数:
         code: 基金代码
         jjfl: fetch_jjfl 的返回值
-        basic: fetch_basic_info 的返回值（可能为 None，此时退回代码做名称）
+        basic: fetch_basic_info 的返回值（可能为 None，用于申购上限与份额类别）
         risk: classify_fund 的返回值
     """
     purchase_tiers = jjfl.get("purchase_fee_tiers")
     redemption_tiers = jjfl.get("redemption_fee_tiers")
     if not purchase_tiers or not redemption_tiers:
-        logger.warning(f"{code} 费率分档缺失，跳过（申购={purchase_tiers} 赎回={redemption_tiers}）")
+        logger.warning(f"{code} 费率分档缺失，不写交易规则（申购={purchase_tiers} 赎回={redemption_tiers}）")
         return None
 
-    # 以下字段在 fund_fee_rules 里都是 NOT NULL 列。**显式写入 None 会覆盖列 DEFAULT 并触发
-    # 23502，异常抛穿 run() → 整轮 20-30 分钟的全量同步中止**（2026-10-03 实测如此）。
-    # 故逐字段定策略，不留裸 None：
+    # 以下字段在 fund_trade_rule 里都是 NOT NULL 列。显式写入 None 会触发 23502，
+    # 异常会让整批 RPC 回滚（2026-10-03 在旧表上实测过整轮同步被中止）。故逐字段定策略：
     #   - 销售服务费率缺失 = A 类不收该费（列注释即「A类=0」），按业务事实落 0.0，不是猜
-    #   - 其余是真实交易规则，页面缺失即不可信 → fail-closed 跳过整只（存量行不受影响）
+    #   - 其余是真实交易规则，页面缺失即不可信 → fail-closed 不写规则（存量规则不受影响）
     sales_service_fee_rate = jjfl.get("sales_service_fee_rate")
     if sales_service_fee_rate is None:
         sales_service_fee_rate = 0.0
@@ -155,7 +181,7 @@ def build_fee_rule(code: str, jjfl: dict, basic: dict, risk: dict) -> Optional[d
         ("min_purchase_amount", "申购起点"),
     ):
         if jjfl.get(field) is None:
-            logger.warning(f"{code} 未取到{label}（{field}），跳过（不写入白名单）")
+            logger.warning(f"{code} 未取到{label}（{field}），不写交易规则（元数据照常写入）")
             return None
 
     fund_name = (basic or {}).get("fund_name") or code
@@ -163,7 +189,6 @@ def build_fee_rule(code: str, jjfl: dict, basic: dict, risk: dict) -> Optional[d
 
     return {
         "fund_code": code,
-        "fund_name": fund_name,
         "fund_type": "of",
         "management_fee_rate": jjfl.get("management_fee_rate"),
         "custody_fee_rate": jjfl.get("custody_fee_rate"),
@@ -241,13 +266,17 @@ class FundCatalogSync:
         return out
 
     def _existing_whitelist_codes(self) -> list:
-        """读取现有白名单的全部基金代码（分页，避免 PostgREST 单次返回上限截断）。"""
+        """读取现有白名单的全部基金代码（分页，避免 PostgREST 单次返回上限截断）。
+
+        走 `fund_catalog` 视图：白名单 = 规则行存在 + `lifecycle_status='active'`，
+        与交易侧读路径同一口径（存储设计 §3.5）。
+        """
         if not self.client:
             return []
         codes, start, page = [], 0, 1000
         while True:
             resp = (
-                self.client.table("fund_fee_rules")
+                self.client.table("fund_catalog")
                 .select("fund_code")
                 .order("fund_code")
                 .range(start, start + page - 1)
@@ -273,50 +302,57 @@ class FundCatalogSync:
 
     def sync_one(self, code: str) -> Optional[dict]:
         """
-        抓取并组装单只基金的两张表记录。
+        抓取并组装单只基金的 `fund` / `fund_trade_rule` / 风险画像记录。
 
-        返回: {"fee_rule": dict, "risk_profile": dict, "needs_review": bool}
-              或 None（不满足准入条件，原因已记日志）
+        主数据与交易规则**独立失败**（存储设计 §3.6.3）：基础信息ok 就先写元数据，
+        jjfl 失败只影响交易规则（该基金因此不可交易，但公司/经理/QDII 不会丢）。
+
+        返回:
+            {"fund": dict, "trade_rule": dict|None, "risk_profile": dict,
+             "needs_review": bool}
+            或 None（基础信息也不可用 → 不写 `fund`，保留旧行）
         """
-        jjfl = fetch_jjfl(code)
-        if not jjfl:
-            logger.warning(f"{code} 购买信息页抓取失败，跳过")
-            return None
-
-        # 状态解析不出来 = 这次抓取不可信，整只跳过（fail-closed）。
-        # 与「暂停申购」不同：那种是抓到了真实状态，如实落库即可；
-        # 这里是连状态都没抓到，不能凭残缺数据写库。
-        status = (jjfl.get("subscribe_status") or "").strip()
-        if not status:
-            logger.warning(f"{code} 未取到申购状态，跳过（不写入白名单）")
-            return None
-
         basic = fetch_basic_info(code)
-        fund_name = (basic or {}).get("fund_name") or code
+        if not basic:
+            logger.warning(f"{code} 基础信息抓取失败，跳过（保留旧行，不写脏数据）")
+            return None
 
-        # 「限大额」按定义必然有上限值，取不到只可能是 MAXSG 解析失败（接口改版/网络异常）。
-        # 此时仍然写库（状态=限大额、上限=NULL），但写下的是一条「不可申购」的记录 ——
-        # 交易侧见 5.2/6.x 的判定会拒绝申购。这样它既不会漏进「无限额」的口子，
-        # 又能在库里被查到：
-        #   SELECT * FROM fund_fee_rules WHERE subscribe_status='限大额' AND max_purchase_amount IS NULL;
-        if status == LIMITED_SUBSCRIBE_STATUS and (basic or {}).get("max_purchase_amount") is None:
-            logger.warning(
-                f"{code} 申购状态为「限大额」但未取到单日申购上限（MAXSG 解析失败）；"
-                f"仍写入白名单，但该基金将被拒绝申购，需人工干预"
-            )
-
+        fund_name = basic.get("fund_name") or code
         risk = classify_fund(
             fund_name,
-            index_name=(basic or {}).get("index_name", ""),
-            ftype=(basic or {}).get("ftype", ""),
+            index_name=basic.get("index_name", ""),
+            ftype=basic.get("ftype", ""),
         )
+        fund = build_fund(code, basic, risk)
 
-        fee_rule = build_fee_rule(code, jjfl, basic, risk)
-        if fee_rule is None:
-            return None
+        jjfl = fetch_jjfl(code)
+        trade_rule = None
+        if not jjfl:
+            logger.warning(f"{code} 购买信息页抓取失败，只写元数据、不写交易规则")
+        else:
+            status = (jjfl.get("subscribe_status") or "").strip()
+            if not status:
+                # 状态解析不出来 = 这次抓取不可信，不写规则（fail-closed）。
+                # 与「暂停申购」不同：那种是抓到了真实状态，如实落库即可。
+                logger.warning(f"{code} 未取到申购状态，只写元数据、不写交易规则")
+            else:
+                # 「限大额」按定义必然有上限值，取不到只可能是 MAXSG 解析失败（接口改版/网络异常）。
+                # 此时仍然写规则（状态=限大额、上限=NULL），但写下的是一条「不可申购」的记录 ——
+                # 交易侧判定会拒绝申购。这样它既不会漏进「无限额」的口子，又能在库里被查到：
+                #   SELECT * FROM fund_catalog WHERE subscribe_status='限大额' AND max_purchase_amount IS NULL;
+                if (
+                    status == LIMITED_SUBSCRIBE_STATUS
+                    and basic.get("max_purchase_amount") is None
+                ):
+                    logger.warning(
+                        f"{code} 申购状态为「限大额」但未取到单日申购上限（MAXSG 解析失败）；"
+                        f"仍写入目录，但该基金将被拒绝申购，需人工干预"
+                    )
+                trade_rule = build_trade_rule(code, jjfl, basic, risk)
 
         return {
-            "fee_rule": fee_rule,
+            "fund": fund,
+            "trade_rule": trade_rule,
             "risk_profile": build_risk_profile(code, risk),
             "needs_review": risk["needs_review"],
         }
@@ -334,7 +370,10 @@ class FundCatalogSync:
             interval: 逐只抓取间隔（秒）
             dry_run: 只抓取与组装，不写库（运维试跑用）
 
-        返回: 统计 dict（discovered/synced/skipped/failed/needs_review/codes）
+        返回: 统计 dict
+            discovered / synced（写入了主数据的只数）/ rules_synced（写入了交易规则的只数）/
+            skipped / failed / needs_review / new_codes（本轮首次进入 `fund` 的代码）/
+            codes（成功写入的代码，供下一轮 `update_batch` 使用）
         """
         if codes is None:
             targets = self.discover_linked_funds()
@@ -344,15 +383,19 @@ class FundCatalogSync:
         if limit is not None:
             targets = targets[:limit]
 
+        existing_codes = self._existing_codes()
+
         stats = {
             "discovered": len(targets),
             "synced": 0,
+            "rules_synced": 0,
             "skipped": 0,
             "failed": 0,
             "needs_review": 0,
+            "new_codes": [],
             "codes": [],
         }
-        pending_fee, pending_risk = [], []
+        pending_funds, pending_rules, pending_risk = [], [], []
 
         for i, item in enumerate(targets, 1):
             code = item["code"]
@@ -366,90 +409,133 @@ class FundCatalogSync:
             if result is None:
                 stats["skipped"] += 1
             else:
-                pending_fee.append(result["fee_rule"])
+                pending_funds.append(result["fund"])
                 pending_risk.append(result["risk_profile"])
+                if result["trade_rule"] is not None:
+                    pending_rules.append(result["trade_rule"])
+                    stats["rules_synced"] += 1
                 stats["synced"] += 1
                 stats["codes"].append(code)
+                if code not in existing_codes:
+                    stats["new_codes"].append(code)
                 if result["needs_review"]:
                     stats["needs_review"] += 1
                     logger.warning(f"{code} {item['name']} 有维度未命中分类规则，风险分待人工复核")
 
-            if len(pending_fee) >= UPSERT_BATCH_SIZE:
-                self._commit(pending_fee, pending_risk, stats, dry_run)
-                pending_fee, pending_risk = [], []
+            if len(pending_funds) >= UPSERT_BATCH_SIZE:
+                self._commit(
+                    pending_funds, pending_rules, pending_risk, stats, dry_run
+                )
+                pending_funds, pending_rules, pending_risk = [], [], []
 
             if i % PROGRESS_LOG_EVERY == 0:
                 logger.info(f"[同步进度] {i}/{len(targets)} 已同步={stats['synced']} "
-                            f"跳过={stats['skipped']} 失败={stats['failed']}")
+                            f"规则={stats['rules_synced']} 跳过={stats['skipped']} "
+                            f"失败={stats['failed']}")
 
             if interval:
                 time.sleep(interval)
 
-        self._commit(pending_fee, pending_risk, stats, dry_run)
+        self._commit(pending_funds, pending_rules, pending_risk, stats, dry_run)
         logger.info(
-            f"[同步完成] 发现 {stats['discovered']}，写入 {stats['synced']}，"
+            f"[同步完成] 发现 {stats['discovered']}，写入主数据 {stats['synced']}，"
+            f"其中规则 {stats['rules_synced']}，新增 {len(stats['new_codes'])}，"
             f"跳过 {stats['skipped']}，失败 {stats['failed']}，待复核 {stats['needs_review']}"
         )
         return stats
 
-    def _commit(self, fee_rules: list, risk_profiles: list, stats: dict, dry_run: bool):
+    def _commit(self, funds: list, trade_rules: list, risk_profiles: list,
+                stats: dict, dry_run: bool):
         """写入一批并回填统计。dry_run 下只丢弃缓冲，不落库。"""
         if dry_run:
-            logger.info(f"[dry-run] 跳过写入 {len(fee_rules)} 条")
+            logger.info(f"[dry-run] 跳过写入 {len(funds)} 条")
             return
 
-        failed = self._flush(fee_rules, risk_profiles)
+        failed = self._flush(funds, trade_rules, risk_profiles)
         if not failed:
             return
         # 坏行在收集阶段已被计入 synced，这里回退并改计 failed，保证统计与库内真实一致
+        rule_codes = {r["fund_code"] for r in trade_rules}
         stats["synced"] -= len(failed)
         stats["failed"] += len(failed)
+        stats["rules_synced"] -= sum(1 for code in failed if code in rule_codes)
         for code in failed:
             if code in stats["codes"]:
                 stats["codes"].remove(code)
+            if code in stats["new_codes"]:
+                stats["new_codes"].remove(code)
 
-    def _flush(self, fee_rules: list, risk_profiles: list) -> list:
+    def _flush(self, funds: list, trade_rules: list, risk_profiles: list) -> list:
         """
-        批量 upsert 两张表（fund_code 唯一，覆盖式更新，与 seed.sql 约定一致）。
+        调用 `upsert_fund_catalog` 批量写三张表（同一事务）。
 
-        整批失败时**降级为逐行写入** —— 单只脏数据（页面改版、字段缺失…）不该让整轮
-        20-30 分钟的全量同步归零（PostgREST 的单次批 upsert 是原子的，失败即整批未写，
-        故逐行重试不会重复写）。写不进去的行由 run() 计入 failed 并记日志。
+        整批失败时**降级为逐只写入** —— 单只脏数据（页面改版、字段缺失…）不该让整轮
+        20-30 分钟的全量同步归零。RPC 是原子的，失败即整批未写，故逐只重试不会重复写。
+        写不进去的行由 `_commit` 计入 failed 并记日志。
 
         返回: 写入失败的 fund_code 列表（全部成功则为空列表）
         """
-        if not fee_rules:
+        if not funds:
             return []
         if not self.client:
             raise RuntimeError("数据库不可用，白名单同步中止")
 
-        risk_by_code = {r["fund_code"]: r for r in risk_profiles}
         try:
-            self._upsert("fund_fee_rules", fee_rules)
-            self._upsert("fund_risk_profiles", risk_profiles)
-            logger.debug(f"写入 {len(fee_rules)} 条费率规则 + 风险画像")
+            self._upsert_catalog(funds, trade_rules, risk_profiles)
+            logger.debug(
+                f"写入 {len(funds)} 条主数据 / {len(trade_rules)} 条规则 / "
+                f"{len(risk_profiles)} 条风险画像"
+            )
             return []
         except Exception as e:
-            logger.error(f"批量写入失败（{e}），降级为逐行写入", exc_info=True)
+            logger.error(f"批量写入失败（{e}），降级为逐只写入", exc_info=True)
 
+        rule_by_code = {r["fund_code"]: r for r in trade_rules}
+        risk_by_code = {r["fund_code"]: r for r in risk_profiles}
         failed = []
-        for rule in fee_rules:
-            code = rule["fund_code"]
+        for fund in funds:
+            code = fund["fund_code"]
             try:
-                self._upsert("fund_fee_rules", [rule])
+                self._upsert_catalog(
+                    [fund],
+                    [rule_by_code[code]] if code in rule_by_code else [],
+                    [risk_by_code[code]] if code in risk_by_code else [],
+                )
             except Exception as e:
-                logger.error(f"{code} 费率规则写入失败，跳过该基金: {e}")
+                # 主数据写不进去时规则/画像也不写：外键依赖主数据（RESTRICT）
+                logger.error(f"{code} 写入失败，跳过该基金: {e}")
                 failed.append(code)
-                continue
-            # 费率行没写成功的基金不写风险画像，避免出现「有风险画像、无费率规则」的孤儿行
-            profile = risk_by_code.get(code)
-            if profile:
-                try:
-                    self._upsert("fund_risk_profiles", [profile])
-                except Exception as e:
-                    logger.error(f"{code} 风险画像写入失败（费率规则已写入）: {e}")
         return failed
 
-    def _upsert(self, table: str, rows: list):
-        """按 fund_code 幂等 upsert 一批行。"""
-        self.client.table(table).upsert(rows, on_conflict="fund_code").execute()
+    def _upsert_catalog(self, funds: list, trade_rules: list, risk_profiles: list):
+        """一次 RPC 写三张表；顺序（主数据→规则→画像）由函数内部固定。"""
+        self.client.rpc("upsert_fund_catalog", {
+            "funds": funds,
+            "trade_rules": trade_rules,
+            "risk_profiles": risk_profiles,
+        }).execute()
+
+    def _existing_codes(self) -> set:
+        """当前 `fund` 中已有的代码，用于统计 `new_codes`。
+
+        只服务统计：查询失败时记 ERROR 并返回空集（new_codes 会偏大），
+        不让一次辅助查询中断整轮同步。
+        """
+        codes: set = set()
+        offset = 0
+        try:
+            while True:
+                page = (
+                    self.client.table("fund")
+                    .select("fund_code")
+                    .range(offset, offset + 999)
+                    .execute()
+                ).data or []
+                codes.update(row["fund_code"] for row in page if row.get("fund_code"))
+                if len(page) < 1000:
+                    break
+                offset += 1000
+        except Exception as e:
+            logger.error(f"读取现有基金代码失败，new_codes 统计可能偏大: {e}")
+            return set()
+        return codes

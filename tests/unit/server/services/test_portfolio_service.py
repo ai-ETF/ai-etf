@@ -15,7 +15,6 @@ from decimal import Decimal
 
 import pytest
 
-import server.services.finance_api_service as finance_api_mod
 import server.services.fund_fee_service as fee_svc_mod
 import server.services.fund_risk_service as fund_risk_service_mod
 import server.services.portfolio_service as portfolio_service
@@ -24,6 +23,7 @@ import server.services.trading_calendar as trading_calendar
 from server.services.trading_calendar_cache import CalendarUnavailable
 from server.services.portfolio_service import (
     MONEY_FUND_CODE,
+    NavUnavailableForConfirm,
     PortfolioService,
     _parse_time,
 )
@@ -144,37 +144,6 @@ class FakeFeeService:
         return self._fund_name
 
 
-class FakeFinanceApi:
-    def __init__(self, name=None):
-        self._name = name
-
-    def query_spot(self, fund_code):
-        if self._name is None:
-            return None
-        return {"name": self._name}
-
-
-class _FakeNavRow:
-    def __init__(self, nav):
-        self._nav = nav
-
-    def get(self, key, default=None):
-        return self._nav if key == "单位净值" else default
-
-
-class _FakeNavDf:
-    def __init__(self, nav):
-        self._nav = nav
-        self.empty = False
-
-    @property
-    def iloc(self):
-        return self
-
-    def __getitem__(self, idx):
-        return _FakeNavRow(self._nav)
-
-
 def _patch_risk_services(monkeypatch, profile, fund_risk):
     FakeRiskService.profile = profile
     FakeFundRiskService.risk_profile = fund_risk
@@ -182,16 +151,82 @@ def _patch_risk_services(monkeypatch, profile, fund_risk):
     monkeypatch.setattr(fund_risk_service_mod, "FundRiskService", FakeFundRiskService)
 
 
-def _patch_akshare_nav(monkeypatch, nav):
-    mod = types.ModuleType("akshare")
+class FakeFundNav:
+    """净值读服务替身：`latest`/`lookup` 都是 {code: 值}，值为 None 表示查不到。"""
 
-    def _fund_open_fund_info_em(symbol=None, indicator=None):
+    def __init__(self, latest=None, lookup=None):
+        self.latest = latest or {}
+        self.lookup = lookup or {}
+
+    def get_latest(self, code):
+        from datetime import date
+
+        from server.services.fund_nav_service import LatestNav
+
+        nav = self.latest.get(code)
         if nav is None:
             return None
-        return _FakeNavDf(nav)
+        return LatestNav(fund_code=code, nav_date=date(2026, 1, 6), unit_nav=nav)
 
-    mod.fund_open_fund_info_em = _fund_open_fund_info_em
-    monkeypatch.setitem(sys.modules, "akshare", mod)
+    def get_latest_batch(self, codes):
+        found = (self.get_latest(c) for c in codes)
+        return {n.fund_code: n for n in found if n is not None}
+
+    def get_nav_on(self, code, on_date):
+        from server.services.fund_nav_service import NavLookup, NavLookupStatus
+
+        found = self.lookup.get(code)
+        if isinstance(found, NavLookup):
+            return found
+        if found is None:
+            return NavLookup(NavLookupStatus.FETCH_FAILED, None, reason="no_state")
+        return _ok_lookup(code, on_date, found)
+
+
+def _ok_lookup(code, nav_date, nav):
+    from server.services.fund_nav_service import NavLookup, NavLookupStatus, NavPoint
+
+    return NavLookup(
+        NavLookupStatus.OK,
+        NavPoint(
+            fund_code=code,
+            nav_date=nav_date,
+            unit_nav=Decimal(str(nav)),
+            accumulated_nav=None,
+            daily_growth=None,
+            source="eastmoney",
+        ),
+    )
+
+
+def _patch_latest_nav(monkeypatch, navs, default=None):
+    """把 `_latest_nav` 换成按代码查表的替身（货基特判不参与，仍由真实方法处理）。"""
+    monkeypatch.setattr(
+        portfolio_service.PortfolioService,
+        "_latest_nav",
+        lambda self, code: (
+            Decimal("1.0000") if code == MONEY_FUND_CODE else navs.get(code, default)
+        ),
+    )
+
+
+def _patch_latest_nav_batch(monkeypatch, navs):
+    """把 `_latest_nav_batch`（持仓页用）换成查表替身。"""
+    monkeypatch.setattr(
+        portfolio_service.PortfolioService,
+        "_latest_nav_batch",
+        lambda self, codes: {c: navs[c] for c in codes if c in navs},
+    )
+
+
+def _patch_confirm_nav(monkeypatch, nav=None, error=None):
+    """把 `_confirm_nav` 换成固定值 / 固定异常的替身，供确认流程用例使用。"""
+    def _fake(self, order):
+        if error is not None:
+            raise error
+        return Decimal(str(nav))
+
+    monkeypatch.setattr(portfolio_service.PortfolioService, "_confirm_nav", _fake)
 
 
 # ==================== _get_risk_warning：风险提示 ====================
@@ -227,32 +262,66 @@ def test_风险提示_异常_返回None不影响交易(monkeypatch):
     assert PortfolioService()._get_risk_warning("u1", "110020") is None
 
 
-# ==================== _get_nav：净值 ====================
+# ==================== 净值读取（只读 DB） ====================
 
 
-def test_get_nav_货币基金_恒为1():
-    assert PortfolioService()._get_nav(MONEY_FUND_CODE) == Decimal("1.0000")
+def test_latest_nav_货币基金_恒为1():
+    assert PortfolioService()._latest_nav(MONEY_FUND_CODE) == Decimal("1.0000")
 
 
-def test_get_nav_非货基_返回接口净值(monkeypatch):
-    _patch_akshare_nav(monkeypatch, nav="1.2345")
-    assert PortfolioService()._get_nav("110020") == Decimal("1.2345")
+def test_latest_nav_非货基_取读服务最新值():
+    svc = PortfolioService(fund_nav=FakeFundNav(latest={"110020": Decimal("1.2345")}))
+    assert svc._latest_nav("110020") == Decimal("1.2345")
 
 
-def test_get_nav_接口返回空_返回None(monkeypatch):
-    _patch_akshare_nav(monkeypatch, nav=None)
-    assert PortfolioService()._get_nav("110020") is None
+def test_latest_nav_库中无数据_返回None():
+    svc = PortfolioService(fund_nav=FakeFundNav())
+    assert svc._latest_nav("110020") is None
 
 
-def test_get_nav_接口异常_返回None(monkeypatch):
-    mod = types.ModuleType("akshare")
+def test_latest_nav_batch_一次取回_货基仍为1():
+    svc = PortfolioService(fund_nav=FakeFundNav(latest={"110020": Decimal("1.5")}))
+    navs = svc._latest_nav_batch(["110020", MONEY_FUND_CODE, "000071"])
+    assert navs == {"110020": Decimal("1.5"), MONEY_FUND_CODE: Decimal("1.0000")}
 
-    def _boom(symbol=None, indicator=None):
-        raise RuntimeError("fail")
 
-    mod.fund_open_fund_info_em = _boom
-    monkeypatch.setitem(sys.modules, "akshare", mod)
-    assert PortfolioService()._get_nav("110020") is None
+def test_confirm_nav_四态_只有OK能确认():
+    """四态必须可区分：未公布/取数失败/无净值日都抛「保持 pending」，不是拒单。"""
+    from datetime import date
+
+    from server.services.fund_nav_service import NavLookup, NavLookupStatus
+
+    order = {"id": "o1", "fund_code": "110020", "confirm_date": "2026-01-05"}
+    on_date = date(2026, 1, 5)
+    cases = [
+        (NavLookupStatus.NOT_YET_PUBLISHED, None),
+        (NavLookupStatus.FETCH_FAILED, "history_not_complete"),
+        (NavLookupStatus.NO_NAV, "before_establishment"),
+    ]
+    for status, reason in cases:
+        svc = PortfolioService(
+            fund_nav=FakeFundNav(lookup={"110020": NavLookup(status, None, reason)})
+        )
+        with pytest.raises(NavUnavailableForConfirm) as exc_info:
+            svc._confirm_nav(order)
+        assert exc_info.value.status == status.value
+        assert exc_info.value.nav_date == on_date
+
+    ok = PortfolioService(fund_nav=FakeFundNav(lookup={"110020": _ok_lookup("110020", on_date, "1.5")}))
+    assert ok._confirm_nav(order) == Decimal("1.5")
+
+
+def test_confirm_nav_货基不查读服务():
+    svc = PortfolioService(fund_nav=FakeFundNav())
+    order = {"id": "o1", "fund_code": MONEY_FUND_CODE, "confirm_date": "2026-01-05"}
+    assert svc._confirm_nav(order) == Decimal("1.0000")
+
+
+def test_confirm_nav_缺确认日_抛普通异常不保持pending():
+    """没有 confirm_date 是数据错误，必须拒单（不能当「净值还没到」无限重试）。"""
+    svc = PortfolioService(fund_nav=FakeFundNav())
+    with pytest.raises(RuntimeError):
+        svc._confirm_nav({"id": "o1", "fund_code": "110020", "confirm_date": None})
 
 
 # ==================== _get_fund_name：基金名称 ====================
@@ -267,15 +336,9 @@ def test_fund_name_从费率规则查(monkeypatch):
     assert PortfolioService()._get_fund_name("110020") == "费率名"
 
 
-def test_fund_name_从行情兜底(monkeypatch):
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeService(fund_name=None))
-    monkeypatch.setattr(finance_api_mod, "FinanceApiService", lambda: FakeFinanceApi(name="行情名"))
-    assert PortfolioService()._get_fund_name("110020") == "行情名"
-
-
 def test_fund_name_全部无_返回基金代码(monkeypatch):
+    """2026-10-26：实时行情兜底已删除，取不到名称时直接返回代码，不再触网。"""
     monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeService(fund_name=None))
-    monkeypatch.setattr(finance_api_mod, "FinanceApiService", lambda: FakeFinanceApi(name=None))
     assert PortfolioService()._get_fund_name("110020") == "110020"
 
 
@@ -645,7 +708,7 @@ def test_list_positions_含行情_货基特殊估值(monkeypatch):
 
 
 def test_list_positions_含行情_非货基查净值(monkeypatch):
-    monkeypatch.setattr(PortfolioService, "_get_nav", lambda self, code: Decimal("2.0"))
+    _patch_latest_nav_batch(monkeypatch, {"110020": Decimal("2.0")})
     svc = PortfolioService()
     svc._client = FakeClient({"positions": [
         {"id": "p1", "user_id": "u1", "fund_code": "110020", "fund_name": "易方达", "quantity": 100, "cost_price": 1.5},
@@ -866,7 +929,7 @@ def _patch_purchase_common(monkeypatch, rule, account, risk_warning=None):
     monkeypatch.setattr(portfolio_service, "_beijing_now", lambda: datetime(2026, 1, 5, 10, 0))
     monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
     monkeypatch.setattr(PortfolioService, "_next_trading_day", staticmethod(lambda d: date(2026, 1, 6)))
-    monkeypatch.setattr(PortfolioService, "_get_nav", lambda self, code: Decimal("1.5"))
+    _patch_latest_nav(monkeypatch, {}, default=Decimal("1.5"))
     monkeypatch.setattr(PortfolioService, "_calc_purchase_fee",
                         lambda self, code, amt, rule=None: {"fee": Decimal("1.5"), "net_amount": Decimal("998.5")})
     monkeypatch.setattr(PortfolioService, "_get_fund_name", lambda self, code, rule=None: "易方达")
@@ -1177,16 +1240,18 @@ def test_赎回_不可申购状态仍可赎回(monkeypatch, 状态):
 BUY_ORDER = {
     "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "易方达",
     "direction": "buy", "amount": 1000.0, "price": 1.5, "quantity": 0.0, "fee": 1.5,
+    "confirm_date": "2026-01-06",
 }
 
 SELL_ORDER = {
     "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "易方达",
     "direction": "sell", "amount": 0.0, "price": 0.0, "quantity": 100.0, "fee": 0.0,
+    "confirm_date": "2026-01-06",
 }
 
 
 def test_确认_买入_建仓并解冻(monkeypatch):
-    monkeypatch.setattr(PortfolioService, "_get_nav", lambda self, code: Decimal("1.5"))
+    _patch_confirm_nav(monkeypatch, nav="1.5")
     monkeypatch.setattr(PortfolioService, "_calc_purchase_fee",
                         lambda self, code, amt, rule=None: {"fee": Decimal("1.5"), "net_amount": Decimal("998.5")})
     monkeypatch.setattr(PortfolioService, "_next_trading_day", staticmethod(lambda d: date(2026, 1, 8)))
@@ -1205,6 +1270,7 @@ def test_确认_买入_建仓并解冻(monkeypatch):
 
 
 def test_确认_买入_账户不存在_抛错(monkeypatch):
+    _patch_confirm_nav(monkeypatch, nav="1.5")
     svc = PortfolioService()
     svc._client = FakeClient({"accounts": []})
     with pytest.raises(RuntimeError, match="账户不存在"):
@@ -1212,7 +1278,7 @@ def test_确认_买入_账户不存在_抛错(monkeypatch):
 
 
 def test_确认_卖出_减仓并回款(monkeypatch):
-    monkeypatch.setattr(PortfolioService, "_get_nav", lambda self, code: Decimal("1.5"))
+    _patch_confirm_nav(monkeypatch, nav="1.5")
     monkeypatch.setattr(PortfolioService, "_calc_redemption_fee", lambda self, code, amt, days, rule=None: Decimal("10.0"))
     svc = PortfolioService()
     svc._client = FakeClient({
@@ -1235,7 +1301,7 @@ def test_确认_卖出_持仓不存在_抛错(monkeypatch):
 
 
 def test_确认_卖出_费率缺失_拒绝确认(monkeypatch):
-    monkeypatch.setattr(PortfolioService, "_get_nav", lambda self, code: Decimal("1.5"))
+    _patch_confirm_nav(monkeypatch, nav="1.5")
     monkeypatch.setattr(PortfolioService, "_calc_redemption_fee", lambda self, code, amt, days, rule=None: None)
     svc = PortfolioService()
     svc._client = FakeClient({
@@ -1344,8 +1410,7 @@ def _买单失败场景(monkeypatch, cash=9000.0, frozen=1000.0, amount=1000.0):
     monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
     monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
     monkeypatch.setattr(portfolio_service, "_now_iso", lambda: "2026-01-06T15:37:00+08:00")
-    monkeypatch.setattr(portfolio_service.PortfolioService, "_get_nav",
-                        lambda self, code: Decimal("1.5000"))
+    _patch_confirm_nav(monkeypatch, nav="1.5000")
     monkeypatch.setattr(portfolio_service.PortfolioService, "_write_trade_flow",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("流水写入失败")))
     monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
@@ -1376,12 +1441,19 @@ def test_买单确认失败_订单落rejected且本金退回现金(monkeypatch):
     assert svc._client.rows["positions"] == []  # 未建仓
 
 
-def test_买单确认失败_冻结尚未解冻时退款不重复扣冻结(monkeypatch):
-    """失败点在建仓之前时，冻结额里可能还留着这笔钱 —— 退款要把它一起划走。"""
+def test_买单确认失败_冻结已解冻时退款只加现金(monkeypatch):
+    """失败点在建仓之前（费率计算抛错）时，退款只加现金，不再二次核减冻结。
+
+    解冻排在最前面（净值判定之后），所以走到退款时这笔钱已经从 frozen 划走；
+    再减一次会扣到同账户其他挂单的冻结额。
+    """
     monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
     monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    monkeypatch.setattr(portfolio_service.PortfolioService, "_get_nav",
-                        lambda self, code: None)  # 取不到净值 → 在建仓前就失败
+    _patch_confirm_nav(monkeypatch, nav="1.5")
+    monkeypatch.setattr(
+        PortfolioService, "_calc_purchase_fee",
+        lambda self, code, amt, rule=None: (_ for _ in ()).throw(RuntimeError("费率计算失败")),
+    )
     monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
 
     svc = PortfolioService()
@@ -1407,8 +1479,7 @@ def test_卖单确认失败_不退现金(monkeypatch):
     """卖单的钱从未离开现金，失败时不能平白加钱。"""
     monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
     monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    monkeypatch.setattr(portfolio_service.PortfolioService, "_get_nav",
-                        lambda self, code: Decimal("1.5000"))
+    _patch_confirm_nav(monkeypatch, nav="1.5000")
     monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
 
     svc = PortfolioService()
@@ -1425,3 +1496,77 @@ def test_卖单确认失败_不退现金(monkeypatch):
 
     assert svc._client.rows["trade_orders"][0]["status"] == "rejected"
     assert svc._client.rows["accounts"][0]["cash"] == 9000.0
+
+
+# ---------- 确认日净值不可用 → 保持 pending（不拒单、不退款） ----------
+
+
+@pytest.mark.parametrize("场景", ["未公布", "取数失败", "无净值日"])
+def test_确认日净值不可用_订单保持pending且不退款(monkeypatch, 场景):
+    """净值没到 ≠ 订单有问题：不落 rejected、不退款、不动冻结，下个窗口重试。"""
+    from server.services.fund_nav_service import NavLookup, NavLookupStatus
+
+    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
+    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
+
+    lookup = {
+        "未公布": NavLookup(NavLookupStatus.NOT_YET_PUBLISHED, None),
+        "取数失败": NavLookup(NavLookupStatus.FETCH_FAILED, None, reason="history_not_complete"),
+        "无净值日": NavLookup(NavLookupStatus.NO_NAV, None, reason="before_establishment"),
+    }[场景]
+
+    svc = PortfolioService(fund_nav=FakeFundNav(lookup={"110020": lookup}))
+    svc._client = FakeClient({
+        "trade_orders": [{
+            "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
+            "direction": "buy", "status": "pending", "confirm_date": "2026-01-06",
+            "amount": 1000.0, "price": 0.0, "quantity": 0.0, "fee": 0.0,
+        }],
+        "accounts": [{"id": "a1", "user_id": "u1", "cash": 9000.0, "frozen_cash": 1000.0}],
+        "positions": [],
+    })
+
+    result = svc.confirm_pending_orders()
+
+    assert result["skipped"] == 1
+    assert result["confirmed"] == 0 and result["rejected"] == 0
+    assert svc._client.rows["trade_orders"][0]["status"] == "pending"
+    account = svc._client.rows["accounts"][0]
+    assert account["cash"] == 9000.0        # 没退款
+    assert account["frozen_cash"] == 1000.0  # 也没解冻（净值判定在所有写操作之前）
+    assert svc._client.rows["positions"] == []
+
+
+def test_确认_before_today_只看今天之前的订单(monkeypatch):
+    """15:37 任务只补历史遗漏：confirm_date 为今天的订单一律不动。"""
+    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
+    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
+
+    svc = PortfolioService(fund_nav=FakeFundNav())
+    svc._client = FakeClient({
+        "trade_orders": [{
+            "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
+            "direction": "buy", "status": "pending", "confirm_date": "2026-01-06",
+            "amount": 1000.0, "price": 0.0, "quantity": 0.0, "fee": 0.0,
+        }],
+        "accounts": [{"id": "a1", "user_id": "u1", "cash": 9000.0, "frozen_cash": 1000.0}],
+    })
+
+    assert svc.confirm_pending_orders(before_today=True)["processed"] == 0
+    assert svc._client.rows["trade_orders"][0]["status"] == "pending"
+
+
+# ==================== 架构守卫：交易链路不触网取净值 ====================
+
+
+def test_交易服务不再直接调用akshare取净值():
+    """净值只能经 FundNavService 读 DB（存储设计 §4.9）。
+
+    守卫范围限定在 portfolio_service 自身：`finance_api_service` 仍保留目录外代码
+    （场内 ETF）的上游回退，全仓 grep 会误报（接入方案 §4.11 的实现偏离说明）。
+    """
+    import inspect
+
+    src = inspect.getsource(portfolio_service)
+    assert "fund_open_fund_info_em" not in src
+    assert "import akshare" not in src

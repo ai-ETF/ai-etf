@@ -126,8 +126,16 @@ def classify_fund(fund_name: str, index_name: str = "", ftype: str = "") -> dict
     text = f"{fund_name} {index_name}".strip()
     ftype_text = ftype or ""
 
-    # 市场属性：QDII/跨境
-    is_qdii = bool(_first_match(text, _MARKET_QDII)) or ("海外" in ftype_text) or ("QDII" in ftype_text.upper())
+    # 市场属性：QDII/跨境。
+    # `qdii_reason` 记录命中的关键词 / FTYPE 原值，落库到 fund.qdii_reason（R8）；
+    # 没有命中时写 'no_qdii_signal' 而不是 NULL —— fund 表的 CHECK 要求
+    # is_qdii 与 qdii_reason 同 NULL 或同非 NULL，false 也需要留证。
+    qdii_reason = _first_match(text, _MARKET_QDII)
+    if qdii_reason is None and "海外" in ftype_text:
+        qdii_reason = f"ftype: {ftype_text}"
+    if qdii_reason is None and "QDII" in ftype_text.upper():
+        qdii_reason = f"ftype: {ftype_text}"
+    is_qdii = qdii_reason is not None
     market = 3 if is_qdii else 1
 
     # 板块特征：科创/创业
@@ -166,4 +174,7 @@ def classify_fund(fund_name: str, index_name: str = "", ftype: str = "") -> dict
         "risk_level": risk_level,
         "risk_label": get_risk_label(risk_level),
         "needs_review": needs_review,
+        # 2026-10-26 起随分类结果一起产出，供 fund 主数据落库使用（纯加法，不影响旧消费方）
+        "is_qdii": is_qdii,
+        "qdii_reason": qdii_reason or "no_qdii_signal",
     }

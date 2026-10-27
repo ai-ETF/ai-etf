@@ -126,15 +126,6 @@ def test_sina_trade_date_全量日历可解析():
     assert data.source == "sina_trade_date"
 
 
-def test_sina_index_daily_可反推交易日():
-    from server.sources.sina_index_daily import SinaIndexDailySource
-
-    data = SinaIndexDailySource().fetch_calendar()
-
-    assert len(data.trading_days) > 1000
-    assert data.coverage_start < data.coverage_end
-
-
 # ==================== 路由器端到端 ====================
 
 

@@ -3,7 +3,7 @@ id: "50-测试/单元测试/07-API层"
 title: "07-API 层"
 status: active
 owner: "sing"
-updated: 2026-10-18
+updated: 2026-10-27
 tags: ["测试", "单元测试"]
 supersedes: []
 superseded_by: null
@@ -22,7 +22,7 @@ superseded_by: null
 
 各 API 路由端点的请求/响应契约：入参校验、业务服务调用、成功/失败状态码映射、响应模型序列化。
 
-## 业务场景 / 预期结果 / 测试结果（6 组，36 例）
+## 业务场景 / 预期结果 / 测试结果（8 组，59 例）
 
 ### 一、schemas 校验（8 例）
 
@@ -30,20 +30,24 @@ superseded_by: null
 |------|:---:|
 | `PurchaseRequest`/`WatchlistAddRequest`/`SubmitRequest`/`SubmitAnswerItem`/`AutoInvestConfigRequest` 必填缺失抛错、int→float 类型转换、可选字段默认值 | 8 例 ✅ |
 
-### 二、market 路由（4 例，quotes 子模块）
+### 二、market 路由（7 例，search / detail 子模块）
 
 | 端点 | 覆盖场景 | 结果 |
 |------|------|:---:|
-| `GET /market/spot/{code}` | 查到行情 / 未找到返回 error | 2 例 ✅ |
-| `GET /market/spot/name/{name}` | 按名称查行情 | 1 例 ✅ |
-| `GET /market/ranking` | 榜单返回 items | 1 例 ✅ |
+| `GET /market/search` | 命中并返回最新净值 / **场内 ETF 代码返回 `total: 0`** | 2 例 ✅ |
+| `GET /market/detail/{code}` | **目录外代码 404 + 明确原因** / 历史净值暂不可用 503 / 正常返回且 `is_qdii` 透传、**不含 `realtime`** | 3 例 ✅ |
+| `GET /market/detail/name/{name}` | 名称命中目录外基金 404 / 历史净值不可用 503 | 2 例 ✅ |
 
-### 三、secure_chat 路由（7 例）
+> 2026-10-26：`quotes` / `money_flow` 子模块及其 4 例随 30 秒行情下线删除；
+> 新增的用例守住「目录外 404、数据未就绪 503」这两条错误语义。
+
+### 三、secure_chat 路由（12 例）
 
 | 端点 | 覆盖场景 | 结果 |
 |------|------|:---:|
-| `POST /secure-chat/login` | 登录成功返回 token/user_id | 1 例 ✅ |
-| `POST /secure-chat/register` | 邮箱确认模式 | 1 例 ✅ |
+| `POST /secure-chat/login` | 登录成功返回 token/user_id / 未返回 session 抛 401 | 2 例 ✅ |
+| `POST /secure-chat/register` | 邮箱确认模式 / 自动登录透传 refresh_token | 2 例 ✅ |
+| `POST /secure-chat/refresh` | 成功返回新 token 对 / token 失效透传 401 / 缺参 422 | 3 例 ✅ |
 | `POST /secure-chat/logout` | 撤销 token | 1 例 ✅ |
 | `POST /secure-chat/delete-account` | 注销账号 | 1 例 ✅ |
 | `GET /secure-chat/chats` | 会话列表 | 1 例 ✅ |
@@ -75,13 +79,26 @@ superseded_by: null
 | `POST /submit` | 成功 201 / 业务失败 400 | 2 例 ✅ |
 | `GET /profile` | 有画像 / 无画像 | 2 例 ✅ |
 
+### 七、交易日历管理路由（12 例）
+
+| 端点 | 覆盖场景 | 结果 |
+|------|------|:---:|
+| `POST /admin/trading-calendar/refresh` | 未配管理凭证 503 / 凭证错误 401 / 缺幂等键 400 / 刷新成功返回契约字段 / dry_run 透传不写库 / 已有刷新在跑 409 / 数据校验失败 422 / 源失败 502 / 源超时 504 / 整体超时 504 / 未预期异常 500 | 11 例 ✅ |
+| `GET /admin/trading-calendar/status` | 只读返回 ready | 1 例 ✅ |
+
+> 详见 `docs/40-运维/交易日历` 与 `trading-calendar-ops` 技能。
+
+### 八、app 生命周期（3 例）
+
+`test_app.py` 覆盖 `lifespan` 启停（含调度器注册/关闭无残留）。
+
 ## 运行方式
 
 ```bash
 poetry run pytest tests/unit/server/api/ -v
 ```
 
-> 本次 36 例全部通过（另 `test_app.py` 覆盖 N 类 `lifespan`，2 例）。
+> 本次 59 例全部通过（`test_app.py` 3 例覆盖 `lifespan`，`test_admin_trading_calendar.py` 12 例见下）。
 
 ## 关键说明
 

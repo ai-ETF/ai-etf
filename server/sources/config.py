@@ -14,7 +14,6 @@ from typing import Mapping, Optional, Tuple
 PRIORITY_ENV_VARS: Tuple[str, ...] = (
     "NAV_SOURCE_PRIORITY",
     "CALENDAR_SOURCE_PRIORITY",
-    "CATALOG_SOURCE_PRIORITY",
 )
 
 

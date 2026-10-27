@@ -191,9 +191,12 @@ async def take_snapshot(
 
 @router.post("/confirm-pending", response_model=dict)
 async def confirm_pending(current_user: str = Depends(get_current_user)):
-    """手动触发 pending 订单确认（需 JWT 认证）。"""
+    """手动触发 pending 订单确认（需 JWT 认证）。
+
+    确认到今天为止；取不到确认日净值的订单保持 pending（返回值里的 `skipped`）。
+    """
     svc = PortfolioService()
-    result = svc.confirm_pending_orders(skip_trading_day_check=True)
+    result = svc.confirm_pending_orders()
     return result
 
 

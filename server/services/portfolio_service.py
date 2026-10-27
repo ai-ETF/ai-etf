@@ -39,12 +39,32 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 # 货币基金配置
 # 真实货基收益机制：净值恒为 1.0000，每日按「万份收益」计息并复投（红利再投）。
 # 因此这里不再模拟净值上涨，而是模拟复投：
-#   - 净值固定 1.0000（_get_nav 直接返回）
+#   - 净值固定 1.0000（_latest_nav 直接返回）
 #   - 每日把「万份收益」折算成份额加进 positions.quantity（份额逐日增长，即复利，
 #     次日收益在更大的份额上计算），本金单独记录在 positions.principal（credit_money_fund_income）
 # 注意：万份收益/年化数据获取失败时直接抛错，不做任何兜底默认值，
 #       避免用虚假数字污染累计收益（旧版 MONEY_FUND_DEFAULT_ANNUAL_YIELD 兜底已废弃）。
 MONEY_FUND_CODE = "000198"
+
+
+class NavUnavailableForConfirm(Exception):
+    """确认日净值不可用 —— 订单本轮不确认，保持 pending，**不是**失败。
+
+    与「拒单」严格区分（接入方案 §4.8）：净值还没公布（`not_yet_published`）、
+    抓取失败（`fetch_failed`）、该日无净值（`no_nav`）都只说明「现在还不能确认」，
+    不能落 rejected、不能退款。只有确定性错误（持仓不存在、缺费率规则等）
+    才是拒单，那些仍按普通异常处理。
+    """
+
+    def __init__(self, order_id, nav_date, status: str, reason: Optional[str] = None):
+        self.order_id = order_id
+        self.nav_date = nav_date
+        self.status = status
+        self.reason = reason
+        message = f"订单 {order_id} 的确认日 {nav_date} 净值不可用: {status}"
+        if reason:
+            message = f"{message}（{reason}）"
+        super().__init__(message)
 
 
 def _beijing_now() -> datetime:
@@ -83,8 +103,10 @@ def _require_rule_field(rule: dict, fund_code: str, field: str):
 class PortfolioService:
     """场外基金持仓交易服务"""
 
-    def __init__(self):
+    def __init__(self, fund_nav=None):
+        # 依赖注入：测试可注入假读服务，绕开 DB（接入方案 §4.10）
         self._client = None
+        self._fund_nav = fund_nav
 
     @property
     def client(self):
@@ -92,6 +114,14 @@ class PortfolioService:
             from server.storage.supabase_client import get_supabase
             self._client = get_supabase()
         return self._client
+
+    @property
+    def fund_nav(self):
+        """净值唯一读入口（惰性构造：纯 DB 交易路径之外不拉起依赖链）。"""
+        if self._fund_nav is None:
+            from server.services.fund_nav_service import FundNavService
+            self._fund_nav = FundNavService()
+        return self._fund_nav
 
     # ==================== 账户管理 ====================
 
@@ -245,28 +275,28 @@ class PortfolioService:
 
     # ==================== 净值获取 ====================
 
-    def _get_nav(self, fund_code: str) -> Optional[Decimal]:
-        """获取场外基金最新净值。
+    def _latest_nav(self, fund_code: str) -> Optional[Decimal]:
+        """最新净值（下单预估 / 持仓估值用，只读 DB 不触网）。
 
-        货币基金不查净值：真实货基净值恒为 1.0000，收益靠每日万份收益
-        折算成份额加进 positions.quantity（份额逐日增长），不走净值上涨，
-        因此直接返回 1.0000。
+        货币基金同样特判 1.0000：真实货基净值恒为 1.0000，收益靠每日万份收益
+        折算成份额加进 positions.quantity（份额逐日增长），不走净值上涨。
+        库中没有该基金的最新净值时返回 None，由调用方决定是拒单还是置空展示。
         """
-        # 货币基金：净值恒 1.0000，不走 akshare（货基无单位净值走势数据集，且无意义）
         if fund_code == MONEY_FUND_CODE:
             return Decimal("1.0000")
+        latest = self.fund_nav.get_latest(fund_code)
+        return latest.unit_nav if latest else None
 
-        try:
-            import akshare as ak
-            df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
-            if df is not None and not df.empty:
-                latest = df.iloc[-1]
-                nav = latest.get("单位净值")
-                if nav is not None:
-                    return Decimal(str(nav))
-        except Exception as e:
-            logger.warning(f"查询基金净值失败 ({fund_code}): {e}")
-        return None
+    def _latest_nav_batch(self, fund_codes) -> dict[str, Decimal]:
+        """批量最新净值（持仓页用）：一次 IN 查询，缺失的代码不在返回字典里。"""
+        codes = [c for c in fund_codes if c and c != MONEY_FUND_CODE]
+        navs = {
+            code: nav.unit_nav
+            for code, nav in self.fund_nav.get_latest_batch(codes).items()
+        }
+        if any(c == MONEY_FUND_CODE for c in fund_codes if c):
+            navs[MONEY_FUND_CODE] = Decimal("1.0000")
+        return navs
 
     # ==================== 货基万份收益获取 ====================
 
@@ -447,13 +477,8 @@ class PortfolioService:
         name = svc.get_fund_name(fund_code, rule)
         if name:
             return name
-        try:
-            from server.services.finance_api_service import FinanceApiService
-            spot = FinanceApiService().query_spot(fund_code)
-            if spot and spot.get("name"):
-                return spot["name"]
-        except Exception:
-            pass
+        # 2026-10-26：删除了实时行情快照兜底（无数据源）。取不到名称时返回代码，
+        # 不猜、也不为拿一个展示名再出一趟网。
         return fund_code
 
     # ==================== 交易时间判断 ====================
@@ -633,9 +658,9 @@ class PortfolioService:
                         "data": None,
                     }
 
-            # 3. 获取净值（必须在冻结资金之前）
+            # 3. 获取净值（必须在冻结资金之前；只读 DB，不触网）
             if price is None:
-                price = self._get_nav(fund_code)
+                price = self._latest_nav(fund_code)
             if price is None or price <= 0:
                 return {"success": False, "message": f"无法获取基金 {fund_code} 的净值", "data": None}
 
@@ -922,6 +947,13 @@ class PortfolioService:
             total_pnl = Decimal("0")
             total_position_value = Decimal("0")
 
+            # 估值净值在循环外一次批量取（固定 1 次 IN 查询，与持仓只数无关）。
+            # 取不到就置空 market_price，绝不拿 0 或上一轮的价格冒充现值。
+            navs = (
+                self._latest_nav_batch([item.get("fund_code") for item in items])
+                if include_quote else {}
+            )
+
             for item in items:
                 qty = Decimal(str(item.get("quantity", 0)))
                 cost_price = Decimal(str(item.get("cost_price", 0)))
@@ -954,7 +986,7 @@ class PortfolioService:
                         total_pnl += pnl
                         total_position_value += market_value
                     else:
-                        market_price = self._get_nav(item["fund_code"])
+                        market_price = navs.get(item["fund_code"])
                         if market_price and market_price > 0:
                             market_value = (qty * market_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                             item["market_price"] = float(market_price)
@@ -1042,30 +1074,30 @@ class PortfolioService:
     # 所以确认失败只能落到 "rejected"。
     TRADE_ORDER_STATUSES = ("pending", "completed", "cancelled", "rejected", "reserved")
 
-    def confirm_pending_orders(self, skip_trading_day_check: bool = False) -> dict:
+    def confirm_pending_orders(self, before_today: bool = False) -> dict:
         """
         扫描 trade_orders 中 status='pending' 且 confirm_date 到期的订单，
         执行资金扣款/入账、持仓创建/更新、写流水。
 
         参数:
-            skip_trading_day_check: 如果为 True，即使非交易日也确认所有到期订单
-                                   （用于启动补偿和手动触发）
+            before_today: 是否只确认「今天之前」的订单。
+                True  —— `confirm_date <  today`（15:37 任务：只补历史遗漏，
+                         当日订单一律等净值公布后的晚间窗口）
+                False —— `confirm_date <= today`（晚间 20:05 起、08:05、
+                         启动补偿、手动触发）
 
-        交易日：确认 confirm_date <= today 的订单
-        非交易日：确认 confirm_date < today 的遗漏订单（启动补偿机制）
-        由定时调度器在每个交易日调用，也在服务启动时调用。
+        截止日由调用场景显式给出，不再依赖「今天是否交易日」：确认路径本身不触网，
+        也不看日历（日历不可用时仍需能确认已到期订单）。
+
+        取不到确认日净值（未公布/抓取失败/非净值日）的订单**保持 pending**，
+        计入返回值的 `skipped`，既不拒单也不退款（接入方案 §4.8）。
         """
         if not self.client:
             return {"status": "error", "message": "数据库不可用"}
 
         today = _beijing_date()
-        # 启动补偿/手动触发必须绕开日历：即使日历未就绪也要确认已到期订单，
-        # 否则「先补偿、后刷新日历」的运维顺序无法执行（日历不可用时下单会报错，
-        # 但已有 pending 订单仍应按期确认）。
-        if skip_trading_day_check:
-            is_trading = True
-        else:
-            is_trading = self._is_trading_day(today)
+        # 日历不可用/越界时 `_is_trading_day` 会抛异常，而确认路径不该因此停摆，
+        # 故这里完全不查日历（只有下单路径需要）。
 
         try:
             query = (
@@ -1074,19 +1106,15 @@ class PortfolioService:
                 .eq("status", "pending")
             )
 
-            if skip_trading_day_check or is_trading:
-                # 手动触发 或 交易日：确认到今天及之前的
-                query = query.lte("confirm_date", today.isoformat())
-            else:
-                # 非交易日定时任务：只确认昨天及之前遗漏的
-                yesterday = today - timedelta(days=1)
-                query = query.lte("confirm_date", yesterday.isoformat())
+            cutoff = (today - timedelta(days=1)) if before_today else today
+            query = query.lte("confirm_date", cutoff.isoformat())
 
             result = query.execute()
 
             orders = result.data or []
             if not orders:
-                return {"status": "ok", "message": "无待确认订单", "processed": 0}
+                return {"status": "ok", "message": "无待确认订单",
+                        "processed": 0, "confirmed": 0, "rejected": 0, "skipped": 0}
 
             # 预加载所有涉及的基金费率规则（一次批量查询代替每笔单独查询）
             fund_codes = list({o.get("fund_code") for o in orders if o.get("fund_code")})
@@ -1097,11 +1125,20 @@ class PortfolioService:
 
             confirmed = 0
             rejected = 0
+            skipped = 0
             for order in orders:
                 try:
                     rule = rules_map.get(order.get("fund_code"))
                     self._confirm_one_order(order, today, rule=rule)
                     confirmed += 1
+                except NavUnavailableForConfirm as e:
+                    # 净值还没到 ≠ 订单有问题：保持 pending，下个窗口重试
+                    skipped += 1
+                    logger.info(
+                        "确认日净值不可用，订单保持 pending: order=%s, date=%s, "
+                        "status=%s, reason=%s",
+                        e.order_id, e.nav_date, e.status, e.reason,
+                    )
                 except (CalendarUnavailable, CalendarOutOfCoverage):
                     # 日历不可用/越界不是单笔订单的错：不能拒绝并退款，
                     # 必须让整个确认任务失败，由人工处理日历后重跑。
@@ -1116,11 +1153,17 @@ class PortfolioService:
                     if order.get("direction") == "buy":
                         self._refund_rejected_buy(order)
 
-            logger.info(f"Pending 订单确认完成: 成功 {confirmed}, 失败 {rejected}")
+            logger.info(
+                "Pending 订单确认完成: 成功 %s, 失败 %s, 跳过 %s", confirmed, rejected, skipped
+            )
             return {
                 "status": "ok",
-                "message": f"确认完成: 成功 {confirmed}, 失败 {rejected}",
-                "processed": confirmed + rejected,
+                "message": f"确认完成: 成功 {confirmed}, 失败 {rejected}, 跳过 {skipped}",
+                # 跳过的也计「处理过」：调度日志里 processed=0 而实际扫到了订单会误导排查
+                "processed": confirmed + rejected + skipped,
+                "confirmed": confirmed,
+                "rejected": rejected,
+                "skipped": skipped,
             }
 
         except (CalendarUnavailable, CalendarOutOfCoverage):
@@ -1190,11 +1233,47 @@ class PortfolioService:
                 f"user={user_id}, amount={amount}"
             )
 
+    def _confirm_nav(self, order: dict) -> Decimal:
+        """取订单「确认日」净值（只读 DB，不触网）。
+
+        四态里只有 `OK` 能继续确认；`NOT_YET_PUBLISHED` / `FETCH_FAILED` / `NO_NAV`
+        一律抛 `NavUnavailableForConfirm` → 订单保持 pending。
+        货基净值恒 1.0000，不查读服务。
+
+        为什么不在这里 `repair`：确认是批量任务，一次上游超时会把整批确认拖住；
+        缺口修复交给人工 `fund_nav_admin repair` 或 `ensure_history`（接入方案 §4.8）。
+        """
+        from server.services.fund_nav_service import NavLookupStatus
+
+        fund_code = order["fund_code"]
+        if fund_code == MONEY_FUND_CODE:
+            return Decimal("1.0000")
+
+        raw_date = order.get("confirm_date")
+        if not raw_date:
+            # 没有确认日属于数据错误，不是「净值没到」，必须显式失败
+            raise RuntimeError(f"订单 {order.get('id')} 缺少 confirm_date，无法确认")
+        nav_date = date.fromisoformat(str(raw_date)[:10])
+
+        lookup = self.fund_nav.get_nav_on(fund_code, nav_date)
+        if lookup.status == NavLookupStatus.OK:
+            return Decimal(str(lookup.point.unit_nav))
+        raise NavUnavailableForConfirm(
+            order.get("id"), nav_date, lookup.status.value, lookup.reason
+        )
+
     def _confirm_one_order(self, order: dict, today: date, rule: Optional[dict] = None) -> None:
         """确认单笔 pending 订单。rule 可预加载传入避免重复查询。
 
-        异常处理约定：本方法抛异常 = 这笔确认失败，由 confirm_pending_orders() 把订单
-        落为 rejected，并对买单执行 `_refund_rejected_buy()` 退回本金。
+        异常处理约定：
+        - 抛 `NavUnavailableForConfirm` = 确认日净值还不可用，订单**保持 pending**，
+          `confirm_pending_orders()` 只计数 skipped，不拒单、不退款；
+        - 抛其他异常 = 这笔确认失败，订单落 rejected，买单执行
+          `_refund_rejected_buy()` 退回本金。
+
+        净值判定必须排在**任何写操作之前**（见接入方案 §4.8.1）：旧的「取不到净值就拒单
+        并退款」与「先解冻」是配套的；新语义下若先解冻再发现净值没到，这笔钱会既不在冻结
+        也没被扣走，下一轮还会二次解冻、扣掉同账户其他挂单的冻结额。
 
         已知局限（非事务）：确认过程由多次独立的 PostgREST 写操作组成，跨表事务无法在此实现。
         若失败发生在「持仓已写入」之后、「流水/订单更新」之前，退款会与已建仓位同时存在
@@ -1219,9 +1298,12 @@ class PortfolioService:
 
         if direction == "buy":
             # --- 申购确认 ---
-            # 1. 先解冻资金（放在最前面，异常时资金已释放不会被锁死）。
-            #    若本方法随后抛异常，订单会被置为 rejected 且不再重试 ——
-            #    本金由 confirm_pending_orders() 调 _refund_rejected_buy() 退回可用现金。
+            # 1. 按 confirm_date 取确认日净值（只读 DB，必须在解冻之前）
+            nav = self._confirm_nav(order)
+
+            # 2. 解冻资金（异常时资金已释放不会被锁死）。若本方法随后抛异常，
+            #    订单会被置为 rejected 且不再重试 —— 本金由 confirm_pending_orders()
+            #    调 _refund_rejected_buy() 退回可用现金。
             account_result = (
                 self.client.table("accounts")
                 .select("*")
@@ -1241,11 +1323,6 @@ class PortfolioService:
                 "frozen_cash": float(new_frozen),
                 "updated_at": now,
             }).eq("user_id", user_id).execute()
-
-            # 2. 获取当日净值（取不到就拒绝确认，避免除零或信任客户端传入的净值）
-            nav = self._get_nav(fund_code)
-            if nav is None or nav <= 0:
-                raise RuntimeError(f"无法获取基金 {fund_code} 的确认日净值，拒绝确认")
 
             # 3. 计算申购费和净金额
             fee_result = self._calc_purchase_fee(fund_code, amount, rule=rule)
@@ -1373,10 +1450,8 @@ class PortfolioService:
             current_qty = Decimal(str(position["quantity"]))
             cost_price = Decimal(str(position["cost_price"]))
 
-            # 2. 计算赎回费（按确认日净值，传入 rule 避免重复查询）
-            nav = self._get_nav(fund_code)
-            if nav is None or nav <= 0:
-                raise RuntimeError(f"无法获取基金 {fund_code} 的确认日净值，拒绝确认")
+            # 2. 确认日净值（只读，必须在扣份额之前）+ 赎回费（传入 rule 避免重复查询）
+            nav = self._confirm_nav(order)
             redeem_amount = (quantity * nav).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             # 2a. 货基特殊：收益已折算成份额（quantity），赎回金额 = 份额×1.0，
