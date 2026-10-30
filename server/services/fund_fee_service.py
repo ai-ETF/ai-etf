@@ -1,10 +1,12 @@
 """
 场外基金手续费规则服务
 
-仅支持 fund_fee_rules 表中已配置的场外开放式基金，查不到规则直接拒绝交易。
+仅支持白名单目录中的场外开放式基金，查不到规则直接拒绝交易。
 不支持默认费率兜底 —— 交易规则不能靠猜。
 
-白名单机制：从 fund_fee_rules 表查询，表中有记录才允许交易。
+白名单机制：读 `fund_catalog` 视图（`fund JOIN fund_trade_rule` 且 `lifecycle_status='active'`），
+有记录才允许交易。该视图取代了原来的 `fund_fee_rules` 表，字段名保持不变
+（存储设计 §3.7 的兼容层），因此本模块只改表名、不改任何字段口径。
 赎回费按 JSON 档位计算，每只基金档位可不同。
 申购费按 JSON 金额分档计算，支持不同金额不同费率。
 """
@@ -25,7 +27,7 @@ FUND_SUMMARY_FIELDS = (
 
 MAX_PAGE_SIZE = 100
 
-# ==================== 申购状态（fund_fee_rules.subscribe_status）====================
+# ==================== 申购状态（fund_trade_rule.subscribe_status）====================
 # 取值来自天天基金 jjfl 页「交易状态」小节的「申购状态」行
 # （server/services/fund_fee_source.py 的 fetch_jjfl 解析；移动端接口的 SGZT 未被采用）。
 # 定义放在这里：同步侧（fund_catalog_sync）与交易侧（portfolio_service）都要用，
@@ -58,7 +60,7 @@ class FundFeeService:
         """
         检查基金是否支持交易。
 
-        白名单 = fund_fee_rules 表中有记录的基金。
+        白名单 = `fund_catalog` 视图中有记录的基金（规则行存在且 lifecycle_status=active）。
         查不到 = 不支持，返回 False。
         """
         return self.get_fee_rule(fund_code) is not None
@@ -78,7 +80,7 @@ class FundFeeService:
 
         try:
             result = (
-                self.client.table("fund_fee_rules")
+                self.client.table("fund_catalog")
                 .select("*")
                 .eq("fund_code", fund_code)
                 .execute()
@@ -112,7 +114,7 @@ class FundFeeService:
 
         try:
             result = (
-                self.client.table("fund_fee_rules")
+                self.client.table("fund_catalog")
                 .select("*")
                 .in_("fund_code", codes)
                 .execute()
@@ -154,7 +156,7 @@ class FundFeeService:
 
         try:
             query = (
-                self.client.table("fund_fee_rules")
+                self.client.table("fund_catalog")
                 .select(FUND_SUMMARY_FIELDS, count="exact")
                 .eq("fund_type", "of")
             )

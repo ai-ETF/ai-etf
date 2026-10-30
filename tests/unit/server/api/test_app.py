@@ -13,12 +13,28 @@ async def test_lifespan_正常启动与关闭(monkeypatch):
 
     calls = []
     monkeypatch.setattr("server.storage.supabase_client.get_supabase", lambda: object())
+    monkeypatch.setattr("server.app.load_calendar_cache", lambda: calls.append("calendar") or True)
+    monkeypatch.setattr("server.services.spot_cache_scheduler.start_scheduler", lambda: calls.append("start"))
+    monkeypatch.setattr("server.services.spot_cache_scheduler.shutdown_scheduler", lambda: calls.append("shutdown"))
+
+    async with lifespan(None):
+        assert calls == ["calendar", "start"]
+    assert calls == ["calendar", "start", "shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_日历载入失败_进程仍启动(monkeypatch):
+    """DB 为空/读取失败只记 ERROR；管理刷新接口同进程，不能崩进程。"""
+    from server.app import lifespan
+
+    calls = []
+    monkeypatch.setattr("server.storage.supabase_client.get_supabase", lambda: object())
+    monkeypatch.setattr("server.app.load_calendar_cache", lambda: False)
     monkeypatch.setattr("server.services.spot_cache_scheduler.start_scheduler", lambda: calls.append("start"))
     monkeypatch.setattr("server.services.spot_cache_scheduler.shutdown_scheduler", lambda: calls.append("shutdown"))
 
     async with lifespan(None):
         assert calls == ["start"]
-    assert calls == ["start", "shutdown"]
 
 
 @pytest.mark.asyncio

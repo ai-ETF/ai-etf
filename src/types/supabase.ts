@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.5"
+    PostgrestVersion: "13.0.5"
   }
   graphql_public: {
     Tables: {
@@ -335,12 +335,14 @@ export type Database = {
           fund_type: string
           id: string
           management_fee_rate: number
+          max_purchase_amount: number | null
           min_purchase_amount: number
           purchase_fee_tiers: Json | null
           redeem_settle_delay: number
           redemption_fee_tiers: Json
           sales_service_fee_rate: number
           share_class: string
+          subscribe_status: string | null
           updated_at: string | null
         }
         Insert: {
@@ -353,12 +355,14 @@ export type Database = {
           fund_type?: string
           id?: string
           management_fee_rate?: number
+          max_purchase_amount?: number | null
           min_purchase_amount?: number
           purchase_fee_tiers?: Json | null
           redeem_settle_delay?: number
           redemption_fee_tiers?: Json
           sales_service_fee_rate?: number
           share_class?: string
+          subscribe_status?: string | null
           updated_at?: string | null
         }
         Update: {
@@ -371,12 +375,14 @@ export type Database = {
           fund_type?: string
           id?: string
           management_fee_rate?: number
+          max_purchase_amount?: number | null
           min_purchase_amount?: number
           purchase_fee_tiers?: Json | null
           redeem_settle_delay?: number
           redemption_fee_tiers?: Json
           sales_service_fee_rate?: number
           share_class?: string
+          subscribe_status?: string | null
           updated_at?: string | null
         }
         Relationships: []
@@ -695,6 +701,57 @@ export type Database = {
         }
         Relationships: []
       }
+      trading_calendar: {
+        Row: {
+          is_trading_day: boolean
+          source: string
+          trade_date: string
+          updated_at: string
+        }
+        Insert: {
+          is_trading_day: boolean
+          source: string
+          trade_date: string
+          updated_at?: string
+        }
+        Update: {
+          is_trading_day?: boolean
+          source?: string
+          trade_date?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      trading_calendar_state: {
+        Row: {
+          coverage_end: string | null
+          coverage_start: string | null
+          id: boolean
+          last_error: string | null
+          last_error_at: string | null
+          last_success_at: string | null
+          updated_at: string
+        }
+        Insert: {
+          coverage_end?: string | null
+          coverage_start?: string | null
+          id?: boolean
+          last_error?: string | null
+          last_error_at?: string | null
+          last_success_at?: string | null
+          updated_at?: string
+        }
+        Update: {
+          coverage_end?: string | null
+          coverage_start?: string | null
+          id?: boolean
+          last_error?: string | null
+          last_error_at?: string | null
+          last_success_at?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       user_allocations: {
         Row: {
           allocation: Json
@@ -871,6 +928,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      delete_auth_user: { Args: { p_user_id: string }; Returns: undefined }
       match_chunks: {
         Args: {
           document_id?: string
@@ -903,6 +961,10 @@ export type Database = {
         }[]
       }
       purge_user_data: { Args: { p_user_id: string }; Returns: undefined }
+      replace_trading_calendar: {
+        Args: { p_source: string; p_trading_days: string[] }
+        Returns: Json
+      }
     }
     Enums: {
       profile_source: "questionnaire" | "default" | "manual" | "system_inferred"

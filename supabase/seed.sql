@@ -65,6 +65,47 @@ ON CONFLICT ("fund_code") DO UPDATE SET "fund_code" = EXCLUDED."fund_code", "fun
 INSERT INTO "public"."fund_fee_rules" ("fund_code", "fund_name", "management_fee_rate", "custody_fee_rate", "min_purchase_amount", "fund_type", "commission_rate", "sales_service_fee_rate", "redemption_fee_tiers", "confirm_delay", "redeem_settle_delay", "share_class", "purchase_fee_tiers") VALUES ('009068', '国泰中证新能源汽车ETF联接C', 0.005, 0.001, 10.0, 'of', 0.0003, 0.003, '[{"days": 7, "rate": 0.015}, {"days": 30, "rate": 0.001}, {"days": 30, "rate": 0.0, "inclusive": true}]'::jsonb, 1, 3, 'C', '[{"rate": 0.0}]'::jsonb)
 ON CONFLICT ("fund_code") DO UPDATE SET "fund_code" = EXCLUDED."fund_code", "fund_name" = EXCLUDED."fund_name", "management_fee_rate" = EXCLUDED."management_fee_rate", "custody_fee_rate" = EXCLUDED."custody_fee_rate", "min_purchase_amount" = EXCLUDED."min_purchase_amount", "fund_type" = EXCLUDED."fund_type", "commission_rate" = EXCLUDED."commission_rate", "sales_service_fee_rate" = EXCLUDED."sales_service_fee_rate", "redemption_fee_tiers" = EXCLUDED."redemption_fee_tiers", "confirm_delay" = EXCLUDED."confirm_delay", "redeem_settle_delay" = EXCLUDED."redeem_settle_delay", "share_class" = EXCLUDED."share_class", "purchase_fee_tiers" = EXCLUDED."purchase_fee_tiers";
 
+-- ============ fund / fund_trade_rule（M1 之后：从上面的 fund_fee_rules 派生）============
+-- 迁移先于 seed 执行，所以 M1 的回填在空库里是空操作；这里复用同一套回填逻辑，
+-- 保证 `supabase db reset` 之后 fund_catalog 仍有 21 行。
+INSERT INTO "public"."fund" ("fund_code", "fund_name", "metadata_source", "is_qdii", "qdii_reason")
+SELECT r."fund_code", r."fund_name", 'seed:fund_fee_rules',
+       CASE p."market_score" WHEN 3 THEN true WHEN 1 THEN false END,
+       CASE p."market_score"
+            WHEN 3 THEN 'seeded: market_score=3'
+            WHEN 1 THEN 'seeded: market_score=1' END
+FROM "public"."fund_fee_rules" r
+LEFT JOIN "public"."fund_risk_profiles" p ON p."fund_code" = r."fund_code"
+ON CONFLICT ("fund_code") DO NOTHING;
+
+INSERT INTO "public"."fund_trade_rule" (
+    "fund_code", "fund_type", "share_class", "management_fee_rate",
+    "custody_fee_rate", "sales_service_fee_rate", "commission_rate",
+    "min_purchase_amount", "max_purchase_amount", "subscribe_status",
+    "purchase_fee_tiers", "redemption_fee_tiers",
+    "confirm_delay", "redeem_settle_delay", "created_at", "updated_at")
+SELECT "fund_code", "fund_type", "share_class", "management_fee_rate",
+       "custody_fee_rate", "sales_service_fee_rate", "commission_rate",
+       "min_purchase_amount", "max_purchase_amount", "subscribe_status",
+       "purchase_fee_tiers", "redemption_fee_tiers",
+       "confirm_delay", "redeem_settle_delay",
+       COALESCE("created_at", now()), COALESCE("updated_at", now())
+FROM "public"."fund_fee_rules"
+ON CONFLICT ("fund_code") DO NOTHING;
+
+-- 空库里风险画像先于本 seed 落库，若 M1 因孤儿把外键建成了 NOT VALID，这里补齐后收紧
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'fund_risk_profiles_fund_code_fkey' AND NOT convalidated
+    ) THEN
+        ALTER TABLE "public"."fund_risk_profiles"
+            VALIDATE CONSTRAINT "fund_risk_profiles_fund_code_fkey";
+    END IF;
+END
+$$;
+
 -- ============ risk_questionnaires（风险测评问卷，1 条）============
 INSERT INTO "public"."risk_questionnaires" ("version", "questions", "is_active") VALUES ('v1.0', '[{"id": "q1", "weight": 0.2, "options": [{"text": "少于 1 年，偏向短期配置", "value": "A", "risk_label": "conservative", "risk_score": 1, "explanation": "短期配置，风险承受能力较低"}, {"text": "1–3 年，视情况调整", "value": "B", "risk_label": "moderate", "risk_score": 2, "explanation": "中期持有，风险承受能力中等"}, {"text": "3 年以上，长期持有", "value": "C", "risk_label": "aggressive", "risk_score": 3, "explanation": "长期投资，风险承受能力较高"}], "category": "investment_horizon", "question": "你通常计划持有一只 ETF 多长时间？", "description": "投资期限维度，反映时间维度风险"}, {"id": "q2", "weight": 0.3, "options": [{"text": "感到不安，考虑止损或减少仓位", "value": "A", "risk_label": "conservative", "risk_score": 1, "explanation": "心理承受能力较弱，偏好低波动"}, {"text": "观望一段时间，再决定是否调整", "value": "B", "risk_label": "moderate", "risk_score": 2, "explanation": "中等心理承受能力，可接受适度波动"}, {"text": "认为是正常波动，甚至考虑加仓", "value": "C", "risk_label": "aggressive", "risk_score": 3, "explanation": "心理承受能力强，对波动较为容忍"}], "category": "drawdown_tolerance", "question": "如果你持有的 ETF 在短期内下跌约 20%，你更可能会？", "description": "回撤容忍度，反映心理风险承受"}, {"id": "q3", "weight": 0.15, "options": [{"text": "几乎没有，投资经验较少", "value": "A", "risk_label": "conservative", "risk_score": 1, "explanation": "投资经验较少，需要更多指导"}, {"text": "经历过，但次数不多", "value": "B", "risk_label": "moderate", "risk_score": 2, "explanation": "有一定投资经验，对市场波动有认识"}, {"text": "经历过多次，对波动较为熟悉", "value": "C", "risk_label": "aggressive", "risk_score": 3, "explanation": "经验丰富，熟悉市场波动特点"}], "category": "investment_experience", "question": "你是否经历过较明显的市场波动（如快速下跌或大幅震荡）？", "description": "投资经验，反映行为稳定性"}, {"id": "q4", "weight": 0.25, "options": [{"text": "稳定性，尽量避免大幅波动", "value": "A", "risk_label": "conservative", "risk_score": 1, "explanation": "偏好稳定性，风险回避型"}, {"text": "风险与收益的相对平衡", "value": "B", "risk_label": "moderate", "risk_score": 2, "explanation": "平衡型投资者，风险收益并重"}, {"text": "长期收益潜力，愿意承担波动", "value": "C", "risk_label": "aggressive", "risk_score": 3, "explanation": "追求长期收益，愿意承担较高风险"}], "category": "goal_orientation", "question": "在 ETF 投资中，你更看重的是？", "description": "目标导向，反映主观风险偏好"}, {"id": "q5", "weight": 0.1, "options": [{"text": "基本不了解，需要通俗解释", "value": "A", "risk_label": "conservative", "risk_score": 1, "explanation": "金融知识基础较弱，需要简化解释"}, {"text": "有一定了解，能理解常见术语", "value": "B", "risk_label": "moderate", "risk_score": 2, "explanation": "具备一定金融知识，可理解专业术语"}, {"text": "比较熟悉，能看懂专业分析", "value": "C", "risk_label": "aggressive", "risk_score": 3, "explanation": "金融知识丰富，可理解专业分析"}], "category": "knowledge_level", "question": "你对 ETF 相关概念（如跟踪误差、成分股、行业配置）的理解程度是？", "description": "认知水平，反映信息吸收能力"}]'::jsonb, TRUE)
 ON CONFLICT ("version") DO UPDATE SET "version" = EXCLUDED."version", "questions" = EXCLUDED."questions", "is_active" = EXCLUDED."is_active";

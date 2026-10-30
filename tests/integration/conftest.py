@@ -1,6 +1,6 @@
 """集成测试 conftest：真实 Supabase 连接、库目标断言、出网守卫。
 
-设计原则（见 docs/integration/00-集成测试规划.md）：
+设计原则（见 docs/50-测试/集成测试/00-集成测试规划.md）：
 - 只连**本地 Supabase 栈**（http://127.0.0.1:54321），绝不允许连生产库；
 - 出网守卫：拦截一切非 localhost 的 socket 连接，防止漏网的测试偷偷打真实
   AKShare / LLM / 生产库；
@@ -100,8 +100,10 @@ def _block_outbound_network(request, monkeypatch):
     等所有 HTTP 客户端（它们最终都落到 socket.connect）。
 
     eval 测试（真实 LLM）需访问 Anthropic API，跳过守卫。
+    integration_net 测试（真实上游契约）同样需要出网，跳过守卫 —— 这类测试**必须**
+    同时标 `integration`（否则会被默认的 `-m 'not integration'` 漏进来当联网单测跑）。
     """
-    if request.node.get_closest_marker("eval"):
+    if request.node.get_closest_marker("eval") or request.node.get_closest_marker("integration_net"):
         yield
         return
 

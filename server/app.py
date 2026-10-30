@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager  # 用于定义应用生命周期（启动/关闭）
 from fastapi import FastAPI  # Web 框架核心
 from fastapi.middleware.cors import CORSMiddleware  # 跨域中间件
+from fastapi.responses import JSONResponse  # 统一错误响应
 import os  # 路径拼接、环境变量读取
 import logging  # 日志
 import warnings  # 抑制第三方库 deprecation warning
@@ -55,6 +56,11 @@ init_logging()
 # 导入路由模块（此时环境变量已加载，各模块初始化时能正确读取配置）
 from server.api import router as api_router  # 聚合路由（所有子模块通过 __init__.py 注册）
 from server.config.settings import SETTINGS  # 全局配置（环境变量集中管理）
+from server.services.trading_calendar import (  # 交易日历：启动载入 + 错误映射
+    CalendarOutOfCoverage,
+    CalendarUnavailable,
+    load_calendar_cache,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(SETTINGS.LOG_LEVEL)
@@ -71,6 +77,16 @@ async def lifespan(app: FastAPI):
         logger.error(error_msg)
         raise RuntimeError(error_msg)
     logger.info("Supabase连接验证成功")
+
+    # 交易日历：只读 DB 载入快照，不触网。DB 为空/读取失败时只记 ERROR，
+    # 进程继续启动 —— 管理刷新接口与本服务同进程，崩进程会让首次拉取无法执行。
+    if load_calendar_cache():
+        logger.info("交易日历快照加载成功")
+    else:
+        logger.error(
+            "交易日历快照未载入（DB 为空或读取失败）：日历相关业务调用将抛 "
+            "CalendarUnavailable，请调用 POST /api/admin/trading-calendar/refresh"
+        )
 
     # 启动行情缓存调度器（交易时段每30秒拉取全量行情）
     from server.services.spot_cache_scheduler import start_scheduler as start_spot_scheduler, shutdown_scheduler as shutdown_spot_scheduler
@@ -100,6 +116,22 @@ app.add_middleware(
 
 # 注册聚合路由（所有子模块通过 server/api/__init__.py 统一注册）
 app.include_router(api_router, prefix="/api")
+
+
+# ==================== 交易日历错误映射 ====================
+# 日历不可用/日期越界时，业务接口返回 503，而不是把「未知」当成 500 或猜一个值。
+
+@app.exception_handler(CalendarUnavailable)
+async def _calendar_unavailable_handler(request, exc: CalendarUnavailable):
+    logger.error("交易日历不可用: %s", exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(CalendarOutOfCoverage)
+async def _calendar_out_of_coverage_handler(request, exc: CalendarOutOfCoverage):
+    logger.error("交易日历覆盖区间不足: %s", exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
 
 @app.get("/")
 def read_root():

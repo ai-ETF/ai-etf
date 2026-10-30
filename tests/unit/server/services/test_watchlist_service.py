@@ -1,14 +1,18 @@
 """watchlist_service 单元测试：自选股增删查清。
 
 模块名称：server/services/watchlist_service.py
-所测功能：add（正常新增 / 重复添加 / 名称缺失自动获取）、remove（移除 / 不存在）、
-         list（含行情 / 不含行情 / 空列表）、clear（清空）、_format_item（单项格式化）
+所测功能：add（正常新增 / 重复添加 / 名称缺失时从主数据补）、remove（移除 / 不存在）、
+         list（含净值 / 不含净值 / 空列表）、clear（清空）、_format_item（单项格式化）
 测试方法：替换 svc._client 为内存 FakeClient（支持 select/insert/delete/eq/order），
-         行情用 monkeypatch 把 FinanceApiService 换成 FakeFinanceApi，全程不联网、不连 Supabase。
+         名称与净值分别用 FakeFundMeta / FakeFundNav 替身，全程不联网、不连 Supabase。
+
+2026-10-26：自选股不再展示实时行情（30 秒轮询已下线），改为展示 DB 最新净值。
 """
+import datetime
+import types
+
 import pytest
 
-import server.services.finance_api_service as finance_api
 from server.services.watchlist_service import WatchlistService
 
 
@@ -84,13 +88,27 @@ class FakeClient:
         return FakeQuery(self)
 
 
-class FakeFinanceApi:
-    """替身：按基金代码返回预设行情，不触发 akshare 联网。"""
+class FakeFundMeta:
+    """替身：按基金代码返回主数据名称。"""
 
-    spot_by_code = {}
+    name_by_code = {}
 
-    def query_spot(self, fund_code):
-        return self.spot_by_code.get(fund_code)
+    def get(self, fund_code):
+        name = self.name_by_code.get(fund_code)
+        return types.SimpleNamespace(fund_name=name) if name else None
+
+
+class FakeFundNav:
+    """替身：按基金代码返回最新净值。"""
+
+    nav_by_code = {}
+
+    def get_latest_batch(self, codes):
+        return {
+            code: types.SimpleNamespace(unit_nav=nav, nav_date=datetime.date(2026, 1, 6))
+            for code, nav in ((c, self.nav_by_code.get(c)) for c in codes)
+            if nav is not None
+        }
 
 
 # ==================== fixture 与样本 ====================
@@ -126,9 +144,8 @@ def test_格式化单项_字段齐全且行情字段默认为None(svc):
         "fund_name": "红利低波ETF",
         "sort_order": 0,
         "created_at": "2026-01-01T00:00:00",
-        "price": None,
-        "change_pct": None,
-        "change": None,
+        "nav": None,
+        "nav_date": None,
     }
 
 
@@ -137,7 +154,7 @@ def test_格式化单项_字段缺失回退默认值(svc):
     assert item["id"] == ""
     assert item["fund_code"] == ""
     assert item["sort_order"] == 0
-    assert item["price"] is None
+    assert item["nav"] is None
 
 
 # ==================== add：新增自选股 ====================
@@ -157,9 +174,9 @@ def test_重复添加_返回已存在(svc):
     assert result["message"] == "该ETF已在自选列表中"
 
 
-def test_名称缺失_自动拉取行情获取名称(svc, monkeypatch):
-    monkeypatch.setattr(finance_api, "FinanceApiService", FakeFinanceApi)
-    FakeFinanceApi.spot_by_code = {"512890": {"name": "红利低波ETF", "price": 1.23}}
+def test_名称缺失_从基金主数据补名称(svc, monkeypatch):
+    monkeypatch.setattr("server.services.fund_meta_service.FundMetaService", FakeFundMeta)
+    FakeFundMeta.name_by_code = {"512890": "红利低波ETF"}
 
     result = svc.add("u1", "512890")  # 不传 fund_name
     assert result["success"] is True
@@ -185,26 +202,23 @@ def test_移除不存在的记录_返回未找到(svc):
 # ==================== list：查询列表 ====================
 
 
-def test_含行情_附带实时价格(svc, monkeypatch):
+def test_含净值_附带最新净值(svc, monkeypatch):
     svc._client.rows = [_row()]
-    monkeypatch.setattr(finance_api, "FinanceApiService", FakeFinanceApi)
-    FakeFinanceApi.spot_by_code = {
-        "512890": {"name": "红利低波ETF", "price": 1.23, "change_pct": 1.5, "change": 0.02}
-    }
+    monkeypatch.setattr("server.services.fund_nav_service.FundNavService", FakeFundNav)
+    FakeFundNav.nav_by_code = {"512890": 1.23}
 
     result = svc.list("u1", include_quote=True)
     assert result["total"] == 1
-    assert result["items"][0]["price"] == 1.23
-    assert result["items"][0]["change_pct"] == 1.5
-    assert result["items"][0]["change"] == 0.02
+    assert result["items"][0]["nav"] == 1.23
+    assert result["items"][0]["nav_date"] == "2026-01-06"
 
 
-def test_不含行情_价格字段为None(svc):
+def test_不含净值_净值字段为None(svc):
     svc._client.rows = [_row()]
     result = svc.list("u1", include_quote=False)
     assert result["total"] == 1
-    assert result["items"][0]["price"] is None
-    assert result["items"][0]["change_pct"] is None
+    assert result["items"][0]["nav"] is None
+    assert result["items"][0]["nav_date"] is None
 
 
 def test_空列表_返回0项(svc):

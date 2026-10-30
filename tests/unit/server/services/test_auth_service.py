@@ -1,7 +1,8 @@
-"""auth_service 单元测试：注册/退出/注销的校验与异常映射。
+"""auth_service 单元测试：注册/刷新/退出/注销的校验与异常映射。
 
 模块名称：server/services/auth_service.py
 所测功能：validate_email、validate_password（参数校验）、register_user（注册成功/邮箱已存在/校验失败）、
+         refresh_session_token（刷新登录态/凭证失效/异常映射）、
          logout_user（撤销 token + 登出）、delete_account（密码复核后注销）
 测试方法：monkeypatch get_supabase / revoke，用 FakeSupabase 替身覆盖 auth/rpc 子接口，全程不联网、不连 Supabase。
 """
@@ -10,12 +11,18 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from supabase_auth.errors import AuthApiError, AuthWeakPasswordError
+from supabase_auth.errors import (
+    AuthApiError,
+    AuthRetryableError,
+    AuthSessionMissingError,
+    AuthWeakPasswordError,
+)
 
 import server.services.auth_service as auth_service
 from server.services.auth_service import (
     delete_account,
     logout_user,
+    refresh_session_token,
     register_user,
     validate_email,
     validate_password,
@@ -61,6 +68,12 @@ class FakeAuth:
             raise self._c.sign_in_error
         return object()
 
+    def refresh_session(self, refresh_token=None):
+        self._c.refresh_calls.append(refresh_token)
+        if self._c.refresh_error:
+            raise self._c.refresh_error
+        return self._c.refresh_result
+
 
 class FakeRpc:
     def __init__(self, client, name):
@@ -85,6 +98,9 @@ class FakeSupabase:
         self.sign_up_error = None
         self.sign_in_error = None
         self.sign_out_error = None
+        self.refresh_result = None
+        self.refresh_error = None
+        self.refresh_calls = []
         self.rpc_error = None
         self.rpc_errors = {}
         self.delete_user_error = None
@@ -353,3 +369,186 @@ def test_删除账号失败_且SQL兜底也失败_抛502(monkeypatch, fake_supab
     with pytest.raises(HTTPException) as e:
         delete_account("user-1", "user@example.com", "password123")
     assert e.value.status_code == 502
+
+
+# ==================== refresh_session_token（免登录核心）====================
+
+
+def _session(access="new-access", refresh="new-refresh"):
+    return SimpleNamespace(access_token=access, refresh_token=refresh, expires_in=3600)
+
+
+def test_刷新成功_返回新的token对(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_result = FakeSignUpResult(
+        user=SimpleNamespace(id="user-123"), session=_session()
+    )
+
+    result = refresh_session_token("old-refresh")
+
+    assert result["session"].access_token == "new-access"
+    # 轮转：返回的 refresh_token 与传入的不同，调用方必须覆盖保存
+    assert result["session"].refresh_token == "new-refresh"
+    assert result["user"].id == "user-123"
+
+
+def test_刷新_token原样透传给supabase(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_result = FakeSignUpResult(
+        user=SimpleNamespace(id="user-123"), session=_session()
+    )
+
+    refresh_session_token("the-old-token")
+
+    assert fake_supabase.refresh_calls == ["the-old-token"]
+
+
+def test_刷新_空token_抛400且不调用supabase(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("   ")
+
+    assert e.value.status_code == 400
+    # 应用层提前拦截，不产生任何网络调用
+    assert fake_supabase.refresh_calls == []
+
+
+def test_刷新_数据库未就绪_抛500(monkeypatch):
+    monkeypatch.setattr(auth_service, "get_supabase", lambda: None)
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("rt")
+
+    assert e.value.status_code == 500
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [
+        (400, "refresh_token_not_found"),   # token 不存在
+        (400, "refresh_token_already_used"),  # 旧 token 已被轮转作废（重复使用）
+        (401, None),
+        (403, None),
+    ],
+)
+def test_refresh_token不可用_一律401(monkeypatch, fake_supabase, status, code):
+    """失败原因不同，但对前端动作一致：清本地凭证 + 重新登录，故文案不细分。"""
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_error = AuthApiError("msg", status, code)
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("dead-token")
+
+    assert e.value.status_code == 401
+    assert "重新登录" in e.value.detail
+
+
+def test_刷新_请求限流_抛429(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_error = AuthApiError("msg", 429, "over_request_rate_limit")
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("rt")
+
+    assert e.value.status_code == 429
+
+
+def test_刷新_网络类故障_抛502而非401(monkeypatch, fake_supabase, caplog):
+    """网关类故障若误判成 401，会把有效用户无故踢下线。
+
+    断言日志文案是必须的：AuthRetryableError 不是 AuthApiError 的子类
+    （二者都派生自 CustomAuthError），若哪天层级变了被前面的分支吞掉，
+    仅断言 502 会因「通用 Exception 兜底也是 502」而假通过。
+    """
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_error = AuthRetryableError("gateway", 503)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(HTTPException) as e:
+            refresh_session_token("rt")
+
+    assert e.value.status_code == 502
+    assert "网络异常" in caplog.text
+    assert "未知异常" not in caplog.text  # 确认走的是 AuthRetryableError 分支，非通用兜底
+
+
+@pytest.mark.parametrize(
+    "status,code,expected",
+    [
+        # 4xx + 已知失效码：状态码不常见，但错误码明确 → 走重新登录
+        (422, "refresh_token_already_used", 401),
+        # 5xx：一律不判失效，避免 Supabase 抖动时把有效用户登出
+        (500, "session_expired", 502),
+        (503, "refresh_token_not_found", 502),
+    ],
+)
+def test_刷新_失效判定不跨越5xx边界(monkeypatch, fake_supabase, status, code, expected):
+    """_REFRESH_DEAD_CODES 分支只能在 4xx 生效。
+
+    5xx 即便携带失效类错误码也必须按服务故障处理 —— 否则「5xx 不登出」
+    这条原则会被错误码判定绕过。
+    """
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_error = AuthApiError("msg", status, code)
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("rt")
+
+    assert e.value.status_code == expected
+
+
+def test_刷新_未覆盖的错误码_抛502(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_error = AuthApiError("msg", 500, "some_unknown_code")
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("rt")
+
+    assert e.value.status_code == 502
+
+
+def test_刷新_未知异常_抛502(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_error = RuntimeError("boom")
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("rt")
+
+    assert e.value.status_code == 502
+
+
+def test_刷新_底层抛缺session异常_抛400(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_error = AuthSessionMissingError()
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("rt")
+
+    assert e.value.status_code == 400
+
+
+def test_刷新_返回空session_抛401(monkeypatch, fake_supabase):
+    _patch_supabase(monkeypatch, fake_supabase)
+    fake_supabase.refresh_result = FakeSignUpResult(user=None, session=None)
+
+    with pytest.raises(HTTPException) as e:
+        refresh_session_token("rt")
+
+    assert e.value.status_code == 401
+
+
+def test_刷新_日志不得泄漏refresh_token(monkeypatch, fake_supabase, caplog):
+    """refresh_token 等同密码，任何日志路径都不得落盘。"""
+    secret = "v1.SUPER-SECRET-REFRESH-TOKEN"
+    _patch_supabase(monkeypatch, fake_supabase)
+    # 构造一个 message 里带 token 的异常——若实现去记 e.message，本用例会失败
+    fake_supabase.refresh_error = AuthApiError(
+        f"Invalid Refresh Token: {secret}", 400, "refresh_token_not_found"
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(HTTPException):
+            refresh_session_token(secret)
+
+    assert secret not in caplog.text

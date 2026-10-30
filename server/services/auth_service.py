@@ -1,7 +1,8 @@
 """
 用户认证服务
 
-封装 Supabase Auth 的注册（sign_up），统一异常 → HTTP 错误映射。
+封装 Supabase Auth 的注册（sign_up）与登录态刷新（refresh_session），
+统一异常 → HTTP 错误映射。
 
 登录逻辑保留在 server/api/secure_chat.py 内（现状不变），
 此模块仅沉淀注册所需的数据校验与 Supabase 调用。
@@ -10,7 +11,12 @@ import logging
 import re
 
 from fastapi import HTTPException
-from supabase_auth.errors import AuthApiError, AuthWeakPasswordError
+from supabase_auth.errors import (
+    AuthApiError,
+    AuthRetryableError,
+    AuthSessionMissingError,
+    AuthWeakPasswordError,
+)
 
 from server.auth.token_store import revoke
 from server.storage.supabase_client import get_supabase
@@ -41,6 +47,18 @@ _AUTH_ERROR_MAP: dict[str, tuple[int, str]] = {
     # 仅在邮箱确认开启 + SMTP 未配置时出现；本设计为「注册即激活」，走到这里说明配置漂移了
     "email_address_not_authorized": (503, "注册邮件通道未配置，请联系管理员"),
 }
+
+
+# refresh_token 不可用的错误码（token 不存在 / 已被轮转作废 / 已过期 / 会话已登出）。
+# 这些对前端而言动作完全一致：清空本地凭证并重新登录，故不细分文案。
+# 正常情况下 status 判断（400/401/403）已能覆盖，此处作为防御——Supabase 若改用
+# 200/4xx 之外的形态返回这些码，仍能正确归类。
+_REFRESH_DEAD_CODES: frozenset[str] = frozenset({
+    "refresh_token_not_found",
+    "refresh_token_already_used",
+    "session_not_found",
+    "session_expired",
+})
 
 
 def validate_email(email: str) -> None:
@@ -108,6 +126,72 @@ def register_user(email: str, password: str) -> dict:
             "疑似 Supabase 端仍开启邮箱确认（Confirm email），"
             "请在 Authentication → Sign In / Providers → Email 关闭该开关"
         )
+    return {"session": result.session, "user": result.user}
+
+
+# ========== 刷新登录态（免登录核心）==========
+
+
+def refresh_session_token(refresh_token: str) -> dict:
+    """
+    用 refresh_token 换取新的登录态（access + refresh）。
+
+    Supabase 侧开启了 refresh token 轮转（supabase/config.toml:171），
+    每次刷新都会签发**新的** refresh_token 并作废旧的，因此调用方必须用
+    返回值覆盖本地保存的 refresh_token，否则下次刷新必然失败。
+
+    安全：本函数及调用方**禁止**把 refresh_token 写入日志 —— 它等同密码。
+
+    Args:
+        refresh_token: 登录 / 注册 / 上次刷新返回的 refresh_token
+
+    Returns:
+        {"session": AuthResponse.session, "user": AuthResponse.user}
+
+    Raises:
+        HTTPException: 400 参数为空 / 401 登录态已失效 /
+            429 请求过于频繁 / 500 数据库未就绪 / 502 刷新服务暂时不可用
+    """
+    if not refresh_token or not refresh_token.strip():
+        raise HTTPException(status_code=400, detail="缺少 refresh_token")
+
+    supabase = get_supabase()
+    if not supabase:
+        raise HTTPException(status_code=500, detail="数据库连接未就绪")
+
+    try:
+        result = supabase.auth.refresh_session(refresh_token)
+    except AuthSessionMissingError:
+        # refresh_session 对空 token 会抛此异常；应用层已提前拦截，此处仅作防御
+        raise HTTPException(status_code=400, detail="缺少 refresh_token")
+    except AuthApiError as e:
+        # 只记 code / status，绝不记 refresh_token 本身
+        logger.warning(f"刷新登录态失败: code={e.code}, status={e.status}")
+        # 只有 4xx 才可能是「凭证不可用」。5xx 一律按服务故障处理——否则 Supabase
+        # 抖动时若恰好带上失效类错误码，会把有效用户无故登出，正是本函数要避免的事。
+        if e.status < 500 and (
+            e.status in (400, 401, 403) or (e.code or "") in _REFRESH_DEAD_CODES
+        ):
+            raise HTTPException(status_code=401, detail="登录态已失效，请重新登录")
+        mapped = _AUTH_ERROR_MAP.get(e.code or "")
+        if mapped:
+            # 例如 over_request_rate_limit → 429
+            raise HTTPException(status_code=mapped[0], detail=mapped[1])
+        raise HTTPException(status_code=502, detail="刷新服务暂时不可用，请稍后重试")
+    except AuthRetryableError as e:
+        # 网络/网关类故障（502/503/504 等）：与 auth_service 其他路径一致按服务不可用处理。
+        # 注意不要误判为 401 —— 那会让用户被无故踢下线。
+        logger.warning(f"刷新登录态网络异常: {e}")
+        raise HTTPException(status_code=502, detail="刷新服务暂时不可用，请稍后重试")
+    except Exception as e:
+        logger.error(f"刷新登录态发生未知异常: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="刷新服务暂时不可用，请稍后重试")
+
+    if not result.session or not result.user:
+        # Supabase 返回成功但无会话：视为凭证已失效，走重新登录
+        raise HTTPException(status_code=401, detail="登录态已失效，请重新登录")
+
+    logger.info("登录态已刷新")
     return {"session": result.session, "user": result.user}
 
 

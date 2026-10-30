@@ -60,84 +60,6 @@ class ProcessFileFromEdgeRequest(BaseModel):
     parse_strategy: Optional[Dict[str, Any]] = None
 
 
-# ==================== 实时行情数据模型（新增） ====================
-
-class MarketData(BaseModel):
-    """ETF实时行情数据模型"""
-    # 基础信息
-    code: str
-    name: str
-    data_date: str
-    update_time: str
-
-    # 基础行情
-    price: float
-    change: float
-    change_pct: float
-    prev_close: float
-
-    # 日内行情
-    open: float
-    high: float
-    low: float
-    amplitude: float
-
-    # 成交数据
-    volume: float
-    amount: float
-    turnover_rate: float
-    volume_ratio: float
-
-    # 盘口数据
-    bid_price: float
-    ask_price: float
-    outer_vol: float
-    inner_vol: float
-    order_ratio: float
-
-    # 资金流向
-    main_inflow: float
-    main_inflow_pct: float
-
-    # 市值数据
-    latest_shares: float
-    float_mv: float
-    total_mv: float
-
-    # 数据来源
-    source: Optional[str] = "api"
-
-
-class MarketResponse(BaseModel):
-    """行情查询响应"""
-    data: Optional[MarketData] = None
-    error: Optional[str] = None
-
-
-class RankingItem(BaseModel):
-    """榜单单项数据（精简版行情）"""
-    code: str
-    name: str
-    price: float
-    change: float
-    change_pct: float
-    turnover_rate: float
-    amount: float
-
-
-class RankingResponse(BaseModel):
-    """榜单查询响应"""
-    total: int
-    items: List[RankingItem]
-
-
-class RankingRequest(BaseModel):
-    """榜单查询请求"""
-    sort_by: str = "涨跌幅"  # 排序字段
-    top_n: int = 10  # 返回数量
-    order: str = "desc"  # 排序方向: desc-从高到低, asc-从低到高
-
-
 # ==================== K线数据模型（新增） ====================
 
 class KlineData(BaseModel):
@@ -185,10 +107,9 @@ class WatchlistItem(BaseModel):
     sort_order: int = 0  # 排序
     created_at: str  # 添加时间
 
-    # 实时行情（可选，查询列表时填充）
-    price: Optional[float] = None
-    change_pct: Optional[float] = None
-    change: Optional[float] = None
+    # 最新净值（可选，查询列表时填充；2026-10-26 起用净值替代实时行情）
+    nav: Optional[float] = None
+    nav_date: Optional[str] = None
 
 
 class WatchlistAddRequest(BaseModel):
@@ -264,11 +185,10 @@ class EtfDetailResponse(BaseModel):
     # 投资标的
     benchmark: Optional[str] = None  # 业绩比较基准
     tracking_target: Optional[str] = None  # 跟踪标的
-
-    # 实时行情（可选）
-    realtime: Optional[MarketData] = None
+    is_qdii: Optional[bool] = None  # 是否 QDII/跨境（None = 未知，不猜）
 
     # 历史净值（可选）
+    # 2026-10-26：`realtime` 字段随 30 秒行情缓存下线删除，前端改用最新一条净值
     nav_history: Optional[List[NavHistoryItem]] = None
 
     # 数据来源
@@ -285,76 +205,23 @@ class SearchRequest(BaseModel):
 
 
 class SearchItem(BaseModel):
-    """ETF搜索单项"""
+    """基金搜索单项（结果只来自支持目录 `fund_catalog`）"""
     code: str  # 基金代码
     name: str  # 基金名称
 
-    # 实时行情（可选）
-    price: Optional[float] = None
-    change_pct: Optional[float] = None
-    change: Optional[float] = None
+    # 最新净值（来自 DB；2026-10-26 起搜索不再返回实时行情）
+    nav: Optional[float] = None
+    nav_date: Optional[str] = None  # 净值日期 YYYY-MM-DD
 
     # 基础信息（可选）
     fund_type: Optional[str] = None  # 基金类型
     net_asset_scale: Optional[str] = None  # 净资产规模
-    management_fee: Optional[str] = None  # 管理费
-    tracking_target: Optional[str] = None  # 跟踪标的
 
 
 class SearchResponse(BaseModel):
     """搜索响应"""
     total: int  # 匹配总数
     items: List[SearchItem]  # 搜索结果
-
-
-class FilterRequest(BaseModel):
-    """ETF筛选请求"""
-    # 关键词
-    keyword: Optional[str] = "ETF"  # 搜索关键词
-
-    # 费率筛选
-    max_fee: Optional[float] = None  # 最大管理费率（%）
-
-    # 规模筛选
-    min_scale_billion: Optional[float] = None  # 最小净资产规模（亿）
-    max_scale_billion: Optional[float] = None  # 最大净资产规模（亿）
-
-    # 基金分类
-    fund_category: Optional[str] = None  # 基金分类（指数型-股票/债券/货币/混合）
-    tracking_target: Optional[str] = None  # 跟踪标的名称
-
-    # 涨跌幅筛选
-    min_return: Optional[float] = None  # 最小涨跌幅（%）
-    max_return: Optional[float] = None  # 最大涨跌幅（%）
-
-    # 分红筛选
-    has_dividend: Optional[bool] = None  # 是否有分红
-
-    # 结果控制
-    top_n: int = 20
-    sort_by: str = "涨跌幅"  # 排序字段
-    sort_order: str = "desc"  # 排序方向
-
-
-class FundCategory(BaseModel):
-    """基金分类"""
-    category: str  # 分类名称
-    fund_type: str  # 类型字符串（用于筛选）
-    count: int  # 该类基金数量
-
-
-class CategoryListResponse(BaseModel):
-    """分类列表响应"""
-    total_categories: int
-    total_funds: int
-    items: List[FundCategory]
-
-
-class FundListResponse(BaseModel):
-    """分类下基金列表响应"""
-    category: str  # 分类名称
-    total: int  # 基金数量
-    items: List[SearchItem]  # 基金列表
 
 
 # ==================== 分时图数据模型（新增） ====================
@@ -384,51 +251,6 @@ class IntradayResponse(BaseModel):
     total_amount: float  # 总成交额
     data_source: str  # 数据来源（real=真实数据, simulated=模拟数据）
     items: List[IntradayPoint]  # 分时数据点
-
-
-# ==================== 资金流向数据模型（新增） ====================
-
-class MoneyFlowData(BaseModel):
-    """单只ETF资金流向"""
-    code: str  # 基金代码
-    name: str  # 基金名称
-    price: Optional[float] = None  # 最新价
-    change_pct: Optional[float] = None  # 涨跌幅
-
-    # 主力资金
-    main_inflow: Optional[float] = None  # 主力净流入（元）
-    main_inflow_pct: Optional[float] = None  # 主力净流入占比
-
-    # 买卖盘
-    outer_vol: Optional[float] = None  # 外盘（主动买入）
-    inner_vol: Optional[float] = None  # 内盘（主动卖出）
-    net_flow: Optional[float] = None  # 净买入（外盘-内盘）
-    order_ratio: Optional[float] = None  # 委比
-
-    # 成交
-    amount: Optional[float] = None  # 成交额
-    update_time: Optional[str] = None  # 更新时间
-
-
-class MoneyFlowRankingItem(BaseModel):
-    """资金流向榜单项"""
-    code: str
-    name: str
-    price: Optional[float] = None
-    change_pct: Optional[float] = None
-    main_inflow: Optional[float] = None  # 主力净流入
-    main_inflow_pct: Optional[float] = None  # 主力净流入占比
-    large_inflow: Optional[float] = None  # 大单净流入
-    medium_inflow: Optional[float] = None  # 中单净流入
-    small_inflow: Optional[float] = None  # 小单净流入
-    amount: Optional[float] = None  # 成交额
-    turnover_rate: Optional[float] = None  # 换手率
-
-
-class MoneyFlowRankingResponse(BaseModel):
-    """资金流向榜响应"""
-    total: int
-    items: List[MoneyFlowRankingItem]
 
 
 # ==================== 场外基金持仓交易数据模型（旧版，兼容保留） ====================

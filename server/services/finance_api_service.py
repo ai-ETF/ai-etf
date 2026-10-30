@@ -7,106 +7,107 @@ from typing import Optional, Dict, List
 
 import pandas as pd
 
-# _format_spot_data 中 safe_float/safe_str 需要 pandas.notna
-# 榜单/搜索/分类等遍历方法改为操作 _spot_dict.values()，不再依赖 DataFrame
-
 logger = logging.getLogger(__name__)
 
 # K线文件缓存目录
 KLINE_CACHE_DIR = "/tmp/etf_kline_cache"
 KLINE_CACHE_TTL = 86400  # 一天过期
+KLINE_SOURCE = "sina"  # 当前行情数据源标识（用于缓存文件名隔离，换源时同步修改）
 
 # 判断是否交易时段（交易日历的唯一来源；A 股交易日 + 9:30-15:00，识别法定节假日）
 from server.services.trading_calendar import beijing_now, is_trading_time
 
 
 class FinanceApiService:
-    """通过 AkShare 查询 ETF 基金的费率、净值、规模、实时行情等事实数据"""
+    """场外基金事实数据查询（净值 / 费率 / 规模 / 详情）。
 
-    # 已知基金名称 → 代码的快捷映射（高频使用的基金）
-    KNOWN_FUNDS = {
-        "华泰柏瑞中证红利低波": "512890",
-        "华泰柏瑞红利低波": "512890",
-        "红利低波ETF华泰柏瑞": "512890",
-        "南方标普红利低波50": "515450",
-        "南方标普中国A股大盘红利低波50": "515450",
-        "红利低波50ETF南方": "515450",
-        "沪深300ETF华泰柏瑞": "510300",
-        "华泰柏瑞沪深300": "510300",
-    }
+    产品只做场外基金：场内 ETF 的实时行情（30 秒轮询 + 内存哈希表）与由它派生的
+    榜单/筛选/分类/资金流已整体下线（2026-10-26）。目录外代码一律 `FundNotSupported`。
+    """
 
-    # 代码→行情哈希表（唯一缓存，O(1) 查询）
-    _spot_dict: Optional[dict[str, dict]] = None  # {"512890": {...行情dict...}, ...}
-    _spot_cache_time: float = 0
-    CACHE_TTL = 30  # 缓存有效期（秒），盘中30秒刷新一次
+    # 详情接口默认返回的净值条数：约 2 年交易日，覆盖前端「近1月~近2年」走势区间
+    DEFAULT_NAV_LIMIT = 500
+    MAX_NAV_LIMIT = 5000
 
-    # 基金列表缓存（类级别，全生命周期共享）
-    _fund_list_cache: Optional[list] = None
-    _fund_list_cache_time: float = 0
-    FUND_LIST_CACHE_TTL = 3600  # 基金列表变化极小，缓存1小时
+    def __init__(self, fund_nav=None, fund_meta=None):
+        # 依赖注入：测试可完全绕开 DB / 网络（接入方案 §4.10）
+        self._fund_nav = fund_nav
+        self._fund_meta = fund_meta
 
-    def __init__(self):
-        pass
+    @property
+    def fund_nav(self):
+        if self._fund_nav is None:
+            from server.services.fund_nav_service import FundNavService
 
-    def _get_fund_list(self) -> list:
-        """获取全量 ETF 基金列表（带类级别缓存，最多1小时刷新一次）"""
-        now = time.time()
-        if (
-            self._fund_list_cache is not None
-            and (now - self._fund_list_cache_time) < self.FUND_LIST_CACHE_TTL
-        ):
-            return self._fund_list_cache
+            self._fund_nav = FundNavService()
+        return self._fund_nav
 
-        try:
-            import akshare as ak
-            logger.info("正在加载全量基金列表...")
-            df = ak.fund_name_em()
-            # 列: 基金代码, 拼音缩写, 基金简称, 基金类型, 拼音全称
-            FinanceApiService._fund_list_cache = df.values.tolist()
-            FinanceApiService._fund_list_cache_time = now
-            logger.info(f"基金列表加载成功，共 {len(self._fund_list_cache)} 只基金")
-        except Exception as e:
-            logger.error(f"加载基金列表失败: {e}")
-            if self._fund_list_cache is None:
-                FinanceApiService._fund_list_cache = []
-        return self._fund_list_cache
+    @property
+    def fund_meta(self):
+        if self._fund_meta is None:
+            from server.services.fund_meta_service import FundMetaService
+
+            self._fund_meta = FundMetaService()
+        return self._fund_meta
+
+    # ==================== 搜索与名称解析（只在支持目录内） ====================
+
+    def search_catalog(self, keyword: str, limit: int = 10) -> List[Dict]:
+        """按代码或名称搜索支持目录内的场外基金。
+
+        产品只做场外基金：场内 ETF 不在目录内，**搜代码不会有任何结果**；
+        搜名称（如「红利」「沪深300」）返回名称/代码匹配的场外基金。
+        返回项含最新净值与日涨幅（来自 DB），不含实时行情。
+        """
+        metas = self.fund_meta.search(keyword, limit=limit)
+        if not metas:
+            return []
+
+        codes = [m.fund_code for m in metas]
+        latest = self.fund_nav.get_latest_batch(codes)
+        results = []
+        for meta in metas:
+            nav = latest.get(meta.fund_code)
+            results.append({
+                "code": meta.fund_code,
+                "name": meta.fund_name,
+                "fund_type": meta.ftype,
+                # 契约里规模是字符串（沿用上游「12.34亿元」式的历史口径）
+                "net_asset_scale": (
+                    str(meta.net_asset_scale) if meta.net_asset_scale is not None else None
+                ),
+                "nav": self._safe_float(nav.unit_nav) if nav else None,
+                "nav_date": nav.nav_date.isoformat() if nav else None,
+            })
+        logger.info(f"搜索目录: keyword={keyword}, 命中 {len(results)} 条")
+        return results
 
     def _resolve_fund_code(self, fund_name: str) -> Optional[str]:
-        """基金名称 → 基金代码"""
-        for known_name, code in self.KNOWN_FUNDS.items():
-            if known_name in fund_name or fund_name in known_name:
-                logger.debug(f"快捷映射命中: {fund_name} -> {code}")
-                return code
+        """基金名称 → 目录内基金代码（模糊匹配，取分数最高者）。
 
+        只在 `fund_catalog` 内解析：场外联接基金的名称通常带「联接」，
+        与场内 ETF 的前缀高度重叠，靠上游全量列表反而更容易挑错。
+        """
         query = fund_name.replace("ETF", "").replace("etf", "").strip()
-        candidates = self._collect_fund_candidates(query)
+        candidates = self.fund_meta.search(query or fund_name, limit=20)
         if not candidates:
+            logger.warning(f"目录内没有匹配的基金: {fund_name}")
             return None
 
-        best = max(candidates, key=lambda c: (c["is_exact"], c["score"], c["is_etf"]))
-        logger.debug(f"模糊匹配: {fund_name} -> {best['code']} (score={best['score']:.2f})")
-        return best["code"]
+        def _key(meta):
+            score, is_exact = self._score_match(query, meta.fund_name)
+            return (is_exact, score)
 
-    def _collect_fund_candidates(self, query: str) -> list[dict]:
-        """从基金列表中筛选所有可匹配的候选基金"""
-        candidates = []
-        for row in self._get_fund_list():
-            code = str(row[0])
-            name = str(row[2]) if len(row) > 2 else ""
-            fund_type = str(row[3]) if len(row) > 3 else ""
+        best = max(candidates, key=_key)
+        logger.debug(f"模糊匹配: {fund_name} -> {best.fund_code}")
+        return best.fund_code
 
-            if "联接" in name or "联接" in fund_type:
-                continue
+    def _ensure_in_catalog(self, fund_code: str) -> None:
+        """目录外代码直接抛 `FundNotSupported`（API 映射 404），不触网上游。"""
+        from server.services.fund_nav_service import FundNotSupported
 
-            score, is_exact = self._score_match(query, name)
-            if score > 0.5:
-                candidates.append({
-                    "code": code,
-                    "score": score,
-                    "is_exact": is_exact,
-                    "is_etf": code.startswith(("51", "15", "16", "58")),
-                })
-        return candidates
+        if not self.fund_nav.in_catalog(fund_code):
+            raise FundNotSupported(fund_code)
 
     @staticmethod
     def _score_match(query: str, fund_name: str) -> tuple[float, bool]:
@@ -136,19 +137,13 @@ class FinanceApiService:
             logger.warning(f"无法识别基金: {fund_name}")
             return None
 
-        # 判断用户想查什么
+        # 判断用户想查什么（2026-10-26：实时行情分支已随 30s 轮询下线，
+        # 「涨跌幅/行情」类问题落在净值分支，用最新净值回答）
         data = {}
-
-        # 新增：行情查询（优先级最高）
-        if any(kw in question for kw in ("涨跌幅", "涨幅", "跌幅", "现在价格", "实时", "行情", "涨多少", "跌多少", "现在多少钱")):
-            spot_data = self.query_spot(fund_code)
-            if spot_data:
-                return spot_data
-            # 行情查询失败，继续尝试其他数据
 
         if any(kw in question for kw in ("费率", "管理费", "托管费", "申购费", "赎回费", "费用")):
             data.update(self._query_fees(fund_code))
-        if any(kw in question for kw in ("净值", "多少钱", "价格")):
+        if any(kw in question for kw in ("净值", "多少钱", "价格", "涨跌幅", "涨幅", "跌幅", "行情", "涨多少", "跌多少")):
             data.update(self._query_nav(fund_code))
         if any(kw in question for kw in ("规模", "多大")):
             data.update(self._query_overview(fund_code))
@@ -168,11 +163,6 @@ class FinanceApiService:
         # 去掉常见问句尾部
         q = re.sub(r"(的|是多少|费率|管理费|托管费|净值|规模|怎么样|是什么|多少|请问|有没有)", "", question)
         q = q.strip()
-
-        # 尝试匹配已知基金名
-        for name in self.KNOWN_FUNDS:
-            if name in question:
-                return name
 
         # 从问题中提取可能的基金名（连续中文+ETF）
         match = re.search(r"([一-龥]+(?:ETF|etf)?)", q)
@@ -199,20 +189,24 @@ class FinanceApiService:
             return {}
 
     def _query_nav(self, fund_code: str) -> Dict:
-        """查询基金最新净值"""
+        """查询基金最新净值，只读 DB（`FundNavService.get_latest`）。
+
+        目录外代码不查、也不回退上游（2026-10-26 决策）：回退会让「搜不到、买不了」
+        的场内 ETF 在问答里「看得见」。由 `FundNavService.in_catalog` 统一判定。
+        """
+        self._ensure_in_catalog(fund_code)
         try:
-            import akshare as ak
-            df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
-            if df.empty:
-                return {}
-            latest = df.iloc[-1]
-            return {
-                "nav": str(latest.get("单位净值", "")),
-                "nav_date": str(latest.get("净值日期", "")),
-            }
+            latest = self.fund_nav.get_latest(fund_code)
         except Exception as e:
-            logger.error(f"查询净值失败 ({fund_code}): {e}")
+            logger.error(f"读取最新净值失败 ({fund_code}): {e}")
             return {}
+        if latest is None:
+            logger.info(f"目录内基金暂无最新净值: {fund_code}")
+            return {}
+        return {
+            "nav": str(latest.unit_nav),
+            "nav_date": latest.nav_date.isoformat(),
+        }
 
     def _query_overview(self, fund_code: str) -> Dict:
         """查询基金概览（含费率+规模+管理人等）"""
@@ -228,7 +222,10 @@ class FinanceApiService:
                 "subscription_fee": self._clean_rate(str(row.get("最高认购费率", ""))),
                 "redemption_fee": self._clean_rate(str(row.get("最高赎回费率", ""))),
                 "scale": str(row.get("净资产规模", "")),
-                "fund_manager": str(row.get("基金管理人", "")),
+                # P13 修正：基金管理人=公司，基金经理人=经理；
+                # 旧版把「基金管理人」标成 fund_manager，问答里会把公司说成经理。
+                "manager_company": str(row.get("基金管理人", "")),
+                "fund_manager": str(row.get("基金经理人", "")),
                 "custodian": str(row.get("基金托管人", "")),
                 "fund_type": str(row.get("基金类型", "")),
             }
@@ -244,152 +241,18 @@ class FinanceApiService:
         match = re.search(r"(\d+(?:\.\d+)?)\s*%", rate_str)
         return f"{match.group(1)}%" if match else rate_str
 
-    # ==================== 实时行情缓存（哈希表） ====================
-
-    @classmethod
-    def _ensure_spot_dict(cls) -> dict[str, dict]:
-        """获取全量行情哈希表（只读缓存，不主动拉取），返回 代码→行情dict 的映射"""
-        if cls._spot_dict is not None:
-            return cls._spot_dict
-        return {}
-
-    @classmethod
-    def _rebuild_spot_dict(cls, df: pd.DataFrame) -> None:
-        """从 DataFrame 构建 代码→行情 哈希表"""
-        d = {}
-        for _, row in df.iterrows():
-            code = str(row.get('代码', ''))
-            if code:
-                d[code] = cls._format_spot_data(row)
-        cls._spot_dict = d
-        logger.debug(f"哈希表构建完成，共 {len(d)} 只ETF")
-
-    def query_spot(self, fund_code: str) -> Optional[Dict]:
-        """
-        查询单只ETF实时行情，O(1) 哈希表查询。
-
-        参数:
-            fund_code: 基金代码（如 "512890"）
-
-        返回:
-            行情数据字典，失败返回 None
-        """
-        d = self._ensure_spot_dict()
-        return d.get(fund_code)
-
-    def query_spot_by_name(self, fund_name: str) -> Optional[Dict]:
-        """
-        按基金名称查询实时行情
-
-        参数:
-            fund_name: 基金名称（如 "华泰柏瑞红利低波ETF"）
-
-        返回:
-            行情数据字典，失败返回 None
-        """
-        fund_code = self._resolve_fund_code(fund_name)
-        if not fund_code:
-            logger.warning(f"无法识别基金名称: {fund_name}")
-            return None
-        return self.query_spot(fund_code)
-
-    def query_ranking(self, sort_by: str = '涨跌幅', top_n: int = 10, ascending: bool = False) -> List[Dict]:
-        """
-        查询ETF涨幅榜/跌幅榜
-
-        参数:
-            sort_by: 排序字段（如 'change_pct', 'amount', 'turnover_rate'）
-            top_n: 返回数量（默认10）
-            ascending: 排序方向（False=从高到低，True=从低到高）
-
-        返回:
-            行情数据列表
-        """
-        d = self._ensure_spot_dict()
-        if not d:
-            return []
-
-        items = list(d.values())
-        # 安全取值，不存在的字段降级到 'change_pct'
-        key = sort_by if sort_by in items[0] else 'change_pct'
-        items.sort(key=lambda x: x.get(key, 0), reverse=not ascending)
-        results = items[:top_n]
-
-        logger.debug(f"返回 {len(results)} 条榜单数据（排序: {sort_by}, 升序: {ascending}）")
-        return results
+    # ==================== 数据源适配（新浪） ====================
 
     @staticmethod
-    def _format_spot_data(row) -> Dict:
-        """
-        格式化单行行情数据（支持 pandas Series 或 dict 输入）
+    def _to_sina_symbol(fund_code: str) -> str:
+        """裸 6 位代码 → 新浪代码：512890 → sh512890，159915 → sz159915"""
+        c = str(fund_code).strip().lower()
+        if c[:2] in ("sh", "sz", "bj"):
+            return c
+        # 上交所：5(ETF/基金)、6(股票)；深交所：0/1(基金)、3(创业板)
+        return ("sh" if c[:1] in ("5", "6") else "sz") + c
 
-        参数:
-            row: pandas Series 或 dict
-
-        返回:
-            格式化后的行情数据字典
-        """
-        def safe_float(val, default=0.0):
-            """安全转换为浮点数（支持 pandas NA 和 None）"""
-            if val is None or (isinstance(val, float) and val != val):  # NaN check
-                return default
-            try:
-                return float(val)
-            except (ValueError, TypeError):
-                return default
-
-        def safe_str(val, default=""):
-            """安全转换为字符串"""
-            if val is None or (isinstance(val, float) and val != val):
-                return default
-            return str(val)
-
-        return {
-            # 基础信息
-            "code": safe_str(row.get('代码', '')),
-            "name": safe_str(row.get('名称', '')),
-            "data_date": safe_str(row.get('数据日期', '')),
-            "update_time": safe_str(row.get('更新时间', '')),
-
-            # 基础行情
-            "price": safe_float(row.get('最新价', 0)),
-            "change": safe_float(row.get('涨跌额', 0)),
-            "change_pct": safe_float(row.get('涨跌幅', 0)),
-            "prev_close": safe_float(row.get('昨收', 0)),
-
-            # 日内行情
-            "open": safe_float(row.get('开盘价', 0)),
-            "high": safe_float(row.get('最高价', 0)),
-            "low": safe_float(row.get('最低价', 0)),
-            "amplitude": safe_float(row.get('振幅', 0)),
-
-            # 成交数据
-            "volume": safe_float(row.get('成交量', 0)),
-            "amount": safe_float(row.get('成交额', 0)),
-            "turnover_rate": safe_float(row.get('换手率', 0)),
-            "volume_ratio": safe_float(row.get('量比', 0)),
-
-            # 盘口数据
-            "bid_price": safe_float(row.get('买一', 0)),
-            "ask_price": safe_float(row.get('卖一', 0)),
-            "outer_vol": safe_float(row.get('外盘', 0)),
-            "inner_vol": safe_float(row.get('内盘', 0)),
-            "order_ratio": safe_float(row.get('委比', 0)),
-
-            # 资金流向
-            "main_inflow": safe_float(row.get('主力净流入-净额', 0)),
-            "main_inflow_pct": safe_float(row.get('主力净流入-净占比', 0)),
-
-            # 市值数据
-            "latest_shares": safe_float(row.get('最新份额', 0)),
-            "float_mv": safe_float(row.get('流通市值', 0)),
-            "total_mv": safe_float(row.get('总市值', 0)),
-
-            # 标记数据来源
-            "source": "api",
-        }
-
-    # ==================== K线历史数据查询方法（新增） ====================
+    # ==================== K线历史数据查询方法 ====================
 
     def query_kline(
         self,
@@ -401,6 +264,10 @@ class FinanceApiService:
     ) -> List[Dict]:
         """
         查询ETF历史K线数据（带文件缓存，历史数据只增不改，可缓存1天）
+
+        数据源：ak.fund_etf_hist_sina（新浪只有日线，周/月线由日线重采样，见 _resample_kline）
+        缓存的是**归一化后的内部列名**（date/open/close/... ），不再缓存上游原始列，
+        避免换源后命中旧缓存导致列名对不上。
 
         参数:
             fund_code: 基金代码（如 "512890"）
@@ -420,10 +287,17 @@ class FinanceApiService:
             try:
                 import akshare as ak
                 logger.info(f"查询K线数据: {fund_code}, period={period}")
-                df = ak.fund_etf_hist_em(symbol=fund_code, period=period, adjust='')
-                if df.empty:
+                symbol = self._to_sina_symbol(fund_code)
+                df = ak.fund_etf_hist_sina(symbol=symbol)
+                if df is None or df.empty:
                     logger.warning(f"K线数据为空: {fund_code}")
                     return []
+                # 先归一化成内部列名（并补出涨跌额/涨跌幅/振幅），再按需重采样
+                df = self._normalize_kline(df)
+                if period in ("weekly", "monthly"):
+                    df = self._resample_kline(df, period)
+                elif period != "daily":
+                    logger.warning(f"未知K线周期 {period}，按日线返回")
                 self._save_kline_cache(fund_code, period, df)
             except Exception as e:
                 logger.error(f"查询K线数据失败: {e}")
@@ -431,29 +305,36 @@ class FinanceApiService:
 
         # 日期过滤
         if start_date:
-            df = df[df['日期'] >= start_date]
+            df = df[df['date'] >= start_date]
         if end_date:
-            df = df[df['日期'] <= end_date]
+            df = df[df['date'] <= end_date]
 
         # 数量限制
         if limit:
             df = df.tail(limit)
 
-        # 转换为列表
+        # 转换为列表（NaN → 0.0，保证 KlineData 的非 Optional float 契约）
+        def num(val) -> float:
+            try:
+                f = float(val)
+            except (TypeError, ValueError):
+                return 0.0
+            return 0.0 if f != f else f
+
         results = []
         for _, row in df.iterrows():
             results.append({
-                "date": str(row['日期']),
-                "open": float(row['开盘']),
-                "close": float(row['收盘']),
-                "high": float(row['最高']),
-                "low": float(row['最低']),
-                "volume": float(row['成交量']),
-                "amount": float(row['成交额']),
-                "amplitude": float(row['振幅']),
-                "change_pct": float(row['涨跌幅']),
-                "change": float(row['涨跌额']),
-                "turnover_rate": float(row['换手率']),
+                "date": str(row['date']),
+                "open": num(row['open']),
+                "close": num(row['close']),
+                "high": num(row['high']),
+                "low": num(row['low']),
+                "volume": num(row['volume']),
+                "amount": num(row['amount']),
+                "amplitude": num(row['amplitude']),
+                "change_pct": num(row['change_pct']),
+                "change": num(row['change']),
+                "turnover_rate": num(row['turnover_rate']),
             })
 
         logger.info(f"返回K线数据: {len(results)} 条")
@@ -486,18 +367,24 @@ class FinanceApiService:
             return []
         return self.query_kline(fund_code, period, start_date, end_date, limit)
 
-    # ==================== ETF详细信息查询方法（新增） ====================
+    # ==================== 基金详细信息查询方法 ====================
 
-    def query_detail(self, fund_code: str) -> Optional[Dict]:
-        """
-        查询ETF详细信息（完整版）
+    def query_detail(self, fund_code: str, nav_limit: int = DEFAULT_NAV_LIMIT) -> Optional[Dict]:
+        """查询基金详细信息。
+
+        目录外代码抛 `FundNotSupported`（API 映射 404），**不回退上游**。
+        详情不再返回 `realtime`（2026-10-26 起无实时行情数据源），
+        前端改用 `nav_history` 的最新一条展示净值。
 
         参数:
-            fund_code: 基金代码（如 "512890"）
+            fund_code: 基金代码（如 "110020"）
+            nav_limit: 返回的历史净值条数上限；None 表示返回全量
 
         返回:
-            ETF详细信息字典，包含：基本信息、实时行情、费率、规模等
+            详情字典：基本信息、费率、规模、历史净值
         """
+        self._ensure_in_catalog(fund_code)
+
         result = {
             "code": fund_code,
             "source": "api",
@@ -508,20 +395,27 @@ class FinanceApiService:
         if overview:
             result.update(overview)
 
-        # 2. 实时行情
-        spot = self.query_spot(fund_code)
-        if spot:
-            result["realtime"] = spot
-
-        # 3. 历史净值（最近5条）
-        nav_history = self._query_nav_history(fund_code, limit=5)
+        # 2. 历史净值（默认近2年，够前端切分多月/年区间走势）
+        nav_history = self._query_nav_history(fund_code, limit=nav_limit)
         if nav_history:
             result["nav_history"] = nav_history
 
         return result if len(result) > 2 else None
 
     def _query_detail_overview(self, fund_code: str) -> Optional[Dict]:
-        """查询ETF详细概览信息"""
+        """查询ETF详细概览信息。
+
+        除 `is_qdii` 外全部来自上游（托管人/业绩基准/分红不在本地表内，见接入方案 §4.9）；
+        `is_qdii` 是唯一的新增字段，读本地主数据，缺失时返回 `None` 而不是猜。
+        """
+        is_qdii = None
+        try:
+            meta = self.fund_meta.get(fund_code)
+            if meta is not None:
+                is_qdii = meta.is_qdii
+        except Exception as e:
+            logger.warning(f"读取本地基金元数据失败（{fund_code}），is_qdii 留空: {e}")
+
         try:
             import akshare as ak
             logger.info(f"查询ETF详细概览: {fund_code}")
@@ -533,6 +427,8 @@ class FinanceApiService:
             row = df.iloc[0]
 
             return {
+                # QDII 标识（来自 fund.is_qdii；未知为 None）
+                "is_qdii": is_qdii,
                 # 基本信息
                 "full_name": str(row.get("基金全称", "")),
                 "short_name": str(row.get("基金简称", "")),
@@ -571,281 +467,43 @@ class FinanceApiService:
             logger.error(f"查询ETF详细概览失败: {e}")
             return None
 
-    def _query_nav_history(self, fund_code: str, limit: int = 5) -> List[Dict]:
-        """查询历史净值记录"""
+    def _query_nav_history(self, fund_code: str, limit: int = None) -> List[Dict]:
+        """查询历史净值记录，**只读 DB**（`FundNavService.get_history`）。
+
+        首次访问会做一次读穿透补齐历史；补数失败抛 `FundNavUnavailable`（API 映射 503），
+        **不返回片段**冒充完整历史。目录外代码抛 `FundNotSupported`（404），
+        不再回退 `ak.fund_open_fund_info_em`（2026-10-26 决策）。
+
+        参数:
+            fund_code: 基金代码
+            limit: 只取最近 N 条；None 表示全量（老基金可达数千条）
+
+        返回:
+            [{"date", "nav", "accumulated_nav", "daily_growth"}]；无数据返回 []
+        """
+        from server.services.fund_nav_service import FundNavUnavailable
+
+        self._ensure_in_catalog(fund_code)
         try:
-            import akshare as ak
-            df = ak.fund_etf_fund_info_em()
-
-            if df.empty:
-                return []
-
-            # 筛选最近的记录
-            df = df.tail(limit)
-
-            results = []
-            for _, row in df.iterrows():
-                results.append({
-                    "date": str(row.get("净值日期", "")),
-                    "nav": float(row.get("单位净值", 0)) if pd.notna(row.get("单位净值")) else None,
-                    "accumulated_nav": float(row.get("累计净值", 0)) if pd.notna(row.get("累计净值")) else None,
-                    "daily_growth": float(row.get("日增长率", 0)) if pd.notna(row.get("日增长率")) else None,
-                })
-
-            return results
-
+            points = self.fund_nav.get_history(fund_code, limit=limit)
+        except FundNavUnavailable:
+            # 历史不可用是「暂时取不到」，不是「没有历史」：上抛让 API 返回 503
+            raise
         except Exception as e:
-            logger.error(f"查询历史净值失败: {e}")
+            logger.error(f"读取历史净值失败 ({fund_code}): {e}")
             return []
 
-    # ==================== ETF搜索/筛选方法（新增） ====================
+        logger.info(f"返回历史净值 {len(points)} 条（DB）: {fund_code}")
+        return [
+            {
+                "date": point.nav_date.isoformat(),
+                "nav": self._safe_float(point.unit_nav),
+                "accumulated_nav": self._safe_float(point.accumulated_nav),
+                "daily_growth": self._safe_float(point.daily_growth),
+            }
+            for point in points
+        ]
 
-    def search_etf(
-        self,
-        keyword: str,
-        top_n: int = 10,
-        include_quote: bool = True
-    ) -> List[Dict]:
-        """
-        搜索ETF（按名称或代码模糊匹配）
-
-        参数:
-            keyword: 关键词（名称或代码片段）
-            top_n: 返回数量
-            include_quote: 是否包含实时行情
-
-        返回:
-            匹配的ETF列表
-        """
-        d = self._ensure_spot_dict()
-        if not d:
-            return []
-
-        keyword_lower = keyword.lower()
-        results = []
-        for item in d.values():
-            if keyword_lower in item["code"].lower() or keyword_lower in item["name"].lower():
-                result = {
-                    "code": item["code"],
-                    "name": item["name"],
-                    "fund_type": None,
-                    "net_asset_scale": None,
-                    "management_fee": None,
-                    "tracking_target": None,
-                }
-                if include_quote:
-                    result["price"] = item.get("price")
-                    result["change_pct"] = item.get("change_pct")
-                    result["change"] = item.get("change")
-                results.append(result)
-                if len(results) >= top_n:
-                    break
-
-        logger.info(f"搜索ETF: keyword={keyword}, 匹配到 {len(results)} 条")
-        return results
-
-    def filter_etf(self, filters: dict) -> List[Dict]:
-        """
-        按条件筛选ETF（基于实时行情数据）
-
-        参数:
-            filters: 筛选条件字典
-                - keyword: 关键词
-                - min_return: 最小涨跌幅
-                - max_return: 最大涨跌幅
-                - top_n: 返回数量
-                - sort_by: 排序字段（change_pct / amount / ...）
-                - sort_order: 排序方向
-
-        返回:
-            符合条件的ETF列表
-        """
-        d = self._ensure_spot_dict()
-        if not d:
-            return []
-
-        keyword = filters.get("keyword", "ETF")
-        min_return = filters.get("min_return")
-        max_return = filters.get("max_return")
-        sort_by = filters.get("sort_by", "change_pct")
-        sort_order = filters.get("sort_order", "desc")
-        top_n = filters.get("top_n", 20)
-
-        items = list(d.values())
-
-        # 1. 关键词过滤
-        if keyword:
-            kw = keyword.lower()
-            items = [x for x in items if kw in x["code"].lower() or kw in x["name"].lower()]
-
-        # 2. 涨跌幅过滤
-        if min_return is not None:
-            items = [x for x in items if x.get("change_pct", 0) >= min_return]
-        if max_return is not None:
-            items = [x for x in items if x.get("change_pct", 0) <= max_return]
-
-        # 3. 排序
-        key = sort_by if sort_by in items[0] else "change_pct"
-        items.sort(key=lambda x: x.get(key, 0), reverse=(sort_order != "asc"))
-
-        # 4. 取前N条
-        results = items[:top_n]
-
-        logger.info(f"筛选ETF: 条件={filters}, 返回 {len(results)} 条")
-        return results
-
-    def get_categories(self) -> List[Dict]:
-        """
-        获取ETF分类列表（按基金类型分组）
-
-        返回:
-            分类列表，每个分类包含名称、类型、数量
-        """
-        # 使用实时行情数据统计
-        d = self._ensure_spot_dict()
-        if not d:
-            return []
-
-        # 从名称中提取分类关键词
-        categories = {
-            "红": "红利ETF",
-            "红利": "红利ETF",
-            "股息": "红利ETF",
-            "科技": "科技ETF",
-            "创新": "科创ETF",
-            "科创": "科创ETF",
-            "半导体": "半导体ETF",
-            "芯片": "半导体ETF",
-            "消费": "消费ETF",
-            "医药": "医药ETF",
-            "医疗": "医药ETF",
-            "新能源": "新能源ETF",
-            "光伏": "新能源ETF",
-            "碳中和": "碳中和ETF",
-            "证券": "券商ETF",
-            "券商": "券商ETF",
-            "银行": "银行ETF",
-            "地产": "地产ETF",
-            "军工": "军工ETF",
-            "通信": "通信ETF",
-            "5G": "科技ETF",
-            "AI": "科技ETF",
-            "人工智能": "科技ETF",
-            "传媒": "传媒ETF",
-            "游戏": "传媒ETF",
-            "黄金": "商品ETF",
-            "油气": "商品ETF",
-            "能源": "商品ETF",
-            "煤炭": "商品ETF",
-            "农业": "农业ETF",
-            "养殖": "农业ETF",
-            "食品": "消费ETF",
-            "白酒": "消费ETF",
-            "汽车": "汽车ETF",
-            "智能驾驶": "汽车ETF",
-            "恒生": "港股ETF",
-            "港股": "港股ETF",
-            "H股": "港股ETF",
-            "纳斯达克": "跨境ETF",
-            "标普": "跨境ETF",
-            "跨境": "跨境ETF",
-            "QDII": "跨境ETF",
-            "沪深300": "宽基ETF",
-            "中证500": "宽基ETF",
-            "中证1000": "宽基ETF",
-            "上证50": "宽基ETF",
-            "创业板": "宽基ETF",
-            "科创50": "宽基ETF",
-            "A50": "宽基ETF",
-            "双创": "宽基ETF",
-        }
-
-        category_counts = {}
-        for item in d.values():
-            name = item["name"]
-            matched = False
-            for kw, cat in categories.items():
-                if kw in name:
-                    category_counts[cat] = category_counts.get(cat, 0) + 1
-                    matched = True
-                    break
-            if not matched:
-                # 未匹配的归为"其他ETF"
-                category_counts["其他ETF"] = category_counts.get("其他ETF", 0) + 1
-
-        results = []
-        for cat_name, count in sorted(category_counts.items(), key=lambda x: -x[1]):
-            results.append({
-                "category": cat_name,
-                "fund_type": cat_name,
-                "count": count,
-            })
-
-        logger.info(f"获取分类列表: 共 {len(results)} 个分类, {len(d)} 只基金")
-        return results
-
-    def get_category_funds(self, category: str, top_n: int = 50) -> List[Dict]:
-        """
-        获取指定分类下的ETF列表
-
-        参数:
-            category: 分类名称（如"红利ETF"、"科技ETF"）
-            top_n: 返回数量
-
-        返回:
-            该分类下的ETF列表（含实时行情）
-        """
-        d = self._ensure_spot_dict()
-        if not d:
-            return []
-
-        # 分类名称反向查找关键词
-        category_keywords = {
-            "红利ETF": ["红利", "股息", "红"],
-            "科技ETF": ["科技", "创新", "5G", "AI", "人工智能", "科创"],
-            "半导体ETF": ["半导体", "芯片"],
-            "消费ETF": ["消费", "食品", "白酒"],
-            "医药ETF": ["医药", "医疗"],
-            "新能源ETF": ["新能源", "光伏", "碳中和"],
-            "券商ETF": ["证券", "券商"],
-            "银行ETF": ["银行"],
-            "地产ETF": ["地产"],
-            "军工ETF": ["军工"],
-            "通信ETF": ["通信"],
-            "传媒ETF": ["传媒", "游戏"],
-            "商品ETF": ["黄金", "油气", "能源", "煤炭"],
-            "农业ETF": ["农业", "养殖"],
-            "汽车ETF": ["汽车", "智能驾驶"],
-            "港股ETF": ["恒生", "港股", "H股"],
-            "跨境ETF": ["纳斯达克", "标普", "跨境", "QDII"],
-            "宽基ETF": ["沪深300", "中证500", "中证1000", "上证50", "创业板", "科创50", "A50", "双创"],
-            "其他ETF": [],
-        }
-
-        keywords = category_keywords.get(category, [])
-        if not keywords:
-            # 如果分类没有关键词，也匹配名称中包含分类名的
-            keywords = [category.replace("ETF", "")]
-
-        # 筛选
-        results = []
-        for item in d.values():
-            name = item["name"]
-            for kw in keywords:
-                if kw in name:
-                    results.append({
-                        "code": item["code"],
-                        "name": item["name"],
-                        "price": item.get("price"),
-                        "change_pct": item.get("change_pct"),
-                        "change": item.get("change"),
-                    })
-                    break
-            if len(results) >= top_n:
-                break
-
-        logger.info(f"获取分类ETF: category={category}, 返回 {len(results)} 条")
-        return results
 
     @staticmethod
     def _safe_float(val) -> Optional[float]:
@@ -856,14 +514,80 @@ class FinanceApiService:
         except (ValueError, TypeError):
             return None
 
+    # ==================== K线归一化 / 重采样 ====================
+
+    @staticmethod
+    def _with_derived_kline_fields(df: pd.DataFrame) -> pd.DataFrame:
+        """补出涨跌额/涨跌幅/振幅（相对上一根收盘计算），换手率无来源填 0"""
+        prev_close = df["close"].shift(1)
+        df["change"] = (df["close"] - prev_close).fillna(0.0)
+        df["change_pct"] = ((df["close"] - prev_close) / prev_close * 100).fillna(0.0).round(4)
+        df["amplitude"] = ((df["high"] - df["low"]) / prev_close * 100).fillna(0.0).round(4)
+        df["turnover_rate"] = 0.0
+        return df
+
+    @staticmethod
+    def _normalize_kline(df: pd.DataFrame) -> pd.DataFrame:
+        """把上游日K归一化成内部列名，并补出 change / change_pct / amplitude
+
+        新浪原始列：date open high low close volume amount postVol postAmt
+        内部列：    date open high low close volume amount change change_pct amplitude turnover_rate
+        """
+        out = pd.DataFrame({
+            "date": pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d"),
+            "open": pd.to_numeric(df["open"], errors="coerce"),
+            "high": pd.to_numeric(df["high"], errors="coerce"),
+            "low": pd.to_numeric(df["low"], errors="coerce"),
+            "close": pd.to_numeric(df["close"], errors="coerce"),
+            "volume": pd.to_numeric(df["volume"], errors="coerce"),
+            "amount": pd.to_numeric(df["amount"], errors="coerce"),
+        })
+        # 上游顺序不保证；升序是 K 线契约（重采样、涨跌幅都依赖前一根）
+        out = out.sort_values("date").reset_index(drop=True)
+        return FinanceApiService._with_derived_kline_fields(out)
+
+    @staticmethod
+    def _resample_kline(df: pd.DataFrame, period: str) -> pd.DataFrame:
+        """日线 → 周线(W-FRI) / 月线(ME)
+
+        新浪只有日线接口，周/月线由日线聚合：open=区间首、high=区间最高、
+        low=区间最低、close=区间末、volume/amount=求和，再重算涨跌幅/振幅。
+
+        日期取区间内**最后一个实际交易日**（同 Yahoo/多数行情源），不用区间末日标签：
+        用 W-FRI/ME 的区间末日会把本周标成还没到的周五（如今天 10-13 标出 10-16），
+        前端按日期过滤或画时间轴会把它当越界数据丢掉。
+        """
+        rule = {"weekly": "W-FRI", "monthly": "ME"}[period]
+        indexed = df.set_index(pd.to_datetime(df["date"]))
+        indexed["_d"] = indexed.index  # 取组内最后一个交易日用的辅助列
+        agg = indexed.resample(rule).agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+            "amount": "sum",
+            "_d": "last",
+        }).dropna(subset=["close"])
+        out = pd.DataFrame({
+            "date": agg["_d"].dt.strftime("%Y-%m-%d"),
+            "open": agg["open"].to_numpy(),
+            "high": agg["high"].to_numpy(),
+            "low": agg["low"].to_numpy(),
+            "close": agg["close"].to_numpy(),
+            "volume": agg["volume"].to_numpy(),
+            "amount": agg["amount"].to_numpy(),
+        })
+        return FinanceApiService._with_derived_kline_fields(out)
+
     # ==================== K线文件缓存方法 ====================
 
     @staticmethod
     def _kline_cache_path(fund_code: str, period: str) -> str:
-        """K线缓存文件路径"""
+        """K线缓存文件路径（文件名带数据源标识，避免换源后与旧缓存串味）"""
         os.makedirs(KLINE_CACHE_DIR, exist_ok=True)
         safe_code = fund_code.replace("/", "_")
-        return f"{KLINE_CACHE_DIR}/{safe_code}_{period}.json"
+        return f"{KLINE_CACHE_DIR}/{safe_code}_{period}_{KLINE_SOURCE}.json"
 
     @staticmethod
     def _load_kline_cache(fund_code: str, period: str) -> Optional[pd.DataFrame]:
@@ -878,6 +602,11 @@ class FinanceApiService:
                 os.remove(path)
                 return None
             df = pd.read_json(path, orient="split")
+            # read_json 会把 date 列从字符串还原成 Timestamp，str() 后变成
+            # "2026-10-12 00:00:00" —— 与未命中缓存时（"%Y-%m-%d"）格式不一致。
+            # 统一回纯日期，保证缓存命中与否返回同一契约。
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
             logger.info(f"K线缓存命中: {fund_code} {period} ({len(df)} 条)")
             return df
         except Exception as e:
@@ -894,220 +623,71 @@ class FinanceApiService:
         except Exception as e:
             logger.warning(f"K线缓存保存失败: {e}")
 
-    # ==================== 分时图数据方法（新增） ====================
+    # ==================== 分时图数据方法 ====================
 
     def query_intraday(self, fund_code: str) -> List[Dict]:
-        """
-        查询当日分时图数据
+        """查询当日分时图数据。
 
-        优先从 AkShare 分钟接口获取，失败则用日K线模拟。
+        数据源：ak.stock_zh_a_minute（新浪）——返回约 1970 根的**滚动窗口**，跨多个
+        交易日，必须按「今天」过滤，否则分时图会把十几天的走势画成一天。
+
+        2026-10-26：删除了「用实时行情 + 日K线模拟」的降级分支——它依赖已下线的
+        30 秒行情缓存，且生成的是**伪造数据**。取不到当日分钟线时返回空列表，
+        由前端展示「暂无分时数据」。
 
         参数:
             fund_code: 基金代码
 
         返回:
             分时数据列表，每条包含：time(时间), price(价格), avg_price(均价),
-            volume(成交量), amount(成交额), change_pct(累计涨跌幅)
+            volume(成交量), amount(成交额), change_pct(相对昨收的累计涨跌幅)
         """
-        # 方案1: 尝试从分钟K线获取
         try:
             import akshare as ak
-            df = ak.fund_etf_hist_min_em(symbol=fund_code, period='1', adjust='')
-            if df is not None and not df.empty:
-                results = []
-                for _, row in df.iterrows():
-                    results.append({
-                        "time": str(row.get('时间', '')),
-                        "price": self._safe_float(row.get('收盘', 0)),
-                        "open": self._safe_float(row.get('开盘', 0)),
-                        "high": self._safe_float(row.get('最高', 0)),
-                        "low": self._safe_float(row.get('最低', 0)),
-                        "volume": self._safe_float(row.get('成交量', 0)),
-                        "amount": self._safe_float(row.get('成交额', 0)),
-                    })
-                if results:
-                    # 计算均价和涨跌幅
-                    first_price = results[0]["price"] or 0
-                    for r in results:
-                        r["avg_price"] = r["amount"] / r["volume"] if r["volume"] else r["price"]
-                        r["change_pct"] = round(((r["price"] - first_price) / first_price) * 100, 2) if first_price else 0
-                    logger.info(f"获取分时图数据(真实): {fund_code}, {len(results)} 条")
-                    return results
+            symbol = self._to_sina_symbol(fund_code)
+            df = ak.stock_zh_a_minute(symbol=symbol, period='1', adjust='')
+            if df is None or df.empty:
+                return []
+            today = beijing_now().strftime("%Y-%m-%d")
+            df = df[df['day'].astype(str).str.startswith(today)]
+            if df.empty:
+                logger.info(f"当日无分时数据: {fund_code}")
+                return []
+
+            prev_close = self._prev_close_for_intraday(fund_code)
+            results = []
+            for _, row in df.iterrows():
+                price = self._safe_float(row.get('close', 0)) or 0
+                volume = self._safe_float(row.get('volume', 0)) or 0
+                amount = self._safe_float(row.get('amount', 0)) or 0
+                # day 形如 "2026-10-13 09:31:00"，只保留 HH:MM
+                stamp = str(row.get('day', ''))
+                results.append({
+                    "time": stamp[11:16] if len(stamp) >= 16 else stamp,
+                    "price": price,
+                    "open": self._safe_float(row.get('open', 0)),
+                    "high": self._safe_float(row.get('high', 0)),
+                    "low": self._safe_float(row.get('low', 0)),
+                    "volume": volume,
+                    "amount": amount,
+                    "avg_price": round(amount / volume, 4) if volume else price,
+                    "change_pct": round((price - prev_close) / prev_close * 100, 2) if prev_close else 0,
+                })
+            logger.info(f"获取分时图数据: {fund_code}, {len(results)} 条")
+            return results
         except Exception as e:
-            logger.warning(f"分钟K线获取失败，降级方案: {e}")
-
-        # 方案2: 用实时行情 + 日K线模拟当日分时走势
-        return self._generate_intraday_fallback(fund_code)
-
-    def _generate_intraday_fallback(self, fund_code: str) -> List[Dict]:
-        """生成模拟分时走势（基于当日实时行情和昨日K线）"""
-        spot = self.query_spot(fund_code)
-        if not spot:
+            logger.warning(f"分钟K线获取失败 ({fund_code}): {e}")
             return []
 
-        # 获取当日K线数据（包含昨收）
-        kline = self.query_kline(fund_code, period='daily', limit=2)
+    def _prev_close_for_intraday(self, fund_code: str) -> float:
+        """取昨收价（分时涨跌幅的基准）：日K里今天之前的最后一根。
 
-        prev_close = spot.get('prev_close', 0)
-        current_price = spot.get('price', 0)
-        open_price = spot.get('open', prev_close)
-        high_price = spot.get('high', current_price)
-        low_price = spot.get('low', current_price)
-        total_volume = spot.get('volume', 0)
-        total_amount = spot.get('amount', 0)
-
-        # 如果日K线有数据，用日K线的开盘价
-        if kline and len(kline) >= 1:
-            today_kline = kline[-1]
-            if today_kline.get('open'):
-                open_price = today_kline['open']
-
-        # 模拟生成约240个时间点（A股4小时交易 = 240分钟）
-        import random
-        import hashlib
-        random.seed(int(hashlib.md5(fund_code.encode("utf-8")).hexdigest(), 16) % 10000)  # 固定种子使结果可复现
-        num_points = 240
-        # 用正弦曲线模拟价格走势
-        import math
-
-        results = []
-        for i in range(num_points):
-            # 时间：09:30 ~ 15:00
-            hour = 9 + (i + 30) // 60
-            minute = (i + 30) % 60
-            time_str = f"{hour:02d}:{minute:02d}"
-
-            # 模拟价格走势（开盘->随机波动->收盘）
-            progress = i / num_points
-            # 用正弦波 + 随机噪声模拟价格波动
-            wave = math.sin(progress * math.pi * 2) * 0.3
-            noise = random.uniform(-0.1, 0.1)
-            price_factor = progress + (wave + noise) * 0.02
-            simulated_price = round(open_price + (current_price - open_price) * price_factor, 3)
-
-            # 确保价格在合理范围内
-            simulated_price = max(low_price * 0.995, min(high_price * 1.005, simulated_price))
-
-            # 模拟成交量（开盘和收盘时成交量较大）
-            volume_factor = 1 - abs(progress - 0.5) * 1.2
-            volume_factor = max(0.3, volume_factor)
-            simulated_volume = int(total_volume / num_points * volume_factor * random.uniform(0.5, 1.5))
-
-            # 累计涨跌幅（相对于昨收）
-            change_pct = round(((simulated_price - prev_close) / prev_close) * 100, 2) if prev_close else 0
-
-            results.append({
-                "time": time_str,
-                "price": simulated_price,
-                "avg_price": round((simulated_price + open_price) / 2, 3),
-                "volume": simulated_volume,
-                "change_pct": change_pct,
-            })
-
-        logger.info(f"生成分时图数据(模拟): {fund_code}, {len(results)} 条")
-        return results
-
-    # ==================== 资金流向数据方法（新增） ====================
-
-    def query_money_flow(self, fund_code: str) -> Optional[Dict]:
+        盘中新浪日K不含当日未收盘的 K 线，收盘后才含；所以按「日期 < 今天」
+        取最后一根，盘中/盘后都拿到真正的昨收。
         """
-        查询ETF资金流向（从实时行情数据中提取）
+        today = beijing_now().strftime("%Y-%m-%d")
+        for bar in reversed(self.query_kline(fund_code, period='daily', limit=10)):
+            if str(bar.get("date", "")) < today:
+                return bar.get("close") or 0
+        return 0
 
-        参数:
-            fund_code: 基金代码
-
-        返回:
-            资金流向数据字典
-        """
-        # 实时行情中已包含主力/大单/中单/小单净流入数据
-        spot = self.query_spot(fund_code)
-        if not spot:
-            return None
-
-        result = {
-            "code": fund_code,
-            "name": spot.get("name", ""),
-            "price": spot.get("price", 0),
-            "change_pct": spot.get("change_pct", 0),
-            "main_inflow": spot.get("main_inflow", 0),
-            "main_inflow_pct": spot.get("main_inflow_pct", 0),
-            "amount": spot.get("amount", 0),
-            "outer_vol": spot.get("outer_vol", 0),
-            "inner_vol": spot.get("inner_vol", 0),
-            "order_ratio": spot.get("order_ratio", 0),
-            "update_time": spot.get("update_time", ""),
-        }
-
-        # 计算净流入（外盘 - 内盘）
-        outer = spot.get("outer_vol", 0) or 0
-        inner = spot.get("inner_vol", 0) or 0
-        result["net_flow"] = outer - inner
-
-        logger.info(f"查询资金流向: {fund_code}, 主力净流入={result['main_inflow']}")
-        return result
-
-    def query_money_flow_ranking(self, top_n: int = 20, ascending: bool = False) -> List[Dict]:
-        """
-        查询资金流向排行榜
-
-        参数:
-            top_n: 返回数量
-            ascending: 排序方向（False=净流入从高到低，True=净流出从高到低）
-
-        返回:
-            资金流向排行榜
-        """
-        d = self._ensure_spot_dict()
-        if not d:
-            return []
-
-        sort_col = 'main_inflow'
-        items = list(d.values())
-        items.sort(key=lambda x: x.get(sort_col, 0), reverse=not ascending)
-        results = []
-        for item in items[:top_n]:
-            results.append({
-                "code": item["code"],
-                "name": item["name"],
-                "price": item.get("price"),
-                "change_pct": item.get("change_pct"),
-                "main_inflow": item.get("main_inflow"),
-                "main_inflow_pct": item.get("main_inflow_pct"),
-                "large_inflow": item.get("large_inflow"),
-                "medium_inflow": item.get("medium_inflow"),
-                "small_inflow": item.get("small_inflow"),
-                "amount": item.get("amount"),
-                "turnover_rate": item.get("turnover_rate"),
-            })
-
-        logger.info(f"查询资金流向榜: top_n={top_n}, 返回 {len(results)} 条")
-        return results
-
-    # ==================== 定时刷新方法（新增） ====================
-
-    @classmethod
-    def refresh_spot_cache(cls) -> bool:
-        """
-        强制刷新全量ETF实时行情缓存（供定时任务调用）。
-
-        交易时段（交易日 9:30-15:00，识别法定节假日）每30秒拉取一次最新数据。
-        非交易时段跳过实际拉取，但如果缓存为空则仍然加载一次（首次启动/重启后填充）。
-        """
-        import akshare as ak
-        if not is_trading_time(beijing_now()) and cls._spot_dict is not None:
-            logger.debug("[定时任务] 非交易时段，跳过刷新")
-            return True  # 返回 True 表示缓存仍有效
-
-        try:
-            now = time.time()
-            logger.info(f"[定时任务] 正在刷新全量ETF实时行情...")
-            df = ak.fund_etf_spot_em()
-            cls._spot_cache_time = now
-            # 同步构建哈希表
-            cls._rebuild_spot_dict(df)
-            logger.info(f"[定时任务] 刷新成功，共 {len(df)} 只ETF")
-            return True
-        except Exception as e:
-            logger.error(f"[定时任务] 刷新失败: {e}")
-            # 保留旧缓存不覆盖
-            return False

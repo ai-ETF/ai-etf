@@ -23,6 +23,8 @@
 """
 import logging
 import re
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from io import StringIO
 from typing import Optional
 
@@ -304,12 +306,47 @@ def fetch_jjfl(code: str) -> Optional[dict]:
     return out
 
 
+def _str_or_none(value) -> Optional[str]:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _parse_establish_date(value) -> Optional[str]:
+    """`ESTABDATE` -> 'YYYY-MM-DD'；空值或非法值返回 None（不猜）。"""
+    text = _str_or_none(value)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        logger.warning(f"成立日期解析失败，留空: {value!r}")
+        return None
+
+
+def _parse_net_asset_scale(value) -> Optional[str]:
+    """`ENDNAV` -> 数字字符串（供 RPC 转 numeric）；非法值留空并记 WARNING。"""
+    text = _str_or_none(value)
+    if not text:
+        return None
+    try:
+        scale = Decimal(text.replace(",", ""))
+    except (InvalidOperation, ValueError):
+        logger.warning(f"净资产规模解析失败，留空: {value!r}")
+        return None
+    return str(scale) if scale >= 0 else None
+
+
 def fetch_basic_info(code: str) -> Optional[dict]:
     """
-    抓取移动端基础信息，用于基金名称 / 类型 / 跟踪标的（供风险分类）与申购上限。
+    抓取移动端基础信息（一次请求覆盖名称、类型、跟踪标的、公司、经理、
+    成立日、规模、风险等级与申购上限；不新增上游请求）。
 
-    返回: {"fund_name", "ftype", "index_name", "index_code", "max_purchase_amount"}
-          或 None（max_purchase_amount 为 None 表示无限额）
+    返回: {
+        "fund_name", "ftype", "index_name", "index_code",
+        "max_purchase_amount", "manager_company", "fund_manager",
+        "establish_date", "net_asset_scale", "risk_level_code",
+    }
+    或 None（整只基础信息不可用 → 调用方不得写 `fund`，保留旧行）
     """
     try:
         resp = requests.get(BASIC_URL.format(code=code), headers=HEADERS, timeout=TIMEOUT)
@@ -325,4 +362,9 @@ def fetch_basic_info(code: str) -> Optional[dict]:
         "index_name": data.get("INDEXNAME") or "",
         "index_code": data.get("INDEXCODE") or "",
         "max_purchase_amount": parse_max_purchase_amount(data.get("MAXSG")),
+        "manager_company": _str_or_none(data.get("JJGS")),
+        "fund_manager": _str_or_none(data.get("JJJL")),
+        "establish_date": _parse_establish_date(data.get("ESTABDATE")),
+        "net_asset_scale": _parse_net_asset_scale(data.get("ENDNAV")),
+        "risk_level_code": _str_or_none(data.get("RISKLEVEL")),
     }
