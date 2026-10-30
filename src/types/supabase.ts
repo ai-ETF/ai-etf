@@ -45,6 +45,7 @@ export type Database = {
           created_at: string | null
           id: string
           position_value: number
+          settling_cash: number
           snapshot_date: string
           total_assets: number
           total_pnl: number
@@ -56,6 +57,7 @@ export type Database = {
           created_at?: string | null
           id?: string
           position_value?: number
+          settling_cash?: number
           snapshot_date: string
           total_assets: number
           total_pnl?: number
@@ -67,6 +69,7 @@ export type Database = {
           created_at?: string | null
           id?: string
           position_value?: number
+          settling_cash?: number
           snapshot_date?: string
           total_assets?: number
           total_pnl?: number
@@ -183,6 +186,63 @@ export type Database = {
           title?: string | null
           updated_at?: string | null
           user_id?: string
+        }
+        Relationships: []
+      }
+      confirm_runs: {
+        Row: {
+          confirmed: number
+          duration_ms: number | null
+          error: string | null
+          finished_at: string | null
+          heartbeat_at: string
+          manual_review: number
+          rejected: number
+          retryable: number
+          run_id: string
+          scanned: number
+          settled: number
+          skipped_nav: number
+          started_at: string
+          status: string
+          trigger_source: string
+          worker: string
+        }
+        Insert: {
+          confirmed?: number
+          duration_ms?: number | null
+          error?: string | null
+          finished_at?: string | null
+          heartbeat_at?: string
+          manual_review?: number
+          rejected?: number
+          retryable?: number
+          run_id?: string
+          scanned?: number
+          settled?: number
+          skipped_nav?: number
+          started_at?: string
+          status: string
+          trigger_source: string
+          worker: string
+        }
+        Update: {
+          confirmed?: number
+          duration_ms?: number | null
+          error?: string | null
+          finished_at?: string | null
+          heartbeat_at?: string
+          manual_review?: number
+          rejected?: number
+          retryable?: number
+          run_id?: string
+          scanned?: number
+          settled?: number
+          skipped_nav?: number
+          started_at?: string
+          status?: string
+          trigger_source?: string
+          worker?: string
         }
         Relationships: []
       }
@@ -324,6 +384,66 @@ export type Database = {
           },
         ]
       }
+      fund: {
+        Row: {
+          establish_date: string | null
+          first_seen_at: string
+          ftype: string | null
+          fund_code: string
+          fund_manager: string | null
+          fund_name: string
+          is_qdii: boolean | null
+          lifecycle_status: string
+          manager_company: string | null
+          metadata_source: string
+          net_asset_scale: number | null
+          qdii_reason: string | null
+          risk_level_code: string | null
+          synced_at: string | null
+          tracking_index: string | null
+          tracking_index_code: string | null
+          updated_at: string
+        }
+        Insert: {
+          establish_date?: string | null
+          first_seen_at?: string
+          ftype?: string | null
+          fund_code: string
+          fund_manager?: string | null
+          fund_name: string
+          is_qdii?: boolean | null
+          lifecycle_status?: string
+          manager_company?: string | null
+          metadata_source: string
+          net_asset_scale?: number | null
+          qdii_reason?: string | null
+          risk_level_code?: string | null
+          synced_at?: string | null
+          tracking_index?: string | null
+          tracking_index_code?: string | null
+          updated_at?: string
+        }
+        Update: {
+          establish_date?: string | null
+          first_seen_at?: string
+          ftype?: string | null
+          fund_code?: string
+          fund_manager?: string | null
+          fund_name?: string
+          is_qdii?: boolean | null
+          lifecycle_status?: string
+          manager_company?: string | null
+          metadata_source?: string
+          net_asset_scale?: number | null
+          qdii_reason?: string | null
+          risk_level_code?: string | null
+          synced_at?: string | null
+          tracking_index?: string | null
+          tracking_index_code?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       fund_fee_rules: {
         Row: {
           commission_rate: number
@@ -387,6 +507,117 @@ export type Database = {
         }
         Relationships: []
       }
+      fund_nav: {
+        Row: {
+          accumulated_nav: number | null
+          daily_growth: number | null
+          first_seen_at: string
+          fund_code: string
+          nav_date: string
+          revision_count: number
+          source: string
+          unit_nav: number | null
+          updated_at: string
+        }
+        Insert: {
+          accumulated_nav?: number | null
+          daily_growth?: number | null
+          first_seen_at?: string
+          fund_code: string
+          nav_date: string
+          revision_count?: number
+          source: string
+          unit_nav?: number | null
+          updated_at?: string
+        }
+        Update: {
+          accumulated_nav?: number | null
+          daily_growth?: number | null
+          first_seen_at?: string
+          fund_code?: string
+          nav_date?: string
+          revision_count?: number
+          source?: string
+          unit_nav?: number | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      fund_nav_revision: {
+        Row: {
+          detected_at: string
+          fund_code: string
+          id: number
+          nav_date: string
+          new_accumulated_nav: number | null
+          new_unit_nav: number | null
+          old_accumulated_nav: number | null
+          old_unit_nav: number | null
+          source: string
+        }
+        Insert: {
+          detected_at?: string
+          fund_code: string
+          id?: number
+          nav_date: string
+          new_accumulated_nav?: number | null
+          new_unit_nav?: number | null
+          old_accumulated_nav?: number | null
+          old_unit_nav?: number | null
+          source: string
+        }
+        Update: {
+          detected_at?: string
+          fund_code?: string
+          id?: number
+          nav_date?: string
+          new_accumulated_nav?: number | null
+          new_unit_nav?: number | null
+          old_accumulated_nav?: number | null
+          old_unit_nav?: number | null
+          source?: string
+        }
+        Relationships: []
+      }
+      fund_nav_state: {
+        Row: {
+          fund_code: string
+          history_start_date: string | null
+          history_status: string
+          last_checked_at: string | null
+          last_error: string | null
+          last_error_at: string | null
+          last_success_at: string | null
+          latest_nav_date: string | null
+          latest_unit_nav: number | null
+          updated_at: string
+        }
+        Insert: {
+          fund_code: string
+          history_start_date?: string | null
+          history_status?: string
+          last_checked_at?: string | null
+          last_error?: string | null
+          last_error_at?: string | null
+          last_success_at?: string | null
+          latest_nav_date?: string | null
+          latest_unit_nav?: number | null
+          updated_at?: string
+        }
+        Update: {
+          fund_code?: string
+          history_start_date?: string | null
+          history_status?: string
+          last_checked_at?: string | null
+          last_error?: string | null
+          last_error_at?: string | null
+          last_success_at?: string | null
+          latest_nav_date?: string | null
+          latest_unit_nav?: number | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       fund_risk_profiles: {
         Row: {
           board_score: number
@@ -424,7 +655,97 @@ export type Database = {
           updated_at?: string | null
           volatility_score?: number
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "fund_risk_profiles_fund_code_fkey"
+            columns: ["fund_code"]
+            isOneToOne: true
+            referencedRelation: "fund"
+            referencedColumns: ["fund_code"]
+          },
+          {
+            foreignKeyName: "fund_risk_profiles_fund_code_fkey"
+            columns: ["fund_code"]
+            isOneToOne: true
+            referencedRelation: "fund_catalog"
+            referencedColumns: ["fund_code"]
+          },
+        ]
+      }
+      fund_trade_rule: {
+        Row: {
+          commission_rate: number
+          confirm_delay: number
+          created_at: string
+          custody_fee_rate: number
+          fund_code: string
+          fund_type: string
+          management_fee_rate: number
+          max_purchase_amount: number | null
+          min_purchase_amount: number
+          purchase_fee_tiers: Json | null
+          redeem_available_delay: number
+          redeem_settle_delay: number
+          redemption_fee_tiers: Json
+          sales_service_fee_rate: number
+          share_class: string
+          subscribe_status: string | null
+          updated_at: string
+        }
+        Insert: {
+          commission_rate: number
+          confirm_delay: number
+          created_at?: string
+          custody_fee_rate: number
+          fund_code: string
+          fund_type?: string
+          management_fee_rate: number
+          max_purchase_amount?: number | null
+          min_purchase_amount: number
+          purchase_fee_tiers?: Json | null
+          redeem_available_delay?: number
+          redeem_settle_delay: number
+          redemption_fee_tiers: Json
+          sales_service_fee_rate: number
+          share_class: string
+          subscribe_status?: string | null
+          updated_at?: string
+        }
+        Update: {
+          commission_rate?: number
+          confirm_delay?: number
+          created_at?: string
+          custody_fee_rate?: number
+          fund_code?: string
+          fund_type?: string
+          management_fee_rate?: number
+          max_purchase_amount?: number | null
+          min_purchase_amount?: number
+          purchase_fee_tiers?: Json | null
+          redeem_available_delay?: number
+          redeem_settle_delay?: number
+          redemption_fee_tiers?: Json
+          sales_service_fee_rate?: number
+          share_class?: string
+          subscribe_status?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fund_trade_rule_fund_code_fkey"
+            columns: ["fund_code"]
+            isOneToOne: true
+            referencedRelation: "fund"
+            referencedColumns: ["fund_code"]
+          },
+          {
+            foreignKeyName: "fund_trade_rule_fund_code_fkey"
+            columns: ["fund_code"]
+            isOneToOne: true
+            referencedRelation: "fund_catalog"
+            referencedColumns: ["fund_code"]
+          },
+        ]
       }
       market_indicators: {
         Row: {
@@ -533,6 +854,68 @@ export type Database = {
           },
         ]
       }
+      position_lots: {
+        Row: {
+          available_date: string | null
+          cost_price: number
+          created_at: string
+          fund_code: string
+          fund_name: string
+          id: string
+          nav_date: string
+          order_id: string | null
+          quantity: number
+          remaining_cost: number
+          remaining_qty: number
+          source: string
+          source_ref: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          available_date?: string | null
+          cost_price: number
+          created_at?: string
+          fund_code: string
+          fund_name?: string
+          id?: string
+          nav_date: string
+          order_id?: string | null
+          quantity: number
+          remaining_cost: number
+          remaining_qty: number
+          source: string
+          source_ref?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          available_date?: string | null
+          cost_price?: number
+          created_at?: string
+          fund_code?: string
+          fund_name?: string
+          id?: string
+          nav_date?: string
+          order_id?: string | null
+          quantity?: number
+          remaining_cost?: number
+          remaining_qty?: number
+          source?: string
+          source_ref?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "position_lots_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "trade_orders"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       positions: {
         Row: {
           available_date: string | null
@@ -610,6 +993,7 @@ export type Database = {
           fund_code: string
           fund_name: string
           id: string
+          order_id: string | null
           price: number
           quantity: number
           trade_pnl: number | null
@@ -623,6 +1007,7 @@ export type Database = {
           fund_code: string
           fund_name?: string
           id?: string
+          order_id?: string | null
           price: number
           quantity: number
           trade_pnl?: number | null
@@ -636,65 +1021,119 @@ export type Database = {
           fund_code?: string
           fund_name?: string
           id?: string
+          order_id?: string | null
           price?: number
           quantity?: number
           trade_pnl?: number | null
           trade_time?: string | null
           user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "trade_flow_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "trade_orders"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       trade_orders: {
         Row: {
+          accepted_date: string | null
           amount: number
+          attempt_count: number
+          available_date: string | null
+          client_order_id: string | null
           confirm_date: string | null
           created_at: string | null
           direction: string
+          estimated_nav: number | null
           fee: number
+          fee_rule_snapshot: Json | null
           fund_code: string
           fund_name: string
           fund_type: string | null
           id: string
+          last_attempt_at: string | null
+          last_error_code: string | null
+          last_error_message: string | null
+          net_amount: number | null
           order_type: string
           price: number
+          processed_at: string | null
+          processing_at: string | null
+          processing_by: string | null
           quantity: number
           reject_reason: string | null
+          settle_date: string | null
+          settled_at: string | null
           status: string
           updated_at: string | null
           user_id: string
         }
         Insert: {
+          accepted_date?: string | null
           amount: number
+          attempt_count?: number
+          available_date?: string | null
+          client_order_id?: string | null
           confirm_date?: string | null
           created_at?: string | null
           direction: string
+          estimated_nav?: number | null
           fee?: number
+          fee_rule_snapshot?: Json | null
           fund_code: string
           fund_name?: string
           fund_type?: string | null
           id?: string
+          last_attempt_at?: string | null
+          last_error_code?: string | null
+          last_error_message?: string | null
+          net_amount?: number | null
           order_type?: string
           price: number
+          processed_at?: string | null
+          processing_at?: string | null
+          processing_by?: string | null
           quantity: number
           reject_reason?: string | null
+          settle_date?: string | null
+          settled_at?: string | null
           status?: string
           updated_at?: string | null
           user_id: string
         }
         Update: {
+          accepted_date?: string | null
           amount?: number
+          attempt_count?: number
+          available_date?: string | null
+          client_order_id?: string | null
           confirm_date?: string | null
           created_at?: string | null
           direction?: string
+          estimated_nav?: number | null
           fee?: number
+          fee_rule_snapshot?: Json | null
           fund_code?: string
           fund_name?: string
           fund_type?: string | null
           id?: string
+          last_attempt_at?: string | null
+          last_error_code?: string | null
+          last_error_message?: string | null
+          net_amount?: number | null
           order_type?: string
           price?: number
+          processed_at?: string | null
+          processing_at?: string | null
+          processing_by?: string | null
           quantity?: number
           reject_reason?: string | null
+          settle_date?: string | null
+          settled_at?: string | null
           status?: string
           updated_at?: string | null
           user_id?: string
@@ -925,10 +1364,96 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      fund_catalog: {
+        Row: {
+          commission_rate: number | null
+          confirm_delay: number | null
+          custody_fee_rate: number | null
+          establish_date: string | null
+          ftype: string | null
+          fund_code: string | null
+          fund_manager: string | null
+          fund_name: string | null
+          fund_type: string | null
+          is_qdii: boolean | null
+          lifecycle_status: string | null
+          management_fee_rate: number | null
+          manager_company: string | null
+          max_purchase_amount: number | null
+          min_purchase_amount: number | null
+          net_asset_scale: number | null
+          purchase_fee_tiers: Json | null
+          qdii_reason: string | null
+          redeem_available_delay: number | null
+          redeem_settle_delay: number | null
+          redemption_fee_tiers: Json | null
+          risk_level_code: string | null
+          sales_service_fee_rate: number | null
+          share_class: string | null
+          subscribe_status: string | null
+          tracking_index: string | null
+          tracking_index_code: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
+      acquire_confirm_run: {
+        Args: { p_lease_seconds?: number; p_trigger: string; p_worker: string }
+        Returns: string
+      }
+      confirm_buy_order: {
+        Args: {
+          p_fee: number
+          p_lease_seconds?: number
+          p_nav: number
+          p_net_amount: number
+          p_order_id: string
+          p_quantity: number
+          p_residual: number
+          p_worker: string
+        }
+        Returns: Json
+      }
+      confirm_sell_order: {
+        Args: {
+          p_lease_seconds?: number
+          p_nav: number
+          p_order_id: string
+          p_plan: Json
+          p_worker: string
+        }
+        Returns: Json
+      }
+      credit_money_fund_income_atomic: {
+        Args: {
+          p_fund_code: string
+          p_income: number
+          p_income_date: string
+          p_user_id: string
+        }
+        Returns: Json
+      }
       delete_auth_user: { Args: { p_user_id: string }; Returns: undefined }
+      finish_confirm_run: {
+        Args: {
+          p_counts: Json
+          p_error?: string
+          p_run_id: string
+          p_status: string
+        }
+        Returns: undefined
+      }
+      heartbeat_confirm_run: { Args: { p_run_id: string }; Returns: undefined }
+      mark_order_manual_review: {
+        Args: {
+          p_code: string
+          p_message: string
+          p_order_id: string
+          p_worker: string
+        }
+        Returns: Json
+      }
       match_chunks: {
         Args: {
           document_id?: string
@@ -960,10 +1485,97 @@ export type Database = {
           page_number: number
         }[]
       }
+      merge_fund_nav: {
+        Args: { rows: Json }
+        Returns: {
+          inserted: number
+          revised: number
+          updated: number
+        }[]
+      }
+      place_purchase_order: {
+        Args: {
+          p_accepted_date: string
+          p_amount: number
+          p_available_date: string
+          p_client_order_id?: string
+          p_confirm_date: string
+          p_estimated_nav: number
+          p_fee: number
+          p_fee_snapshot: Json
+          p_fund_code: string
+          p_fund_name: string
+          p_max_purchase_amount?: number
+          p_net_amount: number
+          p_user_id: string
+        }
+        Returns: Json
+      }
+      place_redeem_order: {
+        Args: {
+          p_accepted_date: string
+          p_client_order_id?: string
+          p_confirm_date: string
+          p_fee_snapshot: Json
+          p_fund_code: string
+          p_fund_name: string
+          p_quantity: number
+          p_settle_date: string
+          p_user_id: string
+        }
+        Returns: Json
+      }
       purge_user_data: { Args: { p_user_id: string }; Returns: undefined }
+      reap_stale_processing: {
+        Args: { p_lease_seconds?: number; p_max_attempts?: number }
+        Returns: Json
+      }
+      recalc_position_from_lots: {
+        Args: { p_fund_code: string; p_user_id: string }
+        Returns: undefined
+      }
+      reconcile_orders: { Args: never; Returns: Json }
+      reject_trade_order: {
+        Args: {
+          p_code: string
+          p_lease_seconds?: number
+          p_message: string
+          p_order_id: string
+          p_worker: string
+        }
+        Returns: Json
+      }
       replace_trading_calendar: {
         Args: { p_source: string; p_trading_days: string[] }
         Returns: Json
+      }
+      requeue_manual_review_order: {
+        Args: { p_admin: string; p_order_id: string; p_reason: string }
+        Returns: Json
+      }
+      settle_redeem_order: {
+        Args: { p_order_id: string; p_today: string; p_worker: string }
+        Returns: Json
+      }
+      upsert_fund_catalog: {
+        Args: { funds: Json; risk_profiles: Json; trade_rules: Json }
+        Returns: {
+          funds_written: number
+          risk_written: number
+          rules_written: number
+        }[]
+      }
+      upsert_fund_nav_state: {
+        Args: {
+          p_error?: string
+          p_fund_code: string
+          p_got_data?: boolean
+          p_history_start_date?: string
+          p_history_status?: string
+          p_latest_nav_date?: string
+          p_latest_unit_nav?: number
+        }
+        Returns: undefined
       }
     }
     Enums: {
