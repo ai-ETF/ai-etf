@@ -21,6 +21,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
 
+from server.api.admin import require_admin_token
 from server.auth import get_current_user
 from server.models.schemas import (
     PurchaseRequest,
@@ -35,6 +36,7 @@ from server.models.schemas import (
     TradeFlowItem,
     SnapshotResponse,
     SnapshotData,
+    ConfirmRunResponse,
     DailyReturnResponse,
     DailyReturnItem,
     AutoInvestConfigRequest,
@@ -63,13 +65,17 @@ def _get_test_user(x_user_id: Optional[str] = Header(None)) -> str:
 async def apply_purchase(
     req: PurchaseRequest,
     current_user: str = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(
+        default=None, alias="Idempotency-Key",
+        description="下单幂等键；重复提交返回既有订单，不重复冻结资金",
+    ),
 ):
     """
     场外基金按金额申购（需 JWT 认证）
 
-    - 15:00 前提交：立即成交，按当日净值确认
-    - 15:00 后提交：pending，资金冻结，下一交易日确认
-    - 申购费按外扣法计算
+    - 15:00 前提交：当日为受理日（T），按 T 日净值确认，份额 T+N 到账
+    - 15:00 后提交：pending，资金立即冻结，下一交易日为受理日
+    - 申购费按外扣法计算；`Idempotency-Key` 传入时同一键只建一单
     """
     svc = PortfolioService()
     price = Decimal(str(req.price)) if req.price is not None else None
@@ -78,6 +84,7 @@ async def apply_purchase(
         fund_code=req.fund_code,
         amount=Decimal(str(req.amount)),
         price=price,
+        client_order_id=idempotency_key,
     )
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
@@ -94,12 +101,17 @@ async def apply_purchase(
 async def apply_redeem(
     req: RedeemRequest,
     current_user: str = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(
+        default=None, alias="Idempotency-Key",
+        description="赎回幂等键；重复提交返回既有订单，不重复占份额",
+    ),
 ):
     """
     场外基金按份额赎回（需 JWT 认证）
 
-    - 赎回费按持有天数档位计算
-    - 赎回后持仓清零则删除记录
+    - 按 FIFO 从可赎回批次卖出，赎回费逐段按持有天数计算
+    - 有在途申购时不可赎回（pending_purchase）
+    - 到账日 = 受理日 T + 基金到账延迟交易日
     """
     svc = PortfolioService()
     price = Decimal(str(req.price)) if req.price is not None else None
@@ -108,6 +120,7 @@ async def apply_redeem(
         fund_code=req.fund_code,
         quantity=Decimal(str(req.quantity)),
         price=price,
+        client_order_id=idempotency_key,
     )
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
@@ -189,15 +202,16 @@ async def take_snapshot(
     )
 
 
-@router.post("/confirm-pending", response_model=dict)
-async def confirm_pending(current_user: str = Depends(get_current_user)):
-    """手动触发 pending 订单确认（需 JWT 认证）。
+@router.post("/confirm-pending", response_model=ConfirmRunResponse)
+async def confirm_pending(_: None = Depends(require_admin_token)):
+    """手动触发一轮 pending 订单确认（需 `X-Admin-Token`，未配置时 503）。
 
-    确认到今天为止；取不到确认日净值的订单保持 pending（返回值里的 `skipped`）。
+    扫描条件：`status='pending' AND confirm_date <= today`。取不到 T 日净值的订单
+    保持 pending（计入 `skipped_nav`）；已有批次在跑时返回 `status='busy'`（HTTP 200，
+    不是失败）。响应字段见 `ConfirmRunResponse`。
     """
     svc = PortfolioService()
-    result = svc.confirm_pending_orders()
-    return result
+    return svc.confirm_pending_orders()
 
 
 @router.get("/daily-returns", response_model=DailyReturnResponse)

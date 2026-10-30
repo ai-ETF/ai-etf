@@ -10,7 +10,7 @@ import json
 import sys
 import types
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -412,6 +412,14 @@ class FakeQuery:
         self._filters.append(("in", col, list(vals)))
         return self
 
+    def gt(self, col, val):
+        self._filters.append(("gt", col, val))
+        return self
+
+    def gte(self, col, val):
+        self._filters.append(("gte", col, val))
+        return self
+
     def order(self, *_args, **_kwargs):
         return self
 
@@ -471,6 +479,10 @@ class FakeQuery:
                 return False
             if op == "in" and rv not in val:
                 return False
+            if op == "gt" and (rv is None or rv <= val):
+                return False
+            if op == "gte" and (rv is None or rv < val):
+                return False
         return True
 
     def _check(self, data):
@@ -483,15 +495,36 @@ class FakeQuery:
                 )
 
 
+class FakeRpc:
+    """rpc() 链式替身：记录调用参数，返回脚本化的 jsonb 结果。"""
+
+    def __init__(self, client, name, params):
+        self._c = client
+        self._name = name
+        self._params = params
+
+    def execute(self):
+        self._c.rpc_calls.append((self._name, dict(self._params or {})))
+        payload = self._c.rpc_responses.get(self._name, {})
+        if callable(payload):
+            payload = payload(self._params)
+        return FakeResult(payload)
+
+
 class FakeClient:
     """内存多表替身：rows 为 {表名: [行 dict]}，不产生任何网络/DB IO。"""
 
     def __init__(self, rows=None, error=None):
         self.rows = rows or {}
         self.error = error
+        self.rpc_calls = []
+        self.rpc_responses = {}
 
     def table(self, name):
         return FakeQuery(self, name)
+
+    def rpc(self, name, params=None):
+        return FakeRpc(self, name, params)
 
 
 # ==================== 时间冻结 / urllib 替身 ====================
@@ -899,15 +932,20 @@ def test_auto_invest_可投资_申购并确认(monkeypatch):
     assert calls == [("purchase", Decimal("40000")), "confirm"]
 
 
-# ==================== apply_purchase：申购 ====================
+# ==================== apply_purchase / apply_redeem：下单 RPC 映射 ====================
+#
+# 资金冻结、单日额度、可赎份额、幂等都由 PostgreSQL RPC 在事务内完成
+# （行为用例见《订单确认-实现方案》§5.2），服务层只负责：
+#   业务前置校验（白名单/ETF/申购状态/金额上下限）→ 算日期与费用 → 调 RPC → 映射结果。
 
 RULE = {
     "fund_code": "110020",
     "fund_name": "易方达沪深300ETF联接A",
     "fund_type": "of",
     "confirm_delay": 1,
-    "min_purchase_amount": 10.0,
     "redeem_settle_delay": 3,
+    "redeem_available_delay": 0,
+    "min_purchase_amount": 10.0,
 }
 
 
@@ -924,17 +962,21 @@ class FakeFeeSvc:
         return {code: self.rule for code in fund_codes}
 
 
-def _patch_purchase_common(monkeypatch, rule, account, risk_warning=None):
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(rule))
+def _patch_purchase_common(monkeypatch, rule=None, account=None):
+    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(rule or RULE))
     monkeypatch.setattr(portfolio_service, "_beijing_now", lambda: datetime(2026, 1, 5, 10, 0))
     monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    monkeypatch.setattr(PortfolioService, "_next_trading_day", staticmethod(lambda d: date(2026, 1, 6)))
+    monkeypatch.setattr(PortfolioService, "_next_trading_day",
+                        staticmethod(lambda d: d + timedelta(days=1)))
     _patch_latest_nav(monkeypatch, {}, default=Decimal("1.5"))
     monkeypatch.setattr(PortfolioService, "_calc_purchase_fee",
-                        lambda self, code, amt, rule=None: {"fee": Decimal("1.5"), "net_amount": Decimal("998.5")})
+                        lambda self, code, amt, rule=None: {"fee": Decimal("1.5"),
+                                                            "net_amount": Decimal("998.5")})
     monkeypatch.setattr(PortfolioService, "_get_fund_name", lambda self, code, rule=None: "易方达")
-    monkeypatch.setattr(PortfolioService, "_get_risk_warning", lambda self, uid, code: risk_warning)
-    monkeypatch.setattr(PortfolioService, "_ensure_account", lambda self, uid: account)
+    monkeypatch.setattr(PortfolioService, "_get_risk_warning", lambda self, uid, code: None)
+    monkeypatch.setattr(PortfolioService, "get_account",
+                        lambda self, uid: account if account is not None
+                        else {"cash": 100000.0, "frozen_cash": 0})
 
 
 def test_申购_不支持基金(monkeypatch):
@@ -945,615 +987,176 @@ def test_申购_不支持基金(monkeypatch):
 
 
 def test_申购_场内ETF拦截(monkeypatch):
-    etf_rule = dict(RULE, fund_type="etf")
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(etf_rule))
+    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(dict(RULE, fund_type="etf")))
     result = PortfolioService().apply_purchase("u1", "510300", Decimal("1000"))
     assert result["success"] is False
     assert "场内 ETF" in result["message"]
 
 
-def test_申购_余额不足(monkeypatch):
-    account = {"id": "a1", "user_id": "u1", "cash": 500.0, "frozen_cash": 0}
-    _patch_purchase_common(monkeypatch, RULE, account)
+@pytest.mark.parametrize("状态", ["暂停申购", "封闭期"])
+def test_申购_不可申购状态被拒且不调RPC(monkeypatch, 状态):
+    _patch_purchase_common(monkeypatch, rule=dict(RULE, subscribe_status=状态))
     svc = PortfolioService()
-    svc._client = FakeClient({"accounts": [dict(account)]})
+    svc._client = FakeClient()
     result = svc.apply_purchase("u1", "110020", Decimal("1000"))
-    assert result["success"] is False
-    assert "可用现金不足" in result["message"]
-
-
-def test_申购_正常_冻结资金并写订单(monkeypatch):
-    account = {"id": "a1", "user_id": "u1", "cash": 100000.0, "frozen_cash": 0}
-    _patch_purchase_common(monkeypatch, RULE, account)
-    svc = PortfolioService()
-    svc._client = FakeClient({"accounts": [dict(account)]})
-    result = svc.apply_purchase("u1", "110020", Decimal("1000"))
-    assert result["success"] is True
-    assert result["data"]["status"] == "pending"
-    assert result["data"]["cash_remaining"] == 99000.0
-    assert result["data"]["frozen_cash"] == 1000.0
-    assert svc._client.rows["accounts"][0]["cash"] == 99000.0
-    assert svc._client.rows["accounts"][0]["frozen_cash"] == 1000.0
-    assert len(svc._client.rows["trade_orders"]) == 1
-
-
-def test_申购_携带风险提示(monkeypatch):
-    account = {"id": "a1", "user_id": "u1", "cash": 100000.0, "frozen_cash": 0}
-    _patch_purchase_common(monkeypatch, RULE, account, risk_warning={"level": "info"})
-    svc = PortfolioService()
-    svc._client = FakeClient({"accounts": [dict(account)]})
-    result = svc.apply_purchase("u1", "110020", Decimal("1000"))
-    assert result["success"] is True
-    assert result["risk_warning"] == {"level": "info"}
-
-
-# ==================== apply_purchase：单日累计申购上限（限大额基金） ====================
-
-
-def _限大额服务(monkeypatch, 既有订单=None, 账户现金=100000.0):
-    """构造带上限规则的 PortfolioService + 内存客户端，既有订单进 trade_orders。
-
-    时间被 _patch_purchase_common 冻结在 2026-01-05 10:00（交易日盘中），
-    confirm_delay=1 ⇒ T 日 = 2026-01-05，本次订单确认日 = 2026-01-06。
-    """
-    rule = dict(RULE, max_purchase_amount=1000.0)
-    account = {"id": "a1", "user_id": "u1", "cash": 账户现金, "frozen_cash": 0}
-    _patch_purchase_common(monkeypatch, rule, account)
-    svc = PortfolioService()
-    svc._client = FakeClient({
-        "accounts": [dict(account)],
-        "trade_orders": list(既有订单 or []),
-    })
-    return svc
-
-
-def _已有订单(金额, status="pending", confirm_date="2026-01-06",
-              fund_code="012348", direction="buy", user_id="u1"):
-    """构造一条 trade_orders 行（字段名与 Supabase 返回一致）。"""
-    return {
-        "id": f"o-{fund_code}-{金额}-{status}-{confirm_date}",
-        "user_id": user_id, "fund_code": fund_code, "direction": direction,
-        "status": status, "amount": 金额, "confirm_date": confirm_date,
-    }
-
-
-# ---------- 单笔维度 ----------
-
-
-def test_申购_单笔即超上限被拒(monkeypatch):
-    """「限大额」基金（如 012348 天弘恒生科技ETF联接A 限购 1000 元）下 5000 元单应被拒。
-
-    该拦截发生在取净值/冻结资金之前 —— 被拒的单不产生任何副作用。
-    """
-    svc = _限大额服务(monkeypatch)
-    result = svc.apply_purchase("u1", "012348", Decimal("5000"))
-    assert result["success"] is False
-    assert "超过该基金单日累计申购上限" in result["message"]
-
-
-def test_申购_恰好等于上限时放行(monkeypatch):
-    """边界：规则是「累计不超过」，金额 == 上限应放行（与最低金额的 < 语义相反）。"""
-    svc = _限大额服务(monkeypatch)
-    assert svc.apply_purchase("u1", "012348", Decimal("1000"))["success"] is True
-
-
-def test_申购_未超上限可成交(monkeypatch):
-    svc = _限大额服务(monkeypatch)
-    assert svc.apply_purchase("u1", "012348", Decimal("500"))["success"] is True
-
-
-def test_申购_上限为空表示无限额(monkeypatch):
-    """开放申购基金该字段为 NULL，不应触发任何上限拦截（且无需查历史订单）。"""
-    account = {"id": "a1", "user_id": "u1", "cash": 10000000.0, "frozen_cash": 0}
-    _patch_purchase_common(monkeypatch, dict(RULE, max_purchase_amount=None), account)
-    svc = PortfolioService()
-    svc._client = FakeClient({"accounts": [dict(account)]})
-    assert svc.apply_purchase("u1", "110020", Decimal("1000000"))["success"] is True
-
-
-# ---------- 「同一 T 日累计」维度（堵拆单绕过） ----------
-
-
-def test_申购_同一交易日多笔累计超上限被拒(monkeypatch):
-    """核心：已申购 600，再下 500 —— 单笔都没超 1000，合计 1100 必须被拒。"""
-    svc = _限大额服务(monkeypatch, 既有订单=[_已有订单(600.0)])
-
-    result = svc.apply_purchase("u1", "012348", Decimal("500"))
-
-    assert result["success"] is False
-    assert "本交易日已申购 600.00 元" in result["message"]
-    assert "超过该基金单日累计申购上限" in result["message"]
-
-
-def test_申购_同一交易日累计刚好用满放行(monkeypatch):
-    """边界：已用 600 + 本次 400 == 1000，闭区间放行。"""
-    svc = _限大额服务(monkeypatch, 既有订单=[_已有订单(600.0)])
-    assert svc.apply_purchase("u1", "012348", Decimal("400"))["success"] is True
-
-
-def test_申购_已完成的订单也计入累计(monkeypatch):
-    """completed 是已受理的申请，必须占用额度。"""
-    svc = _限大额服务(monkeypatch, 既有订单=[_已有订单(600.0, status="completed")])
-    assert svc.apply_purchase("u1", "012348", Decimal("500"))["success"] is False
-
-
-def test_申购_已撤销与已拒订单不占用额度(monkeypatch):
-    """撤销/被拒的申请不占用额度，不应把用户额度锁死。"""
-    svc = _限大额服务(monkeypatch, 既有订单=[
-        _已有订单(900.0, status="cancelled"),
-        _已有订单(900.0, status="rejected"),
-    ])
-    assert svc.apply_purchase("u1", "012348", Decimal("1000"))["success"] is True
-
-
-def test_申购_跨交易日的订单不计入(monkeypatch):
-    """按 T 日分组，不按自然日：确认日不同的订单属于不同 T 日，不累计。
-
-    这正是节假日场景的保护 —— 若按 created_at 自然日分组，长假多笔会被拆散。
-    """
-    svc = _限大额服务(monkeypatch, 既有订单=[_已有订单(900.0, confirm_date="2026-01-07")])
-    assert svc.apply_purchase("u1", "012348", Decimal("900"))["success"] is True
-
-
-def test_申购_其他基金与其他用户的订单不计入(monkeypatch):
-    """额度按「用户 + 基金 + T 日」三者限定。"""
-    svc = _限大额服务(monkeypatch, 既有订单=[
-        _已有订单(900.0, fund_code="110020"),
-        _已有订单(900.0, user_id="u2"),
-        _已有订单(900.0, direction="sell"),
-    ])
-    assert svc.apply_purchase("u1", "012348", Decimal("1000"))["success"] is True
-
-
-# ==================== apply_purchase：申购状态闸门 ====================
-
-
-def _状态服务(monkeypatch, **状态字段):
-    """RULE + 指定状态字段的 PortfolioService（内存客户端，含足额账户）。"""
-    account = {"id": "a1", "user_id": "u1", "cash": 100000.0, "frozen_cash": 0}
-    _patch_purchase_common(monkeypatch, dict(RULE, **状态字段), account)
-    svc = PortfolioService()
-    svc._client = FakeClient({"accounts": [dict(account)]})
-    return svc
-
-
-@pytest.mark.parametrize("状态", ["暂停申购", "封闭期", "认购期"])
-def test_申购_不可申购状态被拒(monkeypatch, 状态):
-    """白名单里有它 ≠ 能买：同步会把真实状态落库，由这里把关。
-
-    提示语要说明「仍可赎回」—— 否则持有者会以为连卖都卖不掉。
-    """
-    result = _状态服务(monkeypatch, subscribe_status=状态).apply_purchase(
-        "u1", "110020", Decimal("1000"))
-
     assert result["success"] is False
     assert 状态 in result["message"]
-    assert "仍可赎回" in result["message"]
-
-
-@pytest.mark.parametrize("状态", ["开放申购", "限大额"])
-def test_申购_可申购状态放行(monkeypatch, 状态):
-    svc = _状态服务(monkeypatch, subscribe_status=状态, max_purchase_amount=100000.0)
-    assert svc.apply_purchase("u1", "110020", Decimal("1000"))["success"] is True
-
-
-def test_申购_存量行状态为空按开放申购放行(monkeypatch):
-    """迁移前的存量行没有状态字段（NULL），必须继续可买，不能被新闸门误伤。"""
-    svc = _状态服务(monkeypatch, subscribe_status=None)
-    assert svc.apply_purchase("u1", "110020", Decimal("1000"))["success"] is True
+    assert svc._client.rpc_calls == []
 
 
 def test_申购_限大额但上限为空被拒(monkeypatch):
-    """同步时 MAXSG 解析失败：状态说限大额、上限却是 NULL。
-
-    NULL 不能按「无限额」解释 —— 那等于把一只限购基金当成随便买，
-    宁可提示限额信息不可用（需人工干预，见同步日志与库内查询）。
-    """
-    result = _状态服务(monkeypatch, subscribe_status="限大额",
-                       max_purchase_amount=None).apply_purchase(
-        "u1", "110020", Decimal("1000"))
-
+    rule = dict(RULE, subscribe_status="限大额", max_purchase_amount=None)
+    _patch_purchase_common(monkeypatch, rule=rule)
+    svc = PortfolioService()
+    svc._client = FakeClient()
+    result = svc.apply_purchase("u1", "110020", Decimal("1000"))
     assert result["success"] is False
     assert "限额信息暂不可用" in result["message"]
+    assert svc._client.rpc_calls == []
 
 
-def test_申购_状态闸门先于限额校验(monkeypatch):
-    """暂停申购的基金即使带上限值也直接拒，不该走到累计额度查询。"""
-    svc = _状态服务(monkeypatch, subscribe_status="暂停申购", max_purchase_amount=1000.0)
-    assert svc.apply_purchase("u1", "110020", Decimal("1000"))["success"] is False
+def test_申购_低于最低金额被拒(monkeypatch):
+    _patch_purchase_common(monkeypatch)
+    svc = PortfolioService()
+    svc._client = FakeClient()
+    result = svc.apply_purchase("u1", "110020", Decimal("5"))
+    assert result["success"] is False
+    assert "最低申购金额" in result["message"]
 
 
-# ==================== apply_redeem：赎回 ====================
+def test_申购_成功_参数与日期口径(monkeypatch):
+    """T 日 = 受理日（也是成交净值日），确认日 = T+confirm_delay。"""
+    _patch_purchase_common(monkeypatch, rule=dict(RULE, max_purchase_amount=5000.0))
+    svc = PortfolioService()
+    svc._client = FakeClient()
+    svc._client.rpc_responses["place_purchase_order"] = {
+        "result": "placed", "order": {"id": "o1", "status": "pending"},
+    }
+    result = svc.apply_purchase("u1", "110020", Decimal("1000"), client_order_id="ck-1")
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["trade_date"] == "2026-01-05"
+    assert data["confirm_date"] == "2026-01-06"
+    assert data["available_date"] == "2026-01-06"  # redeem_available_delay=0
+    assert data["order_id"] == "o1" and data["status"] == "pending"
+    assert data["cash_remaining"] == 100000.0 and data["frozen_cash"] == 0
+
+    name, params = svc._client.rpc_calls[0]
+    assert name == "place_purchase_order"
+    assert params["p_amount"] == 1000.0 and params["p_fee"] == 1.5
+    assert params["p_net_amount"] == 998.5
+    assert params["p_accepted_date"] == "2026-01-05"
+    assert params["p_max_purchase_amount"] == 5000.0
+    assert params["p_client_order_id"] == "ck-1"
+    assert params["p_fee_snapshot"]["confirm_delay"] == 1
 
 
-def _patch_redeem_common(monkeypatch, rule, position, pending_buys=(), pending_sells=()):
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(rule))
+def test_申购_幂等命中返回既有订单(monkeypatch):
+    _patch_purchase_common(monkeypatch)
+    svc = PortfolioService()
+    svc._client = FakeClient()
+    svc._client.rpc_responses["place_purchase_order"] = {
+        "result": "existing", "order": {"id": "o9", "status": "pending"},
+    }
+    result = svc.apply_purchase("u1", "110020", Decimal("1000"), client_order_id="ck-1")
+    assert result["success"] is True
+    assert "重复提交" in result["message"] and "o9" in result["message"]
+
+
+@pytest.mark.parametrize("rpc_result,片段", [
+    ("insufficient_cash", "可用现金不足"),
+    ("limit_exceeded", "单日累计申购上限"),
+    ("idempotency_conflict", "幂等键"),
+])
+def test_申购_RPC失败结果映射(monkeypatch, rpc_result, 片段):
+    _patch_purchase_common(monkeypatch)
+    svc = PortfolioService()
+    svc._client = FakeClient()
+    svc._client.rpc_responses["place_purchase_order"] = {
+        "result": rpc_result, "cash": 100.0, "used": 900.0, "limit": 1000.0,
+    }
+    result = svc.apply_purchase("u1", "110020", Decimal("1000"))
+    assert result["success"] is False
+    assert 片段 in result["message"]
+
+
+def _patch_redeem_common(monkeypatch, rule=None):
+    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(rule or RULE))
     monkeypatch.setattr(portfolio_service, "_beijing_now", lambda: datetime(2026, 1, 5, 10, 0))
     monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    monkeypatch.setattr(PortfolioService, "_next_trading_day", staticmethod(lambda d: date(2026, 1, 6)))
+    monkeypatch.setattr(PortfolioService, "_next_trading_day",
+                        staticmethod(lambda d: d + timedelta(days=1)))
     monkeypatch.setattr(PortfolioService, "_get_fund_name", lambda self, code, rule=None: "易方达")
-    monkeypatch.setattr(PortfolioService, "_get_position", lambda self, uid, code: position)
 
 
-def test_赎回_不支持基金(monkeypatch):
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(None))
-    result = PortfolioService().apply_redeem("u1", "999999", Decimal("100"))
-    assert result["success"] is False
-    assert "暂不支持基金" in result["message"]
-
-
-def test_赎回_未持有基金(monkeypatch):
-    _patch_redeem_common(monkeypatch, RULE, position=None)
+def test_赎回_成功_到账日与RPC参数(monkeypatch):
+    _patch_redeem_common(monkeypatch)
     svc = PortfolioService()
     svc._client = FakeClient()
-    result = svc.apply_redeem("u1", "110020", Decimal("100"))
-    assert result["success"] is False
-    assert "未持有基金" in result["message"]
-
-
-def test_赎回_份额不足(monkeypatch):
-    position = {"id": "p1", "user_id": "u1", "fund_code": "110020", "quantity": 50, "cost_price": 1.5}
-    _patch_redeem_common(monkeypatch, RULE, position)
-    svc = PortfolioService()
-    svc._client = FakeClient()
-    result = svc.apply_redeem("u1", "110020", Decimal("100"))
-    assert result["success"] is False
-    assert "可赎份额不足" in result["message"]
-
-
-def test_赎回_存在待确认申购_拒绝(monkeypatch):
-    position = {"id": "p1", "user_id": "u1", "fund_code": "110020", "quantity": 200, "cost_price": 1.5}
-    _patch_redeem_common(monkeypatch, RULE, position)
-    svc = PortfolioService()
-    svc._client = FakeClient({"trade_orders": [
-        {"id": "o1", "user_id": "u1", "fund_code": "110020", "direction": "buy", "status": "pending"},
-    ]})
-    result = svc.apply_redeem("u1", "110020", Decimal("100"))
-    assert result["success"] is False
-    assert "待确认的申购" in result["message"]
-
-
-def test_赎回_正常_写卖出订单(monkeypatch):
-    position = {"id": "p1", "user_id": "u1", "fund_code": "110020", "quantity": 200, "cost_price": 1.5}
-    _patch_redeem_common(monkeypatch, RULE, position)
-    svc = PortfolioService()
-    svc._client = FakeClient()
-    result = svc.apply_redeem("u1", "110020", Decimal("100"))
-    assert result["success"] is True
-    assert result["data"]["status"] == "pending"
-    assert len(svc._client.rows["trade_orders"]) == 1
-    assert svc._client.rows["trade_orders"][0]["direction"] == "sell"
-
-
-@pytest.mark.parametrize("状态", ["暂停申购", "封闭期"])
-def test_赎回_不可申购状态仍可赎回(monkeypatch, 状态):
-    """申购状态只管「买」：已持有的份额必须能退出，否则钱被锁死。"""
-    position = {"id": "p1", "user_id": "u1", "fund_code": "110020", "quantity": 200, "cost_price": 1.5}
-    _patch_redeem_common(monkeypatch, dict(RULE, subscribe_status=状态), position)
-    svc = PortfolioService()
-    svc._client = FakeClient()
-    assert svc.apply_redeem("u1", "110020", Decimal("100"))["success"] is True
-
-
-# ==================== _confirm_one_order：单笔订单确认 ====================
-
-BUY_ORDER = {
-    "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "易方达",
-    "direction": "buy", "amount": 1000.0, "price": 1.5, "quantity": 0.0, "fee": 1.5,
-    "confirm_date": "2026-01-06",
-}
-
-SELL_ORDER = {
-    "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "易方达",
-    "direction": "sell", "amount": 0.0, "price": 0.0, "quantity": 100.0, "fee": 0.0,
-    "confirm_date": "2026-01-06",
-}
-
-
-def test_确认_买入_建仓并解冻(monkeypatch):
-    _patch_confirm_nav(monkeypatch, nav="1.5")
-    monkeypatch.setattr(PortfolioService, "_calc_purchase_fee",
-                        lambda self, code, amt, rule=None: {"fee": Decimal("1.5"), "net_amount": Decimal("998.5")})
-    monkeypatch.setattr(PortfolioService, "_next_trading_day", staticmethod(lambda d: date(2026, 1, 8)))
-    svc = PortfolioService()
-    svc._client = FakeClient({
-        "accounts": [{"id": "a1", "user_id": "u1", "cash": 99000.0, "frozen_cash": 1000.0}],
-        "positions": [],
-        "trade_orders": [dict(BUY_ORDER)],
-    })
-    svc._confirm_one_order(dict(BUY_ORDER), date(2026, 1, 6), rule=RULE)
-    assert svc._client.rows["accounts"][0]["frozen_cash"] == 0.0
-    assert len(svc._client.rows["positions"]) == 1
-    assert svc._client.rows["positions"][0]["quantity"] == 665.67
-    assert len(svc._client.rows["trade_flow"]) == 1
-    assert svc._client.rows["trade_orders"][0]["status"] == "completed"
-
-
-def test_确认_买入_账户不存在_抛错(monkeypatch):
-    _patch_confirm_nav(monkeypatch, nav="1.5")
-    svc = PortfolioService()
-    svc._client = FakeClient({"accounts": []})
-    with pytest.raises(RuntimeError, match="账户不存在"):
-        svc._confirm_one_order(dict(BUY_ORDER), date(2026, 1, 6), rule=RULE)
-
-
-def test_确认_卖出_减仓并回款(monkeypatch):
-    _patch_confirm_nav(monkeypatch, nav="1.5")
-    monkeypatch.setattr(PortfolioService, "_calc_redemption_fee", lambda self, code, amt, days, rule=None: Decimal("10.0"))
-    svc = PortfolioService()
-    svc._client = FakeClient({
-        "accounts": [{"id": "a1", "user_id": "u1", "cash": 100000.0, "frozen_cash": 0}],
-        "positions": [{"id": "p1", "user_id": "u1", "fund_code": "110020", "quantity": 200, "cost_price": 1.5, "confirm_date": "2026-01-01"}],
-        "trade_orders": [dict(SELL_ORDER)],
-    })
-    svc._confirm_one_order(dict(SELL_ORDER), date(2026, 1, 6), rule=RULE)
-    assert svc._client.rows["positions"][0]["quantity"] == 100.0
-    assert svc._client.rows["accounts"][0]["cash"] == 100140.0
-    assert len(svc._client.rows["trade_flow"]) == 1
-    assert svc._client.rows["trade_orders"][0]["status"] == "completed"
-
-
-def test_确认_卖出_持仓不存在_抛错(monkeypatch):
-    svc = PortfolioService()
-    svc._client = FakeClient({"positions": []})
-    with pytest.raises(RuntimeError, match="持仓"):
-        svc._confirm_one_order(dict(SELL_ORDER), date(2026, 1, 6), rule=RULE)
-
-
-def test_确认_卖出_费率缺失_拒绝确认(monkeypatch):
-    _patch_confirm_nav(monkeypatch, nav="1.5")
-    monkeypatch.setattr(PortfolioService, "_calc_redemption_fee", lambda self, code, amt, days, rule=None: None)
-    svc = PortfolioService()
-    svc._client = FakeClient({
-        "positions": [{"id": "p1", "user_id": "u1", "fund_code": "110020", "quantity": 200, "cost_price": 1.5, "confirm_date": "2026-01-01"}],
-    })
-    with pytest.raises(RuntimeError, match="缺少赎回费率"):
-        svc._confirm_one_order(dict(SELL_ORDER), date(2026, 1, 6), rule=RULE)
-
-
-# ==================== confirm_pending_orders：批量确认 ====================
-
-
-def test_确认批量_数据库不可用(monkeypatch):
-    monkeypatch.setattr("server.storage.supabase_client.get_supabase", lambda: None)
-    result = PortfolioService().confirm_pending_orders()
-    assert result["status"] == "error"
-
-
-def test_确认批量_无待确认订单(monkeypatch):
-    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
-    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    svc = PortfolioService()
-    svc._client = FakeClient({"trade_orders": []})
-    result = svc.confirm_pending_orders()
-    assert result["status"] == "ok"
-    assert result["processed"] == 0
-
-
-def test_确认批量_全部确认成功(monkeypatch):
-    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
-    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    confirmed = []
-    monkeypatch.setattr(PortfolioService, "_confirm_one_order",
-                        lambda self, order, today, rule=None: confirmed.append(order["id"]))
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
-    svc = PortfolioService()
-    svc._client = FakeClient({"trade_orders": [
-        {"id": "o1", "user_id": "u1", "fund_code": "110020", "status": "pending", "confirm_date": "2026-01-06"},
-        {"id": "o2", "user_id": "u2", "fund_code": "110020", "status": "pending", "confirm_date": "2026-01-05"},
-    ]})
-    result = svc.confirm_pending_orders()
-    assert result["processed"] == 2
-    assert sorted(confirmed) == ["o1", "o2"]
-
-
-def test_确认批量_失败订单标记为rejected并记录原因(monkeypatch):
-    """确认失败必须落到 CHECK 约束内的取值，否则 UPDATE 会被数据库拒绝。"""
-    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
-    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-
-    def _boom(self, order, today, rule=None):
-        raise RuntimeError("confirm fail")
-
-    monkeypatch.setattr(PortfolioService, "_confirm_one_order", _boom)
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
-    svc = PortfolioService()
-    svc._client = FakeClient({"trade_orders": [
-        {"id": "o1", "user_id": "u1", "fund_code": "110020", "direction": "sell",
-         "status": "pending", "confirm_date": "2026-01-05"},
-    ]})
-    result = svc.confirm_pending_orders()
-    assert result["processed"] == 1
-    order = svc._client.rows["trade_orders"][0]
-    assert order["status"] == "rejected"
-    assert "confirm fail" in order["reject_reason"]
-
-
-def test_确认批量_状态取值必须落在CHECK约束内():
-    """守卫：非法状态（如历史上的 "failed"）会被替身拒绝 —— 见 _CHECK_CONSTRAINTS。
-
-    替身里的取值列表是手写的、镜像基线迁移 `trade_orders_status_check`，
-    这里再和服务里的 `TRADE_ORDER_STATUSES` 对一次，防止两处声明各自漂移。
-    """
-    assert (set(_CHECK_CONSTRAINTS["trade_orders"]["status"])
-            == set(PortfolioService.TRADE_ORDER_STATUSES))
-
-    svc = PortfolioService()
-    svc._client = FakeClient({"trade_orders": []})
-    with pytest.raises(_CheckViolation):
-        svc.client.table("trade_orders").update({"status": "failed"}).eq("id", "o1").execute()
-    # 约束内的取值正常通过
-    svc.client.table("trade_orders").update({"status": "rejected"}).eq("id", "o1").execute()
-
-
-def test_确认批量_落终态写库失败不静默吞掉(caplog):
-    """标记 rejected 的写库本身失败时，必须留下 ERROR 日志而不是 pass 掉。
-
-    这正是这个 bug 能藏起来的原因：写库被数据库拒绝，异常却没人看得见。
-    """
-    svc = PortfolioService()
-    svc._client = FakeClient({"trade_orders": []})
-    svc._client.error = RuntimeError("db down")
-
-    with caplog.at_level("ERROR"):
-        svc._reject_order({"id": "o1", "direction": "buy"}, RuntimeError("confirm fail"))
-
-    assert "db down" in caplog.text
-    assert "仍为 pending" in caplog.text
-
-
-# ---------- 买单确认失败 → 本金退回 ----------
-
-
-def _买单失败场景(monkeypatch, cash=9000.0, frozen=1000.0, amount=1000.0):
-    """构造一笔已冻结资金的 pending 买单，并让确认过程在建仓之后抛错。"""
-    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
-    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    monkeypatch.setattr(portfolio_service, "_now_iso", lambda: "2026-01-06T15:37:00+08:00")
-    _patch_confirm_nav(monkeypatch, nav="1.5000")
-    monkeypatch.setattr(portfolio_service.PortfolioService, "_write_trade_flow",
-                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("流水写入失败")))
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
-
-    order = {
-        "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
-        "direction": "buy", "status": "pending", "confirm_date": "2026-01-06",
-        "amount": amount, "price": 0.0, "quantity": 0.0, "fee": 0.0,
+    svc._client.rpc_responses["place_redeem_order"] = {
+        "result": "placed", "order": {"id": "s1", "status": "pending"},
     }
+    result = svc.apply_redeem("u1", "110020", Decimal("100"), client_order_id="rk-1")
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["trade_date"] == "2026-01-05"
+    assert data["settle_date"] == "2026-01-08"  # T + 3 个交易日
+    assert data["order_id"] == "s1"
+
+    name, params = svc._client.rpc_calls[0]
+    assert name == "place_redeem_order"
+    assert params["p_quantity"] == 100.0
+    assert params["p_client_order_id"] == "rk-1"
+    assert params["p_settle_date"] == "2026-01-08"
+
+
+@pytest.mark.parametrize("rpc_result,片段", [
+    ("pending_purchase", "存在待确认的申购订单"),
+    ("insufficient_shares", "可赎份额不足"),
+    ("idempotency_conflict", "幂等键"),
+])
+def test_赎回_RPC失败结果映射(monkeypatch, rpc_result, 片段):
+    _patch_redeem_common(monkeypatch)
     svc = PortfolioService()
-    svc._client = FakeClient({
-        "trade_orders": [order],
-        "accounts": [{"id": "a1", "user_id": "u1", "cash": cash, "frozen_cash": frozen}],
-        "positions": [],
-    })
-    return svc
+    svc._client = FakeClient()
+    svc._client.rpc_responses["place_redeem_order"] = {"result": rpc_result, "available": -10}
+    result = svc.apply_redeem("u1", "110020", Decimal("100"))
+    assert result["success"] is False
+    assert 片段 in result["message"]
 
 
-def test_买单确认失败_订单落rejected且本金退回现金(monkeypatch):
-    svc = _买单失败场景(monkeypatch)
-    result = svc.confirm_pending_orders()
-
-    assert result["processed"] == 1
-    assert svc._client.rows["trade_orders"][0]["status"] == "rejected"
-    account = svc._client.rows["accounts"][0]
-    assert account["cash"] == 10000.0      # 9000 + 退回的 1000
-    assert account["frozen_cash"] == 0.0   # 解冻后已无冻结
-    assert svc._client.rows["positions"] == []  # 未建仓
-
-
-def test_买单确认失败_冻结已解冻时退款只加现金(monkeypatch):
-    """失败点在建仓之前（费率计算抛错）时，退款只加现金，不再二次核减冻结。
-
-    解冻排在最前面（净值判定之后），所以走到退款时这笔钱已经从 frozen 划走；
-    再减一次会扣到同账户其他挂单的冻结额。
-    """
-    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
-    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    _patch_confirm_nav(monkeypatch, nav="1.5")
-    monkeypatch.setattr(
-        PortfolioService, "_calc_purchase_fee",
-        lambda self, code, amt, rule=None: (_ for _ in ()).throw(RuntimeError("费率计算失败")),
-    )
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
-
+def test_赎回_幂等命中返回既有订单(monkeypatch):
+    _patch_redeem_common(monkeypatch)
     svc = PortfolioService()
-    svc._client = FakeClient({
-        "trade_orders": [{
-            "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
-            "direction": "buy", "status": "pending", "confirm_date": "2026-01-06",
-            "amount": 1000.0, "price": 0.0, "quantity": 0.0, "fee": 0.0,
-        }],
-        # 冻结额里除了这笔 1000，还有别人的 500 —— 不能一起退给该用户
-        "accounts": [{"id": "a1", "user_id": "u1", "cash": 9000.0, "frozen_cash": 1500.0}],
-        "positions": [],
-    })
-    svc.confirm_pending_orders()
-
-    assert svc._client.rows["trade_orders"][0]["status"] == "rejected"
-    account = svc._client.rows["accounts"][0]
-    assert account["cash"] == 10000.0        # 本金退回
-    assert account["frozen_cash"] == 500.0   # 只核减本笔的 1000
+    svc._client = FakeClient()
+    svc._client.rpc_responses["place_redeem_order"] = {
+        "result": "existing", "order": {"id": "s9", "status": "pending"},
+    }
+    result = svc.apply_redeem("u1", "110020", Decimal("100"), client_order_id="rk-1")
+    assert result["success"] is True
+    assert "重复提交" in result["message"] and "s9" in result["message"]
 
 
-def test_卖单确认失败_不退现金(monkeypatch):
-    """卖单的钱从未离开现金，失败时不能平白加钱。"""
-    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
-    monkeypatch.setattr(PortfolioService, "_is_trading_day", staticmethod(lambda d: True))
-    _patch_confirm_nav(monkeypatch, nav="1.5000")
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
-
-    svc = PortfolioService()
-    svc._client = FakeClient({
-        "trade_orders": [{
-            "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
-            "direction": "sell", "status": "pending", "confirm_date": "2026-01-06",
-            "amount": 0.0, "price": 0.0, "quantity": 100.0, "fee": 0.0,
-        }],
-        "accounts": [{"id": "a1", "user_id": "u1", "cash": 9000.0, "frozen_cash": 0.0}],
-        "positions": [],  # 无持仓 → 确认失败
-    })
-    svc.confirm_pending_orders()
-
-    assert svc._client.rows["trade_orders"][0]["status"] == "rejected"
-    assert svc._client.rows["accounts"][0]["cash"] == 9000.0
+# ==================== confirm_pending_orders：薄壳委派 Runner ====================
 
 
-# ---------- 确认日净值不可用 → 保持 pending（不拒单、不退款） ----------
+def test_确认批量_委派给OrderConfirmService(monkeypatch):
+    """旧多表写实现已删除：薄壳只负责委派 Runner（策略见《执行机制》§3.5）。"""
+    from server.services import order_confirm_service as ocs_mod
 
+    captured = {}
 
-@pytest.mark.parametrize("场景", ["未公布", "取数失败", "无净值日"])
-def test_确认日净值不可用_订单保持pending且不退款(monkeypatch, 场景):
-    """净值没到 ≠ 订单有问题：不落 rejected、不退款、不动冻结，下个窗口重试。"""
-    from server.services.fund_nav_service import NavLookup, NavLookupStatus
+    class FakeRunner:
+        def run(self, trigger="manual"):
+            captured["trigger"] = trigger
+            return {"status": "ok", "scanned": 0, "processed": 0, "skipped": 0}
 
-    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
-
-    lookup = {
-        "未公布": NavLookup(NavLookupStatus.NOT_YET_PUBLISHED, None),
-        "取数失败": NavLookup(NavLookupStatus.FETCH_FAILED, None, reason="history_not_complete"),
-        "无净值日": NavLookup(NavLookupStatus.NO_NAV, None, reason="before_establishment"),
-    }[场景]
-
-    svc = PortfolioService(fund_nav=FakeFundNav(lookup={"110020": lookup}))
-    svc._client = FakeClient({
-        "trade_orders": [{
-            "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
-            "direction": "buy", "status": "pending", "confirm_date": "2026-01-06",
-            "amount": 1000.0, "price": 0.0, "quantity": 0.0, "fee": 0.0,
-        }],
-        "accounts": [{"id": "a1", "user_id": "u1", "cash": 9000.0, "frozen_cash": 1000.0}],
-        "positions": [],
-    })
-
-    result = svc.confirm_pending_orders()
-
-    assert result["skipped"] == 1
-    assert result["confirmed"] == 0 and result["rejected"] == 0
-    assert svc._client.rows["trade_orders"][0]["status"] == "pending"
-    account = svc._client.rows["accounts"][0]
-    assert account["cash"] == 9000.0        # 没退款
-    assert account["frozen_cash"] == 1000.0  # 也没解冻（净值判定在所有写操作之前）
-    assert svc._client.rows["positions"] == []
-
-
-def test_确认_before_today_只看今天之前的订单(monkeypatch):
-    """15:37 任务只补历史遗漏：confirm_date 为今天的订单一律不动。"""
-    monkeypatch.setattr(portfolio_service, "_beijing_date", lambda: date(2026, 1, 6))
-    monkeypatch.setattr(fee_svc_mod, "FundFeeService", lambda: FakeFeeSvc(RULE))
-
-    svc = PortfolioService(fund_nav=FakeFundNav())
-    svc._client = FakeClient({
-        "trade_orders": [{
-            "id": "o1", "user_id": "u1", "fund_code": "110020", "fund_name": "测试基金",
-            "direction": "buy", "status": "pending", "confirm_date": "2026-01-06",
-            "amount": 1000.0, "price": 0.0, "quantity": 0.0, "fee": 0.0,
-        }],
-        "accounts": [{"id": "a1", "user_id": "u1", "cash": 9000.0, "frozen_cash": 1000.0}],
-    })
-
-    assert svc.confirm_pending_orders(before_today=True)["processed"] == 0
-    assert svc._client.rows["trade_orders"][0]["status"] == "pending"
+    monkeypatch.setattr(ocs_mod, "OrderConfirmService", FakeRunner)
+    result = PortfolioService().confirm_pending_orders()
+    assert result["status"] == "ok"
+    assert captured["trigger"] == "manual"
 
 
 # ==================== 架构守卫：交易链路不触网取净值 ====================

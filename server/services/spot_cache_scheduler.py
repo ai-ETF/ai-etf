@@ -1,12 +1,14 @@
 """
-定时任务调度器（Pending 订单确认 / 净值 / 白名单同步 / 货基收益）
+定时任务调度器（订单确认 / 净值 / 白名单同步 / 货基收益）
 
-独立管理：
-1. Pending 订单确认（每个交易日 15:37，只补历史遗漏）
+独立管理（调度口径见《订单确认-执行机制》§3.12）：
+1. 订单确认兜底扫描：18:00–09:00 每 30 分钟一次（非交易日照常）
 2. 货基万份收益入账（每天 00:05）
 3. 场外基金白名单同步（每天 02:17）
-4. 场外基金最新净值更新 + 确认（交易日 18:00 起多轮，见 `_fund_nav_update_job`）
-5. 启动时补偿：净值补跑 + 检查遗漏的 pending 订单
+4. 场外基金最新净值更新；**更新成功后异步触发一次确认**（确认只读 DB）
+5. 启动时补偿：净值补跑 → 确认遗漏订单（串行）
+
+确认与抓取解耦：确认不再挂在净值任务里同步执行，也不再有 15:37 的「只补历史」窗口。
 
 2026-10-26：场内 ETF 的 30 秒行情轮询（`refresh_etf_spot`）与启动预热
 （`_warmup_cache`）已删除——产品只做场外基金，净值每日公布一次，不需要实时行情。
@@ -15,6 +17,7 @@
 import asyncio
 import logging
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -23,22 +26,46 @@ logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 
+# 所有 CronTrigger 显式使用东八区：服务器可能是 UTC
+TZ = ZoneInfo("Asia/Shanghai")
 
-async def _confirm_pending_orders_job(before_today: bool = False):
-    """Pending 订单确认任务。
+# 持有确认任务的引用，避免 create_task 的返回值被 GC 后任务被取消
+_confirm_tasks: set[asyncio.Task] = set()
 
-    参数:
-        before_today: True 只确认 `confirm_date < today`（15:37 的历史遗漏任务）；
-                      False 确认到今天（净值公布后的晚间任务、08:05、启动补偿）。
 
-    取不到确认日净值的订单保持 pending 并计入 skipped，不拒单、不退款。
+async def _confirm_pending_orders_job(trigger: str = "fallback"):
+    """跑一轮订单确认（Runner 会自己抢批次锁，拿不到即视为本轮跳过）。
+
+    `trigger` 取 sync / fallback / startup / manual，用于 confirm_runs 审计。
+    Runner 是同步实现（PostgREST 调用），放到线程里跑，不阻塞事件循环。
     """
-    from server.services.portfolio_service import PortfolioService
-    logger.info("[确认] 开始检查 pending 订单...")
-    svc = PortfolioService()
-    result = svc.confirm_pending_orders(before_today=before_today)
-    logger.info(f"[确认] Pending 订单确认完成: {result}")
+    from server.config.settings import SETTINGS
+    if not SETTINGS.ORDER_CONFIRM_ENABLED:
+        logger.info("[确认] ORDER_CONFIRM_ENABLED=false，跳过本轮 trigger=%s", trigger)
+        return None
+
+    from server.services.order_confirm_service import OrderConfirmService
+
+    logger.info("[确认] 开始一轮 trigger=%s", trigger)
+    result = await asyncio.to_thread(OrderConfirmService().run, trigger)
+    logger.info("[确认] 本轮结束: %s", result)
     return result
+
+
+def trigger_confirm(trigger: str = "sync") -> None:
+    """异步触发一轮确认，不阻塞调用方（净值同步成功后调用）。
+
+    单飞由 `acquire_confirm_run` 保证：拿不到批次锁的一轮直接返回 busy。
+    """
+    async def _run():
+        try:
+            await _confirm_pending_orders_job(trigger)
+        except Exception as exc:  # 确认失败不影响同步，只留痕
+            logger.error("[确认] 触发失败 trigger=%s: %s", trigger, exc, exc_info=True)
+
+    task = asyncio.ensure_future(_run())
+    _confirm_tasks.add(task)
+    task.add_done_callback(_confirm_tasks.discard)
 
 
 async def _credit_money_fund_income_job():
@@ -88,9 +115,13 @@ async def _fund_catalog_sync_job():
 
 
 async def _startup_pending_compensation():
-    """启动补偿：确认所有到期未确认的 pending 订单（含今天）。"""
+    """启动补偿：确认所有到期未确认的 pending 订单（含今天）。
+
+    扫描条件由 Runner 统一为 `status='pending' AND confirm_date <= today`，
+    不再有 `before_today` 这类「只补历史」的旁路。
+    """
     logger.info("[启动补偿] 检查遗漏的 pending 订单...")
-    await _confirm_pending_orders_job(before_today=False)
+    await _confirm_pending_orders_job("startup")
 
 
 def _is_trading_day_or_none(d) -> bool | None:
@@ -126,15 +157,17 @@ async def _warm_positions_job():
     logger.info("[净值] 持仓历史预热完成: 补齐 %s 只", len(results))
 
 
-async def _fund_nav_update_job(with_confirm: bool = True, prev_day: bool = False):
-    """场外基金最新净值更新（可选随后确认订单）。
+async def _fund_nav_update_job(prev_day: bool = False):
+    """场外基金最新净值更新；更新成功后异步触发一次确认。
 
     参数:
-        with_confirm: 更新后是否立刻跑一次订单确认
         prev_day: True 用「昨天」判断是否交易日（凌晨 00:30/01:30 的收尾轮）
 
-    流程：`update_batch`（写最新一两个点）→ 持仓预热 → 订单确认。
+    流程：`update_batch`（写最新一两个点）→ 持仓预热 → 触发确认。
     拿不到单飞锁（已有更新在跑）视为本轮跳过，**不算失败**。
+
+    确认只读 DB，与抓取解耦：抓取失败不触发确认（已入库的净值仍会被下一轮
+    兜底扫描用上），确认失败也不回滚同步。
     """
     from server.services.fund_nav_sync_service import FundNavSyncService, NavLockBusy
     from server.services.trading_calendar import beijing_now
@@ -151,14 +184,13 @@ async def _fund_nav_update_job(with_confirm: bool = True, prev_day: bool = False
         logger.warning("[净值] 跳过本轮更新：%s", exc)
         return
     except Exception as exc:
-        # 更新失败不阻断确认：确认只读 DB，已入库的净值仍可确认
+        # 抓取失败只记 ERROR，不触发确认（兜底扫描会接着补）
         logger.error("[净值] 最新净值更新失败: %s", exc, exc_info=True)
-    else:
-        logger.info("[净值] 最新净值更新完成: %s", result.as_dict())
-        await _warm_positions_job()
+        return
 
-    if with_confirm:
-        await _confirm_pending_orders_job(before_today=False)
+    logger.info("[净值] 最新净值更新完成: %s", result.as_dict())
+    await _warm_positions_job()
+    trigger_confirm("sync")
 
 
 async def _startup_nav_update():
@@ -193,45 +225,52 @@ def start_scheduler() -> AsyncIOScheduler:
     global _scheduler
     from functools import partial
 
-    _scheduler = AsyncIOScheduler()
+    _scheduler = AsyncIOScheduler(timezone=TZ)
 
-    # 任务1：Pending 订单确认（每个交易日 15:37）
-    # 只补「今天之前」的遗漏：当日净值要到晚间才公布，15:37 确认只会全部跳过，
-    # 且会把当日订单的状态搅乱 —— 当日订单一律等任务5的晚间窗口。
+    # 触发 2：订单确认兜底扫描（18:00–09:00 每 30 分钟，非交易日照常）
+    # 确认只读 DB，取不到净值就保持 pending，等下一轮；能不能确认由
+    # `get_nav_on(accepted_date)` 决定。单飞由 confirm_runs 保证，busy 跳过即可。
+    # 注意不要写成 hour="18-23,0-9"，否则会多出 09:30。
     _scheduler.add_job(
-        partial(_confirm_pending_orders_job, before_today=True),
-        trigger=CronTrigger(hour=15, minute=37, day_of_week="mon-fri"),
-        id="confirm_pending_orders",
-        name="确认pending订单（每个交易日15:37，只补历史遗漏）",
+        partial(_confirm_pending_orders_job, "fallback"),
+        trigger=CronTrigger(hour="18-23,0-8", minute="0,30", timezone=TZ),
+        id="order_confirm_fallback",
+        name="订单确认兜底扫描（18:00–08:30 每30分钟）",
         replace_existing=True,
-        misfire_grace_time=3600,  # 错过1小时内仍可补执行
+        misfire_grace_time=900,
     )
-    logger.info("Pending订单确认任务已注册（每个交易日15:37）")
-
-    # 任务5：场外基金净值更新 + 确认（净值通常在交易日 18:00 后才公布）
-    # 多轮重试覆盖「公布晚 / QDII 更晚」的情况；每轮先更新再确认，
-    # 确认只读 DB，取不到就保持 pending，等下一轮。
     _scheduler.add_job(
-        partial(_fund_nav_update_job, with_confirm=True),
-        trigger=CronTrigger(hour="18,19", minute=0),
+        partial(_confirm_pending_orders_job, "fallback"),
+        trigger=CronTrigger(hour=9, minute=0, timezone=TZ),
+        id="order_confirm_fallback_0900",
+        name="订单确认兜底扫描（09:00）",
+        replace_existing=True,
+        misfire_grace_time=900,
+    )
+    logger.info("订单确认兜底扫描已注册（18:00–08:30 每30分钟 + 09:00）")
+
+    # 触发 1 的兜底来源：场外基金净值更新（净值通常交易日 18:00 后才公布）。
+    # 多轮重试覆盖「公布晚 / QDII 更晚」；每轮更新成功后异步触发一次确认。
+    _scheduler.add_job(
+        partial(_fund_nav_update_job),
+        trigger=CronTrigger(hour="18,19", minute=0, timezone=TZ),
         id="fund_nav_update_early",
-        name="场外净值更新+确认（交易日18:00/19:00）",
+        name="场外净值更新（交易日18:00/19:00）",
         replace_existing=True,
         misfire_grace_time=1800,
     )
     _scheduler.add_job(
-        partial(_fund_nav_update_job, with_confirm=True),
-        trigger=CronTrigger(hour="20,21,22,23", minute=5),
+        partial(_fund_nav_update_job),
+        trigger=CronTrigger(hour="20,21,22,23", minute=5, timezone=TZ),
         id="fund_nav_update_late",
-        name="场外净值更新+确认（交易日20:05/21:05/22:05/23:05）",
+        name="场外净值更新（交易日20:05/21:05/22:05/23:05）",
         replace_existing=True,
         misfire_grace_time=1800,
     )
-    # 凌晨收尾轮：按「昨天是否交易日」判断，收晚公布的 QDII / 海外基金；
-    # 只更新不确认（确认放到 08:05 那次，避免同一批订单在凌晨被反复扫）
+    # 凌晨收尾轮：按「昨天是否交易日」判断，收晚公布的 QDII / 海外基金
     _scheduler.add_job(
-        partial(_fund_nav_update_job, with_confirm=False, prev_day=True),
-        trigger=CronTrigger(hour="0,1", minute=30),
+        partial(_fund_nav_update_job, prev_day=True),
+        trigger=CronTrigger(hour="0,1", minute=30, timezone=TZ),
         id="fund_nav_update_overnight",
         name="场外净值更新（次日00:30/01:30）",
         replace_existing=True,
@@ -239,10 +278,10 @@ def start_scheduler() -> AsyncIOScheduler:
     )
     # 每天 08:05 补漏：不按交易日判断，覆盖前一夜失败与停机
     _scheduler.add_job(
-        partial(_fund_nav_update_job, with_confirm=True, prev_day=False),
-        trigger=CronTrigger(hour=8, minute=5),
+        partial(_fund_nav_update_job),
+        trigger=CronTrigger(hour=8, minute=5, timezone=TZ),
         id="fund_nav_update_morning",
-        name="场外净值更新+确认（每天08:05补漏）",
+        name="场外净值更新（每天08:05补漏）",
         replace_existing=True,
         misfire_grace_time=3600,
     )
@@ -253,7 +292,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # 数据源失败时任务内会抛错，由调度器记录，不会用兜底数字入账。
     _scheduler.add_job(
         _credit_money_fund_income_job,
-        trigger=CronTrigger(hour=0, minute=5),
+        trigger=CronTrigger(hour=0, minute=5, timezone=TZ),
         id="credit_money_fund_income",
         name="货基万份收益每日入账（每天00:05）",
         replace_existing=True,
@@ -266,7 +305,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # 全量抓取耗时较长（数千只基金逐只抓页面），容错窗口给到 2 小时。
     _scheduler.add_job(
         _fund_catalog_sync_job,
-        trigger=CronTrigger(hour=2, minute=17),
+        trigger=CronTrigger(hour=2, minute=17, timezone=TZ),
         id="fund_catalog_sync",
         name="场外基金白名单同步（每天02:17）",
         replace_existing=True,

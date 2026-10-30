@@ -59,6 +59,20 @@ class Settings:
         # === 情绪检测配置 ===
         self.EMOTION_DETECTION_ENABLED = os.getenv("EMOTION_DETECTION_ENABLED", "true").lower() == "true"
 
+        # === 订单确认 Runner（见《订单确认-实现方案》§3.5、§3.12）===
+        # 灰度开关：上线时先置 false，跑完回填/对账再打开
+        self.ORDER_CONFIRM_ENABLED = os.getenv("ORDER_CONFIRM_ENABLED", "true").lower() == "true"
+        # 本轮最多处理订单数 / 单轮时间预算（秒）：超限正常结束，下一轮继续
+        self.CONFIRM_MAX_ORDERS = int(os.getenv("CONFIRM_MAX_ORDERS", "2000"))
+        self.CONFIRM_TIME_BUDGET_SECONDS = int(os.getenv("CONFIRM_TIME_BUDGET_SECONDS", "240"))
+        self.CONFIRM_PAGE_SIZE = int(os.getenv("CONFIRM_PAGE_SIZE", "200"))
+        # 重试上限与单笔租约（秒）
+        self.CONFIRM_MAX_ATTEMPTS = int(os.getenv("CONFIRM_MAX_ATTEMPTS", "5"))
+        self.CONFIRM_LEASE_SECONDS = int(os.getenv("CONFIRM_LEASE_SECONDS", "300"))
+        # 净值迟迟不到的告警/转人工阈值（自然日，确认路径不依赖交易日历）
+        self.NAV_PENDING_ALERT_DAYS = int(os.getenv("NAV_PENDING_ALERT_DAYS", "5"))
+        self.PENDING_MAX_DAYS = int(os.getenv("PENDING_MAX_DAYS", "14"))
+
         logging.info(f"配置加载完成: DB_PATH={self.DB_PATH}, EMBED_DIM={self.EMBED_DIM}, LOG_LEVEL={log_level_str}")
 
 

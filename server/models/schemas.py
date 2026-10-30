@@ -333,6 +333,8 @@ class OrderResult(BaseModel):
     frozen_cash: Optional[float] = None
     status: str = "completed"
     trade_time: Optional[str] = None
+    trade_date: Optional[str] = None  # 受理日（成交净值日）T
+    error_code: Optional[str] = None  # 下单失败/人工复核的原因码
 
 
 class RiskWarning(BaseModel):
@@ -386,6 +388,7 @@ class AccountSummaryResponse(BaseModel):
     """账户概况响应"""
     cash: float
     frozen_cash: float
+    settling_cash: Optional[float] = None  # 在途赎回（settling）金额，P3 接入后回填
     position_value: float
     total_assets: float
     total_pnl: float
@@ -405,6 +408,7 @@ class TradeFlowItem(BaseModel):
     quantity: float
     fee: float
     trade_time: str
+    order_id: Optional[str] = None  # 关联订单（确认 RPC 写入）
 
 
 class TradeFlowResponse(BaseModel):
@@ -414,6 +418,32 @@ class TradeFlowResponse(BaseModel):
     page_size: int
     total_pages: int
     items: List[TradeFlowItem]
+
+
+class ConfirmRunResponse(BaseModel):
+    """订单确认批次响应（见《订单确认-实现方案》§6）。
+
+    `status='busy'` 表示已有一轮在跑，本轮跳过（不是失败，HTTP 仍为 200）。
+    保留 `processed/skipped` 两个旧字段作为别名：processed=scanned，
+    skipped=skipped_nav+retryable。
+    """
+    run_id: Optional[str] = None
+    status: str  # ok / busy
+    trigger: Optional[str] = None
+    message: Optional[str] = None
+    trade_date: Optional[str] = None
+    scanned: int = 0
+    confirmed: int = 0
+    rejected: int = 0
+    skipped_nav: int = 0
+    retryable: int = 0
+    manual_review: int = 0
+    settled: int = 0
+    error: Optional[str] = None
+    duration_ms: int = 0
+    # 旧字段别名
+    processed: int = 0
+    skipped: int = 0
 
 
 class TradeFlowQueryParams(BaseModel):

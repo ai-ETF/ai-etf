@@ -14,7 +14,15 @@ from decimal import Decimal
 
 import pytest
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skip(reason=(
+        "P2 待重写：确认流程已迁到 place_* / confirm_* RPC + OrderConfirmService，"
+        "本文件仍按旧的多表写实现断言（_confirm_nav / confirm_pending_orders 内部逻辑已删除）。"
+        "RPC 层的资金流转由 supabase/tests/order_confirm_rpc_test.sql、"
+        "place_order_rpc_test.sql 覆盖；本地 Supabase 栈恢复后按 §5.2 重写本文件。"
+    )),
+]
 
 BEIJING = timezone(timedelta(hours=8))
 # 提交日：2026-09-14 周一 14:00（盘中、15:00 截止前）
