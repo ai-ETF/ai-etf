@@ -266,6 +266,10 @@ SELECT pg_temp.assert_eq((SELECT principal::text FROM positions WHERE user_id=:'
 SELECT pg_temp.assert_eq((SELECT cost_price::text FROM positions WHERE user_id=:'uid' AND fund_code='000198'),
   '1.0000','货基成本价恒 1.0000');
 SELECT pg_temp.assert_eq(
+  ((SELECT quantity FROM positions WHERE user_id=:'uid' AND fund_code='000198')
+   = (SELECT SUM(remaining_qty) FROM position_lots WHERE user_id=:'uid' AND fund_code='000198'))::text,
+  'true','不变量：positions.quantity = SUM(lots.remaining_qty)');
+SELECT pg_temp.assert_eq(
   credit_money_fund_income_atomic(:'uid','000198',0,'2026-10-31')->>'result',
   'no_income','零收益不入账');
 SELECT pg_temp.assert_eq(

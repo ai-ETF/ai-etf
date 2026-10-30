@@ -234,7 +234,12 @@ class PortfolioService:
         return self.get_auto_invest_config(user_id)
 
     def _confirm_money_fund_order(self, user_id: str):
-        """确认用户最新的货基 pending 申购订单（自动申购专用）。"""
+        """确认用户最新的货基 pending 申购订单（余额理财自动申购专用）。
+
+        走统一 `confirm_buy_order` RPC：货基净值恒 1.0000，份额 = floor(net/1.00)，
+        尾差为 0；本金/成本由 RPC 按 lot 建立，不在应用层直接改 positions
+        （否则 `position_lots` 与 `positions` 会分叉，见《业务规则》§3.10）。
+        """
         try:
             result = (
                 self.client.table("trade_orders")
@@ -249,13 +254,33 @@ class PortfolioService:
             )
             if not result.data:
                 return
-            from server.services.fund_fee_service import FundFeeService
-            rule = FundFeeService().get_fee_rule(MONEY_FUND_CODE)
-            today = _beijing_date()
-            self._confirm_one_order(result.data[0], today, rule=rule)
-            logger.info(f"用户 {user_id} 货基自动申购已确认")
+
+            from server.services.order_confirm_rules import calc_buy_amounts
+
+            order = result.data[0]
+            amounts = calc_buy_amounts(
+                Decimal(str(order.get("amount") or 0)),
+                Decimal("1.0000"),
+                Decimal(str(order.get("fee") or 0)),
+            )
+            payload = self.client.rpc("confirm_buy_order", {
+                "p_order_id": order["id"],
+                "p_worker": "auto-invest",
+                "p_nav": 1.0,
+                "p_fee": float(amounts["fee"]),
+                "p_net_amount": float(amounts["net_amount"]),
+                "p_quantity": float(amounts["quantity"]),
+                "p_residual": float(amounts["residual"]),
+            }).execute().data or {}
+
+            rpc_result = payload.get("result")
+            if rpc_result == "completed":
+                logger.info(f"用户 {user_id} 货基自动申购已确认: {amounts['quantity']} 份")
+            else:
+                # not_claimed / retryable 等交给每日确认 Runner 兜底，不在这里重试
+                logger.warning(f"用户 {user_id} 货基自动申购确认未完成: {payload}")
         except Exception as e:
-            logger.error(f"确认货基自动申购失败: {e}")
+            logger.error(f"确认货基自动申购失败: {e}", exc_info=True)
 
     def get_account(self, user_id: str) -> Optional[dict]:
         if not self.client:
@@ -381,22 +406,30 @@ class PortfolioService:
         """给所有持有货币基金的用户，按最近公布的万份收益把收益折算成份额。
 
         真实货基收益机制：净值恒 1.0000，每日按「万份收益」计息并复投。
-        这里模拟为：当日收益折算成份额加进 positions.quantity（份额逐日增长，
-        即复利——次日收益在更大份额上计算），本金 principal 保持不变。
+        收益写成 `source='income'` 的 lot（`cost_price=0`、`remaining_cost=0`），
+        由 `credit_money_fund_income_atomic` 在同一事务里重算 `positions`——
+        份额逐日增长（复利），本金 `principal` 不变。
 
         入账规则：
-        - 当日收益 = 份额 × 昨日万份收益 / 10000，保留 2 位小数（分）。
-          NAV=1.0000，故收益（元）= 新增份额，直接 quantity += 收益。
+        - 当日收益 = 份额 × 万份收益 / 10000，保留 2 位小数（分）。
+          NAV=1.0000，故收益（元）= 新增份额。
         - 收益 <= 0 的持仓跳过（子分位舍入到 0，如刚买入、份额极小；货基无日亏）。
         - 万份收益获取失败时直接抛异常（不兜底），整个任务中断，
           由调度器记录错误——宁可当天不入账，也不用虚假数据。
+        - 是否重复入账由 RPC 的 `(user_id, fund_code, 'income', income_date)` 幂等键保证，
+          同日重跑返回 `already_credited`，不算失败。
 
         由 spot_cache_scheduler 每日 00:05 调用（届时昨日万份收益已披露）。
         不做历史回填：从本方法上线的下一天起逐日入账。
         """
         # 1. 先取万份收益（失败即抛错，无兜底）——在循环前只请求一次
         per10k = self._money_fund_per10k_income()
-        logger.info(f"[货基收益] 万份收益 = {per10k} 元/万份，开始逐仓折算份额")
+        # 入账日期取「万份收益对应的计息日」而不是今天：幂等键是
+        # (user_id, fund_code, 'income', income_date)，补跑同一天不会重复入账。
+        income_date = self._money_fund_cache.get("income_date")
+        if not income_date:
+            raise RuntimeError(f"货基 {MONEY_FUND_CODE} 万份收益缺少计息日，拒绝入账")
+        logger.info(f"[货基收益] 万份收益 = {per10k} 元/万份（{income_date}），开始逐仓折算份额")
 
         if not self.client:
             raise RuntimeError("数据库不可用")
@@ -412,16 +445,19 @@ class PortfolioService:
         if not positions:
             logger.info("[货基收益] 暂无货基持仓，跳过入账")
             return {
-                "status": "ok", "credited": 0,
-                "per10k_income": float(per10k), "total_income": 0.0,
+                "status": "ok", "credited": 0, "skipped": 0,
+                "per10k_income": float(per10k), "income_date": income_date,
+                "total_income": 0.0,
             }
 
-        now = _now_iso()
         credited = 0
+        skipped = 0
         total_income = Decimal("0")
         errors = []
 
-        # 3. 逐仓入账：收益折算成份额，quantity 逐日增长（本金 principal 不变）
+        # 3. 逐仓入账：收益折算成 source='income' 的 lot（cost 0），由 RPC 重算持仓。
+        #    份额逐日增长即复投（次日收益在更大份额上计算），本金 principal 不变。
+        #    收益 <= 0 的持仓跳过（子分位舍入到 0，如刚买入、份额极小；货基无日亏）。
         for pos in positions:
             user_id = pos.get("user_id")
             qty = Decimal(str(pos.get("quantity", 0) or 0))
@@ -436,36 +472,49 @@ class PortfolioService:
                 logger.debug(f"[货基收益] user={user_id} 当日收益 {income} 元，跳过")
                 continue
 
-            new_qty = (qty + income).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             try:
-                self.client.table("positions").update({
-                    "quantity": float(new_qty),
-                    "updated_at": now,
-                }).eq("id", pos["id"]).execute()
-                total_income += income
-                credited += 1
-                logger.info(
-                    f"[货基收益] user={user_id} 份额 {qty} +{income} = {new_qty}"
-                    f"（本金不变）"
-                )
+                payload = self.client.rpc("credit_money_fund_income_atomic", {
+                    "p_user_id": user_id,
+                    "p_fund_code": MONEY_FUND_CODE,
+                    "p_income": float(income),
+                    "p_income_date": income_date,
+                }).execute().data or {}
+                rpc_result = payload.get("result")
+                if rpc_result == "credited":
+                    total_income += income
+                    credited += 1
+                    logger.info(
+                        f"[货基收益] user={user_id} 份额 +{income}"
+                        f"（{income_date}，本金不变）"
+                    )
+                elif rpc_result == "already_credited":
+                    # 同日重跑/补跑：幂等命中，不算失败
+                    skipped += 1
+                    logger.info(f"[货基收益] user={user_id} {income_date} 已入账，跳过")
+                else:
+                    # no_income / no_position：并发下持仓已清空或舍入为 0，按跳过处理
+                    skipped += 1
+                    logger.warning(f"[货基收益] user={user_id} 不入账: {rpc_result}")
             except Exception as e:
                 # 单仓 DB 失败只记录，不影响其他用户
                 # （与数据源失败「整个任务中断」是两种不同级别的错误处理）
                 errors.append(f"{user_id}: {e}")
                 logger.error(f"[货基收益] user={user_id} 入账失败: {e}", exc_info=True)
 
-        result = {
+        result_payload = {
             "status": "ok" if not errors else "partial",
             "credited": credited,
+            "skipped": skipped,
             "per10k_income": float(per10k),
+            "income_date": income_date,
             "total_income": float(total_income.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
             "errors": errors,
         }
         logger.info(
-            f"[货基收益] 入账完成: 成功 {credited} 仓, 合计 {result['total_income']} 元, "
-            f"错误 {len(errors)}"
+            f"[货基收益] 入账完成: 成功 {credited} 仓, 跳过 {skipped} 仓, "
+            f"合计 {result_payload['total_income']} 元, 错误 {len(errors)}"
         )
-        return result
+        return result_payload
 
     def _get_fund_name(self, fund_code: str, rule: Optional[dict] = None) -> str:
         """获取基金名称（优先从 rule 中读取，避免重复查询）"""
@@ -1029,6 +1078,26 @@ class PortfolioService:
 
     # ==================== 账户概况 ====================
 
+    def _settling_cash(self, user_id: str) -> Decimal:
+        """在途赎回款 = `status='settling'` 卖单的 net_amount 合计（《业务规则》§3.9）。
+
+        卖出确认时份额已从 positions 扣掉，现金要到 settle_date 才入账；
+        这段「已经卖了、钱还没到」的应收必须在总资产里体现，否则总资产会凭空下降。
+        查询失败直接上抛（由 account_summary 的 try 统一处理），不返回 0 冒充。
+        """
+        if not self.client:
+            raise RuntimeError("数据库不可用")
+        result = (
+            self.client.table("trade_orders")
+            .select("net_amount")
+            .eq("user_id", user_id)
+            .eq("direction", "sell")
+            .eq("status", "settling")
+            .execute()
+        )
+        return sum((Decimal(str(r.get("net_amount") or 0)) for r in (result.data or [])),
+                   Decimal("0"))
+
     def account_summary(self, user_id: str) -> dict:
         try:
             # 确保账户存在
@@ -1040,6 +1109,7 @@ class PortfolioService:
                 return {
                     "cash": float(INITIAL_CASH),
                     "frozen_cash": 0,
+                    "settling_cash": 0,
                     "position_value": 0,
                     "total_assets": float(INITIAL_CASH),
                     "total_pnl": 0,
@@ -1049,15 +1119,18 @@ class PortfolioService:
 
             cash = Decimal(str(account["cash"]))
             frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
+            settling_cash = self._settling_cash(user_id)
             positions_data = self.list_positions(user_id, include_quote=True)
             position_value = Decimal(str(positions_data["total_position_value"]))
-            total_assets = cash + frozen_cash + position_value
+            # 在途赎回款仍是资产：份额已扣、现金未到，不加上会让总资产在到账前缩水
+            total_assets = cash + frozen_cash + settling_cash + position_value
             total_pnl = total_assets - INITIAL_CASH
             total_return_rate = (total_pnl / INITIAL_CASH) if INITIAL_CASH > 0 else Decimal("0")
 
             return {
                 "cash": float(cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
                 "frozen_cash": float(frozen_cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+                "settling_cash": float(settling_cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
                 "position_value": float(position_value.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
                 "total_assets": float(total_assets.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
                 "total_pnl": float(total_pnl.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
@@ -1067,7 +1140,8 @@ class PortfolioService:
 
         except Exception as e:
             logger.error(f"账户概况查询失败: {e}", exc_info=True)
-            return {"cash": 0, "frozen_cash": 0, "position_value": 0, "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0}
+            return {"cash": 0, "frozen_cash": 0, "settling_cash": 0, "position_value": 0,
+                    "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0}
 
     # ==================== Pending 订单确认 ====================
 
@@ -1558,6 +1632,7 @@ class PortfolioService:
                 "snapshot_date": snapshot_date.isoformat(),
                 "total_assets": summary["total_assets"],
                 "cash": summary["cash"],
+                "settling_cash": summary.get("settling_cash", 0),
                 "position_value": summary["position_value"],
                 "total_pnl": summary["total_pnl"],
                 "total_return_rate": summary["total_return_rate"],
@@ -1588,6 +1663,7 @@ class PortfolioService:
                     "snapshot_date": snapshot_date.isoformat(),
                     "total_assets": summary["total_assets"],
                     "cash": summary["cash"],
+                    "settling_cash": summary.get("settling_cash", 0),
                     "position_value": summary["position_value"],
                     "total_pnl": summary["total_pnl"],
                     "total_return_rate": summary["total_return_rate"],

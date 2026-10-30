@@ -607,7 +607,30 @@ def test_万份收益_缓存命中_不重复请求(monkeypatch):
 # ==================== credit_money_fund_income：货基收益入账 ====================
 
 
-def _patch_per10k(monkeypatch, value):
+def test_货基自动申购确认_走confirm_buy_order_RPC():
+    """自动申购不在应用层直接建仓：统一走 RPC，保证 lot 与 positions 不分叉。"""
+    svc = PortfolioService()
+    svc._client = FakeClient({"trade_orders": [
+        {"id": "o1", "user_id": "u1", "fund_code": MONEY_FUND_CODE, "direction": "buy",
+         "status": "pending", "amount": 1000.0, "fee": 0.0},
+    ]})
+    svc._client.rpc_responses["confirm_buy_order"] = {"result": "completed"}
+    svc._confirm_money_fund_order("u1")
+
+    name, params = svc._client.rpc_calls[0]
+    assert name == "confirm_buy_order"
+    assert params["p_order_id"] == "o1"
+    assert params["p_nav"] == 1.0
+    assert params["p_net_amount"] == 1000.0
+    assert params["p_quantity"] == 1000.0
+    assert params["p_residual"] == 0.0
+
+
+def _patch_per10k(monkeypatch, value, income_date="2026-01-09"):
+    """替身万份收益：同时写缓存里的计息日（RPC 幂等键要用）。"""
+    PortfolioService._money_fund_cache = {
+        "date": "2026-01-10", "per10k_income": Decimal(value), "income_date": income_date,
+    }
     monkeypatch.setattr(PortfolioService, "_money_fund_per10k_income", lambda self: Decimal(value))
 
 
@@ -618,19 +641,46 @@ def test_入账_无持仓_跳过(monkeypatch):
     result = svc.credit_money_fund_income()
     assert result["status"] == "ok"
     assert result["credited"] == 0
+    assert result["income_date"] == "2026-01-09"
 
 
-def test_入账_有持仓_折算份额并更新(monkeypatch):
+def test_入账_有持仓_走原子RPC(monkeypatch):
     _patch_per10k(monkeypatch, "0.2229")
     svc = PortfolioService()
     svc._client = FakeClient({"positions": [
         {"id": "p1", "user_id": "u1", "fund_code": MONEY_FUND_CODE, "quantity": 100000, "principal": 100000},
     ]})
+    svc._client.rpc_responses["credit_money_fund_income_atomic"] = {"result": "credited"}
     result = svc.credit_money_fund_income()
     # income = 100000 * 0.2229 / 10000 = 2.229 → 四舍五入 2.23
     assert result["credited"] == 1
     assert result["total_income"] == 2.23
-    assert svc._client.rows["positions"][0]["quantity"] == 100002.23
+    name, params = svc._client.rpc_calls[0]
+    assert name == "credit_money_fund_income_atomic"
+    assert params["p_income"] == 2.23
+    assert params["p_income_date"] == "2026-01-09"
+    # 份额由 RPC 从 lot 重算，应用层不再直接改 positions
+    assert svc._client.rows["positions"][0]["quantity"] == 100000
+
+
+def test_入账_同日重复入账按跳过处理(monkeypatch):
+    _patch_per10k(monkeypatch, "0.2229")
+    svc = PortfolioService()
+    svc._client = FakeClient({"positions": [
+        {"id": "p1", "user_id": "u1", "fund_code": MONEY_FUND_CODE, "quantity": 100000},
+    ]})
+    svc._client.rpc_responses["credit_money_fund_income_atomic"] = {"result": "already_credited"}
+    result = svc.credit_money_fund_income()
+    assert result["credited"] == 0 and result["skipped"] == 1
+    assert result["status"] == "ok"
+
+
+def test_入账_缺少计息日_拒绝入账(monkeypatch):
+    _patch_per10k(monkeypatch, "0.2229", income_date=None)
+    svc = PortfolioService()
+    svc._client = FakeClient()
+    with pytest.raises(RuntimeError, match="计息日"):
+        svc.credit_money_fund_income()
 
 
 def test_入账_份额为0_跳过(monkeypatch):
@@ -641,6 +691,7 @@ def test_入账_份额为0_跳过(monkeypatch):
     ]})
     result = svc.credit_money_fund_income()
     assert result["credited"] == 0
+    assert svc._client.rpc_calls == []
 
 
 def test_入账_数据库不可用_抛错(monkeypatch):
@@ -763,12 +814,15 @@ def test_account_summary_正常_汇总现金冻结与持仓市值(monkeypatch):
     monkeypatch.setattr(PortfolioService, "get_account", lambda self, uid: {"cash": 90000.0, "frozen_cash": 10000.0})
     monkeypatch.setattr(PortfolioService, "list_positions",
                         lambda self, uid, include_quote=True: {"total": 1, "total_position_value": 20000.0})
+    monkeypatch.setattr(PortfolioService, "_settling_cash", lambda self, uid: Decimal("5000.00"))
     result = svc.account_summary("u1")
     assert result["cash"] == 90000.0
     assert result["frozen_cash"] == 10000.0
+    assert result["settling_cash"] == 5000.0
     assert result["position_value"] == 20000.0
-    assert result["total_assets"] == 120000.0
-    assert result["total_pnl"] == 20000.0
+    # 在途赎回款算资产：现金 9w + 冻结 1w + 在途 5k + 持仓 2w
+    assert result["total_assets"] == 125000.0
+    assert result["total_pnl"] == 25000.0
     assert result["position_count"] == 1
 
 
@@ -781,6 +835,18 @@ def test_account_summary_无账户_返回初始默认(monkeypatch):
     assert result["cash"] == 100000.0
     assert result["total_assets"] == 100000.0
     assert result["position_count"] == 0
+
+
+def test_账户概况_在途赎回款只统计settling卖单(monkeypatch):
+    svc = PortfolioService()
+    svc._client = FakeClient({"trade_orders": [
+        {"user_id": "u1", "direction": "sell", "status": "settling", "net_amount": 500.0},
+        {"user_id": "u1", "direction": "sell", "status": "settling", "net_amount": 250.5},
+        {"user_id": "u1", "direction": "sell", "status": "pending", "net_amount": 300.0},
+        {"user_id": "u1", "direction": "buy", "status": "settling", "net_amount": 999.0},
+        {"user_id": "u2", "direction": "sell", "status": "settling", "net_amount": 777.0},
+    ]})
+    assert svc._settling_cash("u1") == Decimal("750.50")
 
 
 # ==================== query_trade_flow：交易流水 ====================
@@ -865,6 +931,19 @@ def test_take_snapshot_已存在则更新(monkeypatch):
     assert result["success"] is True
     assert len(svc._client.rows["account_snapshots"]) == 1
     assert svc._client.rows["account_snapshots"][0]["total_assets"] == 101000.0
+
+
+def test_take_snapshot_写入在途赎回款(monkeypatch):
+    monkeypatch.setattr(PortfolioService, "account_summary",
+                        lambda self, uid: {"total_assets": 105000.0, "cash": 100000.0,
+                                           "settling_cash": 5000.0, "position_value": 0,
+                                           "total_pnl": 5000.0, "total_return_rate": 0.05})
+    svc = PortfolioService()
+    svc._client = FakeClient()
+    result = svc.take_snapshot("u1", snapshot_date=date(2026, 1, 5))
+    row = svc._client.rows["account_snapshots"][0]
+    assert row["settling_cash"] == 5000.0
+    assert result["data"]["settling_cash"] == 5000.0
 
 
 # ==================== set_auto_invest_config：余额理财开关 ====================

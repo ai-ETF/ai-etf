@@ -388,7 +388,7 @@ class AccountSummaryResponse(BaseModel):
     """账户概况响应"""
     cash: float
     frozen_cash: float
-    settling_cash: Optional[float] = None  # 在途赎回（settling）金额，P3 接入后回填
+    settling_cash: float = 0.0  # 在途赎回款（status=settling 的 net_amount 合计）
     position_value: float
     total_assets: float
     total_pnl: float
@@ -459,6 +459,7 @@ class SnapshotData(BaseModel):
     snapshot_date: str
     total_assets: float
     cash: float
+    settling_cash: float = 0.0  # 在途赎回款
     position_value: float
     total_pnl: float
     total_return_rate: float
