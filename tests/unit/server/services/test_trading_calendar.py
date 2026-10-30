@@ -140,3 +140,36 @@ def test_日期越界_抛错而不是返回False():
 def test_快照未载入_时段判断抛CalendarUnavailable():
     with pytest.raises(CalendarUnavailable):
         tc.is_trading_time(_北京时刻(2026, 1, 5, 10, 0))
+
+
+# ==================== next_trading_day / prev_trading_day ====================
+
+def test_下一交易日_跳过周末():
+    _注入(["2026-10-28", "2026-10-29", "2026-11-02"], start=date(2026, 9, 1), end=date(2026, 11, 30))
+    assert tc.next_trading_day(date(2026, 10, 29)) == date(2026, 11, 2)
+
+
+def test_上一交易日_跳过周末():
+    _注入(["2026-10-28", "2026-10-29", "2026-11-02"], start=date(2026, 9, 1), end=date(2026, 11, 30))
+    assert tc.prev_trading_day(date(2026, 11, 2)) == date(2026, 10, 29)
+
+
+def test_交易日推算_严格大于或小于入参():
+    """入参本身是交易日时不能被算作「下一日/上一日」。"""
+    _注入(["2026-10-28", "2026-10-29"], start=date(2026, 9, 1), end=date(2026, 11, 30))
+    assert tc.next_trading_day(date(2026, 10, 28)) == date(2026, 10, 29)
+    assert tc.prev_trading_day(date(2026, 10, 29)) == date(2026, 10, 28)
+
+
+def test_推算越界_抛CalendarOutOfCoverage():
+    _注入(["2026-10-28"], start=date(2026, 10, 28), end=date(2026, 10, 28))
+    with pytest.raises(CalendarOutOfCoverage):
+        tc.next_trading_day(date(2026, 10, 28))
+    with pytest.raises(CalendarOutOfCoverage):
+        tc.prev_trading_day(date(2026, 10, 28))
+
+
+def test_推算时快照未载入_抛CalendarUnavailable():
+    tc.reset_cache()
+    with pytest.raises(CalendarUnavailable):
+        tc.next_trading_day(date(2026, 10, 28))
