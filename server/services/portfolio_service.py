@@ -1027,45 +1027,76 @@ class PortfolioService:
 
     # ==================== 账户概况 ====================
 
+    @staticmethod
+    def _empty_account_summary() -> dict:
+        """账户不存在时的默认值（与原先 account_summary 的兜底保持一致）。"""
+        return {
+            "cash": float(INITIAL_CASH),
+            "frozen_cash": 0,
+            "position_value": 0,
+            "total_assets": float(INITIAL_CASH),
+            "total_pnl": 0,
+            "total_return_rate": 0,
+            "position_count": 0,
+        }
+
+    def _build_account_summary(self, user_id: str, positions_data: dict) -> dict:
+        """用已算好的持仓数据组装账户概况，不再重复调用 list_positions。"""
+        account = self.get_account(user_id)
+        if not account:
+            return self._empty_account_summary()
+
+        cash = Decimal(str(account["cash"]))
+        frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
+        position_value = Decimal(str(positions_data["total_position_value"]))
+        total_assets = cash + frozen_cash + position_value
+        total_pnl = total_assets - INITIAL_CASH
+        total_return_rate = (total_pnl / INITIAL_CASH) if INITIAL_CASH > 0 else Decimal("0")
+
+        return {
+            "cash": float(cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "frozen_cash": float(frozen_cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "position_value": float(position_value.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
+            "total_assets": float(total_assets.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
+            "total_pnl": float(total_pnl.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
+            "total_return_rate": float(total_return_rate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)),
+            "position_count": positions_data["total"],
+        }
+
     def account_summary(self, user_id: str) -> dict:
         try:
             # 确保账户存在
             self._ensure_account(user_id)
             # 新老用户一视同仁：闲置现金自动申购货基
             self._auto_invest_money_fund(user_id)
-            account = self.get_account(user_id)
-            if not account:
-                return {
-                    "cash": float(INITIAL_CASH),
-                    "frozen_cash": 0,
-                    "position_value": 0,
-                    "total_assets": float(INITIAL_CASH),
-                    "total_pnl": 0,
-                    "total_return_rate": 0,
-                    "position_count": 0,
-                }
-
-            cash = Decimal(str(account["cash"]))
-            frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
             positions_data = self.list_positions(user_id, include_quote=True)
-            position_value = Decimal(str(positions_data["total_position_value"]))
-            total_assets = cash + frozen_cash + position_value
-            total_pnl = total_assets - INITIAL_CASH
-            total_return_rate = (total_pnl / INITIAL_CASH) if INITIAL_CASH > 0 else Decimal("0")
-
-            return {
-                "cash": float(cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
-                "frozen_cash": float(frozen_cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
-                "position_value": float(position_value.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
-                "total_assets": float(total_assets.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
-                "total_pnl": float(total_pnl.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
-                "total_return_rate": float(total_return_rate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)),
-                "position_count": positions_data["total"],
-            }
+            return self._build_account_summary(user_id, positions_data)
 
         except Exception as e:
             logger.error(f"账户概况查询失败: {e}", exc_info=True)
             return {"cash": 0, "frozen_cash": 0, "position_value": 0, "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0}
+
+    def portfolio_overview(self, user_id: str) -> dict:
+        """持仓页一次读取：账户概况 + 持仓列表。
+
+        持仓只计算一次，账户字段复用同一份结果；替代页面原先并行请求
+        `/portfolio/account` 与 `/portfolio/positions` 导致的双倍计算。
+        """
+        try:
+            self._ensure_account(user_id)
+            self._auto_invest_money_fund(user_id)
+            positions_data = self.list_positions(user_id, include_quote=True)
+            return {
+                "account": self._build_account_summary(user_id, positions_data),
+                "positions": positions_data,
+            }
+
+        except Exception as e:
+            logger.error(f"持仓页概况查询失败: {e}", exc_info=True)
+            return {
+                "account": {"cash": 0, "frozen_cash": 0, "position_value": 0, "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0},
+                "positions": {"total": 0, "items": [], "total_pnl": 0, "total_position_value": 0},
+            }
 
     # ==================== Pending 订单确认 ====================
 

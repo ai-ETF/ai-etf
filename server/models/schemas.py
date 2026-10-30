@@ -393,6 +393,15 @@ class AccountSummaryResponse(BaseModel):
     position_count: int
 
 
+class PortfolioOverviewResponse(BaseModel):
+    """持仓页概况响应：账户概况 + 持仓列表一次返回。
+
+    两个字段共用同一次持仓计算，避免页面加载时前后端各算一遍。
+    """
+    account: AccountSummaryResponse
+    positions: PositionListResponse
+
+
 class TradeFlowItem(BaseModel):
     """交易流水单项"""
     id: str

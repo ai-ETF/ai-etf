@@ -31,6 +31,7 @@ from server.models.schemas import (
     PositionListResponse,
     PositionItem,
     AccountSummaryResponse,
+    PortfolioOverviewResponse,
     TradeFlowResponse,
     TradeFlowItem,
     SnapshotResponse,
@@ -119,30 +120,53 @@ async def apply_redeem(
     )
 
 
+def _to_position_list_response(result: dict) -> PositionListResponse:
+    """把服务层返回的持仓字典转成响应模型（/positions 与 /overview 共用）。"""
+    return PositionListResponse(
+        total=result["total"],
+        items=[PositionItem(**item) for item in result["items"]],
+        total_pnl=result["total_pnl"],
+        total_position_value=result["total_position_value"],
+    )
+
+
+# 同步函数（def）：服务层是同步的 Supabase 调用，交给 FastAPI 线程池执行，
+# 避免阻塞事件循环导致并发请求排队。
 @router.get("/positions", response_model=PositionListResponse)
-async def list_positions(
+def list_positions(
     include_quote: bool = Query(True, description="是否按实时行情计算市值和盈亏"),
     current_user: str = Depends(get_current_user),
 ):
     """查询持仓列表（需 JWT 认证）"""
     svc = PortfolioService()
     result = svc.list_positions(user_id=current_user, include_quote=include_quote)
-    items = [PositionItem(**item) for item in result["items"]]
-    return PositionListResponse(
-        total=result["total"],
-        items=items,
-        total_pnl=result["total_pnl"],
-        total_position_value=result["total_position_value"],
-    )
+    return _to_position_list_response(result)
 
 
 @router.get("/account", response_model=AccountSummaryResponse)
-async def account_summary(
+def account_summary(
     current_user: str = Depends(get_current_user),
 ):
     """查询账户概况（需 JWT 认证）"""
     svc = PortfolioService()
     return svc.account_summary(user_id=current_user)
+
+
+@router.get("/overview", response_model=PortfolioOverviewResponse)
+def portfolio_overview(
+    current_user: str = Depends(get_current_user),
+):
+    """持仓页一次读取账户概况与持仓列表（需 JWT 认证）。
+
+    替代页面并行请求 `/account` + `/positions`：后端只算一次持仓，
+    页面只发一个请求。旧的两个端点保留，供其他页面继续使用。
+    """
+    svc = PortfolioService()
+    result = svc.portfolio_overview(user_id=current_user)
+    return PortfolioOverviewResponse(
+        account=AccountSummaryResponse(**result["account"]),
+        positions=_to_position_list_response(result["positions"]),
+    )
 
 
 @router.get("/trade-flow", response_model=TradeFlowResponse)
@@ -293,29 +317,36 @@ async def test_apply_redeem(
 
 
 @router.get("/test/positions", response_model=PositionListResponse, tags=["portfolio-dev"])
-async def test_list_positions(
+def test_list_positions(
     include_quote: bool = Query(True),
     user_id: str = Depends(_get_test_user),
 ):
     """[开发] 持仓列表（免 JWT）"""
     svc = PortfolioService()
     result = svc.list_positions(user_id=user_id, include_quote=include_quote)
-    items = [PositionItem(**item) for item in result["items"]]
-    return PositionListResponse(
-        total=result["total"],
-        items=items,
-        total_pnl=result["total_pnl"],
-        total_position_value=result["total_position_value"],
-    )
+    return _to_position_list_response(result)
 
 
 @router.get("/test/account", response_model=AccountSummaryResponse, tags=["portfolio-dev"])
-async def test_account_summary(
+def test_account_summary(
     user_id: str = Depends(_get_test_user),
 ):
     """[开发] 账户概况（免 JWT）"""
     svc = PortfolioService()
     return svc.account_summary(user_id=user_id)
+
+
+@router.get("/test/overview", response_model=PortfolioOverviewResponse, tags=["portfolio-dev"])
+def test_portfolio_overview(
+    user_id: str = Depends(_get_test_user),
+):
+    """[开发] 持仓页概况（免 JWT）"""
+    svc = PortfolioService()
+    result = svc.portfolio_overview(user_id=user_id)
+    return PortfolioOverviewResponse(
+        account=AccountSummaryResponse(**result["account"]),
+        positions=_to_position_list_response(result["positions"]),
+    )
 
 
 @router.get("/test/trade-flow", response_model=TradeFlowResponse, tags=["portfolio-dev"])

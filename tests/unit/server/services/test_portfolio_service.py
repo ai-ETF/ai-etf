@@ -1570,3 +1570,62 @@ def test_交易服务不再直接调用akshare取净值():
     src = inspect.getsource(portfolio_service)
     assert "fund_open_fund_info_em" not in src
     assert "import akshare" not in src
+
+
+# ==================== 持仓页概况：只算一次持仓 ====================
+
+
+def _overview_fake_client() -> "FakeClient":
+    """账户 + 货基持仓 + 一只非货基持仓，供 overview / account 测试复用。"""
+    return FakeClient({
+        "accounts": [{"user_id": "u1", "cash": 100, "frozen_cash": 5}],
+        "positions": [
+            {"id": "p1", "user_id": "u1", "fund_code": MONEY_FUND_CODE,
+             "fund_name": "货币基金", "quantity": 1000, "principal": 1000,
+             "cost_price": 1.0, "updated_at": "2026-01-01"},
+            {"id": "p2", "user_id": "u1", "fund_code": "110020",
+             "fund_name": "易方达", "quantity": 100, "principal": None,
+             "cost_price": 1.0, "updated_at": "2026-01-02"},
+        ],
+    })
+
+
+def _count_list_positions(monkeypatch) -> list:
+    """包一层计数列表，断言页面加载链路只计算一次持仓。"""
+    calls = []
+    original = PortfolioService.list_positions
+
+    def counting(self, user_id, include_quote=True):
+        calls.append((user_id, include_quote))
+        return original(self, user_id, include_quote)
+
+    monkeypatch.setattr(PortfolioService, "list_positions", counting)
+    return calls
+
+
+def test_portfolio_overview_持仓只计算一次(monkeypatch):
+    svc = PortfolioService(fund_nav=FakeFundNav(latest={"110020": Decimal("1.5")}))
+    svc._client = _overview_fake_client()
+    calls = _count_list_positions(monkeypatch)
+
+    result = svc.portfolio_overview("u1")
+
+    assert len(calls) == 1
+    assert result["positions"]["total"] == 2
+    # 货基 1000 + 非货基 100 × 1.5 = 1150
+    assert result["positions"]["total_position_value"] == 1150.0
+    assert result["account"]["position_value"] == 1150.0
+    assert result["account"]["position_count"] == 2
+    assert result["account"]["total_assets"] == 1150.0 + 100 + 5
+
+
+def test_account_summary_持仓只计算一次(monkeypatch):
+    svc = PortfolioService(fund_nav=FakeFundNav(latest={"110020": Decimal("1.5")}))
+    svc._client = _overview_fake_client()
+    calls = _count_list_positions(monkeypatch)
+
+    result = svc.account_summary("u1")
+
+    assert len(calls) == 1
+    assert result["position_value"] == 1150.0
+    assert result["position_count"] == 2
