@@ -23,7 +23,7 @@ from server.services.auth_service import (
     register_user,
 )
 from server.storage.chat_repo import get_chat_repo
-from server.storage.supabase_client import get_supabase
+from server.storage.supabase_client import get_auth_client
 from server.utils.sse import format_sse_event, create_sse_stream_response
 
 logger = logging.getLogger(__name__)
@@ -128,7 +128,9 @@ async def login(req: LoginRequest):
     同时返回 refresh_token（长效凭证，Supabase 默认 30 天）：access_token 过期后
     用 POST /secure-chat/refresh 换取新的一对 token，实现免登录。前端需持久化保存。
     """
-    supabase = get_supabase()
+    # 登录必须用独立客户端：sign_in 会把客户端的 Authorization 改成该用户 JWT，
+    # 共享的数据客户端一旦被改写，全进程后续请求都会串成这个用户的身份。
+    supabase = get_auth_client()
     if not supabase:
         raise HTTPException(status_code=500, detail="数据库连接未就绪")
 
