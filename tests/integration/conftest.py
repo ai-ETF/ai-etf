@@ -15,6 +15,16 @@ import types
 import pytest
 
 
+# ---------- 本机地址绕过代理 ----------
+# 本机若配置了 HTTP(S)_PROXY（WSL 常见，代理在宿主机），httpx 会把发往 127.0.0.1
+# 的请求也交给代理，于是被出网守卫拦成「禁止出网：<宿主机IP>」，看起来像代码故障。
+# 在导入 server.app 之前把本机地址加入 NO_PROXY，保证只连本地栈。
+for _var in ("NO_PROXY", "no_proxy"):
+    _hosts = [h for h in os.environ.get(_var, "").split(",") if h]
+    _hosts += [h for h in ("127.0.0.1", "localhost", "::1") if h not in _hosts]
+    os.environ[_var] = ",".join(_hosts)
+
+
 # ---------- 重依赖替身（import server.app 前预填充 sys.modules） ----------
 # langchain_anthropic 导入 >60s；document_service → rag.embedder/graphs → torch/langgraph 极重。
 # 二者在 import server.app（→ api → secure_chat/upload）时被连带加载，拖垮所有 API 测试。
@@ -40,43 +50,54 @@ _install("server.services.document_service", DocumentService=type("DocumentServi
 
 # ---------- 本地库配置解析 ----------
 
+def _local_stack_env() -> dict:
+    """`supabase status -o env` 解析后的键值；取不到时返回空 dict。
+
+    `supabase status` 需要 docker socket 权限；当前会话可能不在 docker 组
+    （用户已在组内但未重开终端），故用 `sg docker -c` 包裹兜底。
+    """
+    for cmd in (
+        ["sg", "docker", "-c", "supabase status -o env"],
+        ["supabase", "status", "-o", "env"],
+    ):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0 and "SERVICE_ROLE_KEY" in proc.stdout:
+            env = {}
+            for line in proc.stdout.splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+            return env
+    return {}
+
+
 def _resolve_local_supabase() -> tuple[str, str]:
     """返回 (URL, service_role_key)。
 
     优先级：环境变量 TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY（CI 场景）
     → `supabase status -o env`（本地 CLI 动态获取）。
-
-    `supabase status` 需要 docker socket 权限；当前会话可能不在 docker 组
-    （用户已在组内但未重开终端），故用 `sg docker -c` 包裹兜底。
     """
     url = os.getenv("TEST_SUPABASE_URL")
     key = os.getenv("TEST_SUPABASE_SERVICE_ROLE_KEY")
     if url and key:
         return url, key
 
-    out = ""
-    candidates = [
-        ["sg", "docker", "-c", "supabase status -o env"],
-        ["supabase", "status", "-o", "env"],
-    ]
-    for cmd in candidates:
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-        if proc.returncode == 0 and "SERVICE_ROLE_KEY" in proc.stdout:
-            out = proc.stdout
-            break
-
-    env = {}
-    for line in out.splitlines():
-        if "=" in line:
-            k, _, v = line.partition("=")
-            env[k.strip()] = v.strip().strip('"').strip("'")
-
+    env = _local_stack_env()
     url = env.get("API_URL") or env.get("SUPABASE_URL") or "http://127.0.0.1:54321"
     key = env.get("SERVICE_ROLE_KEY") or env.get("SUPABASE_SERVICE_ROLE_KEY")
     return url, key
+
+
+def _resolve_local_anon_key() -> str:
+    """本地栈的 anon key（模拟前端手里那把公开密钥）；CI 用 TEST_SUPABASE_ANON_KEY。"""
+    key = os.getenv("TEST_SUPABASE_ANON_KEY")
+    if key:
+        return key
+    env = _local_stack_env()
+    return env.get("ANON_KEY") or env.get("SUPABASE_ANON_KEY") or ""
 
 
 def _assert_local_target(url: str) -> None:
@@ -261,6 +282,14 @@ def jwt_secret():
     return _resolve_local_jwt_secret()
 
 
+@pytest.fixture(scope="session")
+def local_stack():
+    """本地栈的访问参数：url / service_role key / anon key（只允许本地地址）。"""
+    url, service_key = _resolve_local_supabase()
+    _assert_local_target(url)
+    return {"url": url, "service_key": service_key, "anon_key": _resolve_local_anon_key()}
+
+
 @pytest.fixture
 def auth_headers(jwt_secret):
     """返回函数：根据 user_id 生成 Authorization headers（自签 JWT）。"""
@@ -310,6 +339,8 @@ def api_client(monkeypatch):
       而非共享的 supabase_client——因为 secure_chat 的 sign_up 会自动设置 client
       的 session（auto-login），把 service_role 切成 authenticated role 触发 RLS，
       独立 client 可隔离这种污染；
+    - get_auth_client 指向本地栈的**新建** client：生产代码里登录/注册/刷新走独立
+      客户端（不污染数据客户端），若不替换，它会去读 .env 里的地址而不是本地栈；
     - 调度器替身，避免 lifespan 启动 30s 行情刷新任务打 AKShare；
     - SETTINGS.SUPABASE_JWT_SECRET 指向本地，使自签 token 能通过 verify。
     """
@@ -322,6 +353,11 @@ def api_client(monkeypatch):
     from server.storage import supabase_client as sc
 
     monkeypatch.setattr(sc, "get_supabase", lambda: local_client)
+    # 两个模块以 `from ... import get_auth_client` 绑定，必须分别替换模块属性
+    monkeypatch.setattr("server.api.secure_chat.get_auth_client",
+                        lambda: create_client(url, key))
+    monkeypatch.setattr("server.services.auth_service.get_auth_client",
+                        lambda: create_client(url, key))
 
     monkeypatch.setattr("server.services.spot_cache_scheduler.start_scheduler", lambda: None)
     monkeypatch.setattr("server.services.spot_cache_scheduler.shutdown_scheduler", lambda: None)

@@ -19,7 +19,7 @@ from supabase_auth.errors import (
 )
 
 from server.auth.token_store import revoke
-from server.storage.supabase_client import get_supabase
+from server.storage.supabase_client import get_auth_client, get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,9 @@ def register_user(email: str, password: str) -> dict:
     validate_email(email)
     validate_password(password)
 
-    supabase = get_supabase()
+    # sign_up 会改写客户端的 Authorization 头，必须用独立客户端，
+    # 不能污染进程内共享的数据客户端。
+    supabase = get_auth_client()
     if not supabase:
         raise HTTPException(status_code=500, detail="数据库连接未就绪")
 
@@ -155,7 +157,8 @@ def refresh_session_token(refresh_token: str) -> dict:
     if not refresh_token or not refresh_token.strip():
         raise HTTPException(status_code=400, detail="缺少 refresh_token")
 
-    supabase = get_supabase()
+    # refresh_session 同样会改写客户端的 Authorization 头，必须用独立客户端。
+    supabase = get_auth_client()
     if not supabase:
         raise HTTPException(status_code=500, detail="数据库连接未就绪")
 
@@ -243,7 +246,8 @@ def delete_account(user_id: str, email: str, password: str) -> None:
     Raises:
         HTTPException: 401 密码错误 / 500 数据库未就绪 / 502 清理或删除失败
     """
-    supabase = get_supabase()
+    # 密码复核会 sign_in，必须用独立客户端，不能污染进程内共享的数据客户端。
+    supabase = get_auth_client()
     if not supabase:
         raise HTTPException(status_code=500, detail="数据库连接未就绪")
 
@@ -255,10 +259,9 @@ def delete_account(user_id: str, email: str, password: str) -> None:
         raise HTTPException(status_code=401, detail="密码错误")
 
     # 2) 清理业务数据 + 删除账号。
-    #    用新客户端执行：sign_in 会让原客户端携带用户 session，
-    #    若复用则 RPC 会以 authenticated 身份调用（函数仅授权 service_role，
-    #    且 SECURITY DEFINER 函数不能让普通用户任意调用）。
-    admin = get_supabase()
+    #    必须再新建一个客户端：上面 sign_in 已让 supabase 客户端带上用户 session，
+    #    若复用则 RPC 会以 authenticated 身份调用（函数预期只给 service_role 用）。
+    admin = get_auth_client()
     if not admin:
         raise HTTPException(status_code=500, detail="数据库连接未就绪")
 
