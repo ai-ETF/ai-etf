@@ -37,16 +37,24 @@ AUTH_ENDPOINT_PREFIXES = (
     "/api/test",
 )
 
+# 归入 01 文档的认证类接口：比公开集合多 logout / delete-account（需 JWT）。
+# 只用于 module_for，不参与 needs_auth 的公开判定。
+AUTH_DOC_PREFIXES = AUTH_ENDPOINT_PREFIXES + (
+    "/api/secure-chat/logout",
+    "/api/secure-chat/delete-account",
+)
+
 # 生成 README 总览表时，把路径归到模块文档（按前缀匹配，前面的优先）
 # 根路径 / 单独在 module_for 中处理，不放进前缀，避免 "/" 匹配所有路径。
 MODULE_BY_PREFIX = [
-    (AUTH_ENDPOINT_PREFIXES, "01-基础与认证.md"),
+    (AUTH_DOC_PREFIXES, "01-基础与认证.md"),
     (("/api/secure-chat",), "02-对话与会话.md"),
     (("/api/market",), "03-行情.md"),
     (("/api/watchlist",), "04-自选股.md"),
     (("/api/portfolio",), "05-组合交易.md"),
     (("/api/risk",), "06-风险测评.md"),
     (("/api/upload",), "07-文档上传.md"),
+    (("/api/admin",), "08-管理接口.md"),
 ]
 
 def normalize(path: str) -> str:
@@ -119,6 +127,8 @@ def needs_auth(method: str, path: str) -> str:
         return "-"
     if path.endswith("/health"):
         return "-"
+    if path.startswith("/api/admin") or path == "/api/portfolio/confirm-pending":
+        return "`X-Admin-Token`"
     if path.startswith("/api/portfolio/test/"):
         return "`X-User-Id`"
     return "🔒"
@@ -177,7 +187,15 @@ def main() -> int:
         print("\n--- README 接口总览表（可直接粘贴）---\n")
         print("| 方法 | 路径 | 认证 | 文档 |")
         print("|------|------|:---:|------|")
-        for method, path in sorted(live, key=lambda x: (x[1], x[0])):
+        # 表格用 openapi 原始路径（保留 {fund_code} 等占位符），
+        # 归一化后的 {P} 只用于文档匹配，不适合展示给读者。
+        raw = [
+            (method.upper(), path)
+            for path, item in (spec.get("paths") or {}).items()
+            for method in item
+            if method.lower() in HTTP_METHODS
+        ]
+        for method, path in sorted(raw, key=lambda x: (x[1], x[0])):
             auth = needs_auth(method, path)
             doc = module_for(path)
             print(f"| {method:6} | `{path}` | {auth} | [{doc}]({doc}) |")
