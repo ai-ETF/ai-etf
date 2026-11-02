@@ -26,6 +26,9 @@ class _搜索服务:
             "code": "110020", "name": "易方达沪深300ETF联接A",
             "fund_type": "指数型-股票", "net_asset_scale": "123456789.12",
             "nav": 1.52, "nav_date": "2026-01-06",
+            "subscribe_status": "开放申购",
+            "min_purchase_amount": 10.0,
+            "max_purchase_amount": None,
         }]
 
 
@@ -50,6 +53,9 @@ def test_search_命中并返回最新净值(search_client):
     assert body["items"][0]["code"] == "110020"
     assert body["items"][0]["nav"] == 1.52
     assert body["items"][0]["nav_date"] == "2026-01-06"
+    assert body["items"][0]["subscribe_status"] == "开放申购"
+    assert body["items"][0]["min_purchase_amount"] == 10.0
+    assert body["items"][0]["max_purchase_amount"] is None
 
 
 def test_search_场内ETF代码无结果(search_client, monkeypatch):

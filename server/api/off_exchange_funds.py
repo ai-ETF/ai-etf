@@ -92,8 +92,11 @@ async def get_fund_detail(
     if not detail:
         raise HTTPException(status_code=404, detail=f"暂不支持基金 {fund_code} 的交易")
 
-    return OffExchangeFundDetailResponse(
+    # 先归一化再整体构造：`detail` 已含这两个键，直接与显式 kwarg 同时展开会触发
+    # TypeError: got multiple values for keyword argument（详情接口因此 500）。
+    payload = {
         **detail,
-        purchase_fee_tiers=_normalize_tiers(detail.get("purchase_fee_tiers")),
-        redemption_fee_tiers=_normalize_tiers(detail.get("redemption_fee_tiers")),
-    )
+        "purchase_fee_tiers": _normalize_tiers(detail.get("purchase_fee_tiers")),
+        "redemption_fee_tiers": _normalize_tiers(detail.get("redemption_fee_tiers")),
+    }
+    return OffExchangeFundDetailResponse(**payload)

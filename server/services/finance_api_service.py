@@ -78,6 +78,12 @@ class FinanceApiService:
                 ),
                 "nav": self._safe_float(nav.unit_nav) if nav else None,
                 "nav_date": nav.nav_date.isoformat() if nav else None,
+                # 准入字段随搜索一次返回，前端无需再逐项调详情接口。
+                # NULL 的语义见接口文档：subscribe_status 空=存量行按开放申购，
+                # max_purchase_amount 空仅对「开放申购」表示无限额。
+                "subscribe_status": meta.subscribe_status,
+                "min_purchase_amount": self._safe_float(meta.min_purchase_amount),
+                "max_purchase_amount": self._safe_float(meta.max_purchase_amount),
             })
         logger.info(f"搜索目录: keyword={keyword}, 命中 {len(results)} 条")
         return results

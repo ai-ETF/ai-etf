@@ -217,6 +217,11 @@ class SearchItem(BaseModel):
     fund_type: Optional[str] = None  # 基金类型
     net_asset_scale: Optional[str] = None  # 净资产规模
 
+    # 交易准入（来自 fund_catalog，搜索页据此直接标注，无需再调详情）
+    subscribe_status: Optional[str] = None  # 空=存量行按开放申购
+    min_purchase_amount: Optional[float] = None  # 最低申购金额（元）
+    max_purchase_amount: Optional[float] = None  # 空：开放申购=无限额；限大额=上限未知（拒绝申购）
+
 
 class SearchResponse(BaseModel):
     """搜索响应"""

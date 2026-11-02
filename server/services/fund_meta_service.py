@@ -25,6 +25,12 @@ _META_FIELDS = (
     "risk_level_code,is_qdii,qdii_reason,lifecycle_status"
 )
 
+# `fund_catalog` 视图独有：视图已 JOIN 交易规则，搜索时顺带取准入字段。
+# 不能并进 _META_FIELDS —— get()/get_batch() 查的是 fund 表，没有这三列。
+_CATALOG_FIELDS = (
+    _META_FIELDS + ",subscribe_status,min_purchase_amount,max_purchase_amount"
+)
+
 
 @dataclass(frozen=True)
 class FundMeta:
@@ -41,6 +47,10 @@ class FundMeta:
     is_qdii: Optional[bool] = None
     qdii_reason: Optional[str] = None
     lifecycle_status: str = "active"
+    # 交易准入字段：仅 search() 从 fund_catalog 读取，get()/get_batch() 为 None
+    subscribe_status: Optional[str] = None
+    min_purchase_amount: Optional[Decimal] = None
+    max_purchase_amount: Optional[Decimal] = None
 
 
 class FundMetaService:
@@ -100,7 +110,7 @@ class FundMetaService:
             return []
         result = (
             self.client.table("fund_catalog")
-            .select(_META_FIELDS)
+            .select(_CATALOG_FIELDS)
             .or_(f"fund_code.ilike.{pattern},fund_name.ilike.{pattern}")
             .order("fund_code")
             .limit(int(limit))
@@ -139,6 +149,9 @@ def _to_meta(row: dict) -> FundMeta:
         is_qdii=row.get("is_qdii"),
         qdii_reason=row.get("qdii_reason"),
         lifecycle_status=row.get("lifecycle_status") or "active",
+        subscribe_status=row.get("subscribe_status") or None,
+        min_purchase_amount=_to_decimal(row.get("min_purchase_amount")),
+        max_purchase_amount=_to_decimal(row.get("max_purchase_amount")),
     )
 
 
