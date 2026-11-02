@@ -432,7 +432,8 @@ class FinanceApiService:
                 # 基本信息
                 "full_name": str(row.get("基金全称", "")),
                 "short_name": str(row.get("基金简称", "")),
-                "code": str(row.get("基金代码", "")).replace("（主代码）", ""),
+                # 上游会在代码后拼接「（主代码）」「（前端）」等标识，统一剥掉
+                "code": re.sub(r"（[^）]*）\s*$", "", str(row.get("基金代码", ""))).strip(),
                 "fund_type": str(row.get("基金类型", "")),
 
                 # 发行与成立
@@ -490,8 +491,9 @@ class FinanceApiService:
             # 历史不可用是「暂时取不到」，不是「没有历史」：上抛让 API 返回 503
             raise
         except Exception as e:
-            logger.error(f"读取历史净值失败 ({fund_code}): {e}")
-            return []
+            # 读取/补数失败不能伪装成「空历史」：把上下文带出去，由 API 映射 503
+            logger.error(f"读取历史净值失败 ({fund_code}): {e}", exc_info=True)
+            raise FundNavUnavailable(fund_code, "read_failed", str(e)) from e
 
         logger.info(f"返回历史净值 {len(points)} 条（DB）: {fund_code}")
         return [
