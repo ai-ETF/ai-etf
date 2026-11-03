@@ -1106,7 +1106,8 @@ def _patch_redeem_common(monkeypatch, rule=None):
     monkeypatch.setattr(PortfolioService, "_get_fund_name", lambda self, code, rule=None: "易方达")
 
 
-def test_赎回_成功_到账日与RPC参数(monkeypatch):
+def test_赎回_成功_确认日与到账日口径(monkeypatch):
+    """确认日 = T + confirm_delay；到账日 = 实际确认日 + 1 个交易日。"""
     _patch_redeem_common(monkeypatch)
     svc = PortfolioService()
     svc._client = FakeClient()
@@ -1118,14 +1119,16 @@ def test_赎回_成功_到账日与RPC参数(monkeypatch):
     assert result["success"] is True
     data = result["data"]
     assert data["trade_date"] == "2026-01-05"
-    assert data["settle_date"] == "2026-01-08"  # T + 3 个交易日
+    assert data["confirm_date"] == "2026-01-06"  # T + 1 个交易日
+    assert data["settle_date"] == "2026-01-07"   # 确认日 + 1 个交易日
     assert data["order_id"] == "s1"
 
     name, params = svc._client.rpc_calls[0]
     assert name == "place_redeem_order"
     assert params["p_quantity"] == 100.0
     assert params["p_client_order_id"] == "rk-1"
-    assert params["p_settle_date"] == "2026-01-08"
+    assert params["p_confirm_date"] == "2026-01-06"
+    assert params["p_settle_date"] == "2026-01-07"
 
 
 @pytest.mark.parametrize("rpc_result,片段", [

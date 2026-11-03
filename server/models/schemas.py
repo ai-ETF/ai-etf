@@ -361,6 +361,23 @@ class OrderResponse(BaseModel):
     risk_warning: Optional[RiskWarning] = None
 
 
+class CancelOrderResult(BaseModel):
+    """撤单结果"""
+    order_id: str
+    status: str
+    direction: Optional[str] = None  # buy / sell
+    refunded_amount: Optional[float] = None  # 买入撤单退回的冻结资金
+    released_quantity: Optional[float] = None  # 卖出撤单释放的份额
+    cancel_deadline: Optional[str] = None  # 撤单截止时间（受理日 15:00）
+
+
+class CancelOrderResponse(BaseModel):
+    """撤单响应"""
+    success: bool
+    message: str
+    data: Optional[CancelOrderResult] = None
+
+
 class PositionItem(BaseModel):
     """持仓单项"""
     id: str
@@ -439,7 +456,7 @@ class ConfirmRunResponse(BaseModel):
 
     `status='busy'` 表示已有一轮在跑，本轮跳过（不是失败，HTTP 仍为 200）。
     保留 `processed/skipped` 两个旧字段作为别名：processed=scanned，
-    skipped=skipped_nav+retryable。
+    skipped=skipped_nav+skipped_time+retryable。
     """
     run_id: Optional[str] = None
     status: str  # ok / busy
@@ -450,6 +467,7 @@ class ConfirmRunResponse(BaseModel):
     confirmed: int = 0
     rejected: int = 0
     skipped_nav: int = 0
+    skipped_time: int = 0
     retryable: int = 0
     manual_review: int = 0
     settled: int = 0

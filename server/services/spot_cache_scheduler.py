@@ -2,14 +2,16 @@
 定时任务调度器（订单确认 / 净值 / 白名单同步 / 货基收益）
 
 独立管理（调度口径见《订单确认-执行机制》§3.12）：
-1. 订单确认兜底扫描：18:00–09:00 每 30 分钟一次（非交易日照常）
+1. 订单确认：每天 10:00 主任务 + 11:00–23:00 每小时补扫
 2. 货基万份收益入账（每天 00:05）
 3. 场外基金白名单同步（每天 02:17）
-4. 场外基金最新净值更新；**更新成功后异步触发一次确认**（确认只读 DB）
+4. 场外基金最新净值更新（只抓净值，不触发确认）
 5. 账户日终快照（每天 08:45，目标为上一交易日）
 6. 启动时补偿：净值补跑 → 确认遗漏订单（串行）
 
-确认与抓取解耦：确认不再挂在净值任务里同步执行，也不再有 15:37 的「只补历史」窗口。
+确认与抓取解耦：确认固定等到 10:00，净值同步成功不再触发确认。
+10:00 前启动的补偿轮只会处理「确认日早于今天」的订单，当天订单由 Runner 的
+时点门槛挡住。
 
 2026-10-26：场内 ETF 的 30 秒行情轮询（`refresh_etf_spot`）与启动预热
 （`_warmup_cache`）已删除——产品只做场外基金，净值每日公布一次，不需要实时行情。
@@ -30,14 +32,10 @@ _scheduler: AsyncIOScheduler | None = None
 # 所有 CronTrigger 显式使用东八区：服务器可能是 UTC
 TZ = ZoneInfo("Asia/Shanghai")
 
-# 持有确认任务的引用，避免 create_task 的返回值被 GC 后任务被取消
-_confirm_tasks: set[asyncio.Task] = set()
-
-
 async def _confirm_pending_orders_job(trigger: str = "fallback"):
     """跑一轮订单确认（Runner 会自己抢批次锁，拿不到即视为本轮跳过）。
 
-    `trigger` 取 sync / fallback / startup / manual，用于 confirm_runs 审计。
+    `trigger` 取 fallback / startup / manual，用于 confirm_runs 审计。
     Runner 是同步实现（PostgREST 调用），放到线程里跑，不阻塞事件循环。
     """
     from server.config.settings import SETTINGS
@@ -51,22 +49,6 @@ async def _confirm_pending_orders_job(trigger: str = "fallback"):
     result = await asyncio.to_thread(OrderConfirmService().run, trigger)
     logger.info("[确认] 本轮结束: %s", result)
     return result
-
-
-def trigger_confirm(trigger: str = "sync") -> None:
-    """异步触发一轮确认，不阻塞调用方（净值同步成功后调用）。
-
-    单飞由 `acquire_confirm_run` 保证：拿不到批次锁的一轮直接返回 busy。
-    """
-    async def _run():
-        try:
-            await _confirm_pending_orders_job(trigger)
-        except Exception as exc:  # 确认失败不影响同步，只留痕
-            logger.error("[确认] 触发失败 trigger=%s: %s", trigger, exc, exc_info=True)
-
-    task = asyncio.ensure_future(_run())
-    _confirm_tasks.add(task)
-    task.add_done_callback(_confirm_tasks.discard)
 
 
 async def _credit_money_fund_income_job():
@@ -94,8 +76,8 @@ async def _account_snapshot_job():
     """账户日终快照任务（每天 08:45 执行，含周末/节假日）。
 
     目标日固定为 `prev_trading_day(今天)`：T 日快照在 T+1 08:45 生成，此时
-    T+1 的买卖尚未确认，账户总资产仍等于 T 日收盘值；08:05 的净值补抓和
-    08:30 的确认轮都已跑完。周末/节假日重复以周五为目标，已有有效快照则跳过。
+    T+1 的买卖要到 10:00 才确认，账户总资产仍等于 T 日收盘值。
+    周末/节假日重复以周五为目标，已有有效快照则跳过。
 
     交易日历不可用、批量读取失败时直接抛错，由调度器标记失败，不写半成品。
     """
@@ -188,16 +170,16 @@ async def _warm_positions_job():
 
 
 async def _fund_nav_update_job(prev_day: bool = False):
-    """场外基金最新净值更新；更新成功后异步触发一次确认。
+    """场外基金最新净值更新。
 
     参数:
         prev_day: True 用「昨天」判断是否交易日（凌晨 00:30/01:30 的收尾轮）
 
-    流程：`update_batch`（写最新一两个点）→ 持仓预热 → 触发确认。
+    流程：`update_batch`（写最新一两个点）→ 持仓预热。
     拿不到单飞锁（已有更新在跑）视为本轮跳过，**不算失败**。
 
-    确认只读 DB，与抓取解耦：抓取失败不触发确认（已入库的净值仍会被下一轮
-    兜底扫描用上），确认失败也不回滚同步。
+    确认与抓取解耦：净值入库后不再触发确认，确认统一由 10:00 的任务扫描。
+    抓取失败也不影响已入库净值的确认。
     """
     from server.services.fund_nav_sync_service import FundNavSyncService, NavLockBusy
     from server.services.trading_calendar import beijing_now
@@ -220,7 +202,6 @@ async def _fund_nav_update_job(prev_day: bool = False):
 
     logger.info("[净值] 最新净值更新完成: %s", result.as_dict())
     await _warm_positions_job()
-    trigger_confirm("sync")
 
 
 async def _startup_nav_update():
@@ -257,27 +238,29 @@ def start_scheduler() -> AsyncIOScheduler:
 
     _scheduler = AsyncIOScheduler(timezone=TZ)
 
-    # 触发 2：订单确认兜底扫描（18:00–09:00 每 30 分钟，非交易日照常）
+    # 触发 2：订单确认（业务规则固定 10:00，非交易日照常）
     # 确认只读 DB，取不到净值就保持 pending，等下一轮；能不能确认由
     # `get_nav_on(accepted_date)` 决定。单飞由 confirm_runs 保证，busy 跳过即可。
-    # 注意不要写成 hour="18-23,0-9"，否则会多出 09:30。
+    # Runner 内部还有一道时点门槛：当天才到确认日的订单，早于 10:00 不处理。
     _scheduler.add_job(
         partial(_confirm_pending_orders_job, "fallback"),
-        trigger=CronTrigger(hour="18-23,0-8", minute="0,30", timezone=TZ),
-        id="order_confirm_fallback",
-        name="订单确认兜底扫描（18:00–08:30 每30分钟）",
+        trigger=CronTrigger(hour=10, minute=0, timezone=TZ),
+        id="order_confirm_primary",
+        name="订单确认主任务（每天10:00）",
         replace_existing=True,
-        misfire_grace_time=900,
+        misfire_grace_time=3600,
     )
+    # 10:00 后每小时补扫：覆盖净值晚到、单轮超时、进程重启等情况。
+    # 更早日期的过期订单也由这些轮次和次日 10:00 主任务补确认，不额外加早间轮。
     _scheduler.add_job(
         partial(_confirm_pending_orders_job, "fallback"),
-        trigger=CronTrigger(hour=9, minute=0, timezone=TZ),
-        id="order_confirm_fallback_0900",
-        name="订单确认兜底扫描（09:00）",
+        trigger=CronTrigger(hour="11-23", minute=0, timezone=TZ),
+        id="order_confirm_catchup",
+        name="订单确认补扫（11:00–23:00 每小时）",
         replace_existing=True,
-        misfire_grace_time=900,
+        misfire_grace_time=1800,
     )
-    logger.info("订单确认兜底扫描已注册（18:00–08:30 每30分钟 + 09:00）")
+    logger.info("订单确认任务已注册（10:00 主任务 + 11:00–23:00 每小时补扫）")
 
     # 触发 1 的兜底来源：场外基金净值更新（净值通常交易日 18:00 后才公布）。
     # 多轮重试覆盖「公布晚 / QDII 更晚」；每轮更新成功后异步触发一次确认。
@@ -331,8 +314,8 @@ def start_scheduler() -> AsyncIOScheduler:
     logger.info("货基收益入账任务已注册（每天00:05，1小时容错）")
 
     # 任务 3.5：账户日终快照（每天 08:45，含周末/节假日）
-    # 排 08:05 净值补抓、08:30 确认轮之后，09:30 开盘之前；目标日固定为
-    # prev_trading_day(今天)，保证 T+1 的买卖还没确认时取到 T 日收盘状态。
+    # 09:30 开盘之前；目标日固定为 prev_trading_day(今天)。当天的买卖要到
+    # 10:00 才确认，08:45 取到的仍是 T 日收盘状态。
     _scheduler.add_job(
         _account_snapshot_job,
         trigger=CronTrigger(hour=8, minute=45, timezone=TZ),

@@ -38,10 +38,10 @@ def test_买单_受理日按确认日回推确认延迟():
     assert dates == {"accepted_date": "2026-10-27", "available_date": "2026-10-30"}
 
 
-def test_卖单_受理日等于确认日_到账日顺延():
+def test_卖单_受理日等于确认日_到账日顺延一个交易日():
     order = {"direction": "sell", "confirm_date": "2026-10-28"}
     dates = bf.compute_order_dates(order, RULE)
-    assert dates == {"accepted_date": "2026-10-28", "settle_date": "2026-11-02"}
+    assert dates == {"accepted_date": "2026-10-28", "settle_date": "2026-10-29"}
 
 
 def test_确认延迟为0时_受理日等于确认日():

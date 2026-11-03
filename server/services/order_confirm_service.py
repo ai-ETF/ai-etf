@@ -7,6 +7,9 @@
 - **编排在这里，记账在数据库**。所有资金/持仓/流水写入都走 `confirm_*` RPC，
   本模块不改 `accounts`/`positions`/`position_lots`/`trade_flow`。
 - 取价日 = `accepted_date`（受理日 T），`confirm_date` 只是扫描门槛。
+- 确认日当天必须等到 `CONFIRM_START_HOUR`（默认 10:00）才执行；更早日期的
+  订单属于补漏，不受时点限制。
+- 卖单到账日 = 实际确认日 + 1 个交易日，由确认时计算并写入订单。
 - 预期内业务失败：RPC 返回 `{result:...}`，这里只做映射与计数，不补偿。
 - 连接级异常：中止本轮并 `finish_confirm_run(failed)`，订单保持原状态等下一轮。
 """
@@ -29,13 +32,18 @@ from server.services.order_confirm_rules import (
     classify_rpc_result,
     select_fifo_lots,
 )
-from server.services.trading_calendar import beijing_now
+from server.services.trading_calendar import (
+    CalendarOutOfCoverage,
+    CalendarUnavailable,
+    beijing_now,
+    next_trading_day,
+)
 
 logger = logging.getLogger(__name__)
 
 COUNTER_KEYS = (
     "scanned", "confirmed", "rejected",
-    "skipped_nav", "retryable", "manual_review", "settled",
+    "skipped_nav", "skipped_time", "retryable", "manual_review", "settled",
 )
 
 # 连接级故障：本轮必须中止，订单保持原状态（下一轮重试），不能算单笔失败
@@ -83,12 +91,20 @@ class OrderConfirmService:
 
     # ==================== 入口 ====================
 
-    def run(self, trigger: str = "manual", today: Optional[date] = None) -> dict:
-        """跑一轮确认。`trigger` 取 sync / fallback / startup / manual。
+    def run(self, trigger: str = "manual", today: Optional[date] = None,
+            now: Optional[datetime] = None) -> dict:
+        """跑一轮确认。`trigger` 取 fallback / startup / manual。
 
         返回与 `confirm_runs` 一致的计数；拿不到批次锁返回 `status='busy'`。
+
+        参数:
+            today: 交易日（默认取北京时间今天），测试可注入
+            now: 当前时刻（默认取北京时间），用于判断是否已到确认/到账时点
         """
-        today = today or beijing_now().date()
+        now = now or beijing_now()
+        today = today or now.date()
+        # 确认日/到账日等于今天时，必须等到统一时点（默认 10:00）
+        before_start = now.hour < SETTINGS.CONFIRM_START_HOUR
         worker = self.worker_id
         counters = {k: 0 for k in COUNTER_KEYS}
 
@@ -105,8 +121,9 @@ class OrderConfirmService:
         truncated = False
         try:
             self._reap_stale()
-            truncated = self._scan_loop(run_id, worker, today, counters, started)
-            counters["settled"] += self._settle_due(worker, today)
+            truncated = self._scan_loop(run_id, worker, today, counters, started,
+                                        before_start)
+            counters["settled"] += self._settle_due(worker, today, before_start)
         except Exception as exc:  # 连接级/未预期：中止本轮，订单保持原状态
             error = f"{type(exc).__name__}: {exc}"
             logger.error("[确认] 本轮中止: %s", error, exc_info=True)
@@ -122,11 +139,12 @@ class OrderConfirmService:
         duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(
             "[确认] run_id=%s trigger=%s worker=%s scanned=%s confirmed=%s rejected=%s "
-            "skipped_nav=%s retryable=%s manual_review=%s settled=%s duration_ms=%s%s",
+            "skipped_nav=%s skipped_time=%s retryable=%s manual_review=%s settled=%s "
+            "duration_ms=%s%s",
             run_id, trigger, worker, counters["scanned"], counters["confirmed"],
-            counters["rejected"], counters["skipped_nav"], counters["retryable"],
-            counters["manual_review"], counters["settled"], duration_ms,
-            " truncated" if truncated else "",
+            counters["rejected"], counters["skipped_nav"], counters["skipped_time"],
+            counters["retryable"], counters["manual_review"], counters["settled"],
+            duration_ms, " truncated" if truncated else "",
         )
         return self._result("ok", run_id, counters, today, trigger,
                             "time_budget_exceeded" if truncated else None,
@@ -135,7 +153,7 @@ class OrderConfirmService:
     # ==================== 扫描 ====================
 
     def _scan_loop(self, run_id: str, worker: str, today: date,
-                   counters: dict, started: float) -> bool:
+                   counters: dict, started: float, before_start: bool) -> bool:
         """keyset 分页扫描，返回是否因超限/超时提前结束。"""
         cursor: Optional[tuple[str, str]] = None
         while True:
@@ -150,7 +168,7 @@ class OrderConfirmService:
 
             for order in page:
                 counters["scanned"] += 1
-                outcome = self._process(order, today, worker, counters)
+                outcome = self._process(order, today, worker, counters, before_start)
                 if outcome in counters and outcome != "scanned":
                     counters[outcome] += 1
 
@@ -180,7 +198,8 @@ class OrderConfirmService:
 
     # ==================== 单笔 ====================
 
-    def _process(self, order: dict, today: date, worker: str, counters: dict) -> str:
+    def _process(self, order: dict, today: date, worker: str, counters: dict,
+                 before_start: bool) -> str:
         order_id = order.get("id")
         fund_code = order.get("fund_code")
 
@@ -189,9 +208,14 @@ class OrderConfirmService:
         if accepted is None:
             return self._manual(order_id, worker, "ACCEPTED_DATE_MISSING",
                                 "订单缺少受理日 accepted_date，无法确定成交净值日")
-        if not order.get("confirm_date"):
+        confirm_date = _as_date(order.get("confirm_date"))
+        if confirm_date is None:
             return self._manual(order_id, worker, "CONFIRM_DATE_MISSING",
                                 "订单缺少 confirm_date")
+
+        # 1.1 确认日当天 10:00 前不确认；更早日期的订单是补漏，不设时点门槛
+        if confirm_date == today and before_start:
+            return "skipped_time"
         snapshot = order.get("fee_rule_snapshot")
         if not snapshot:
             return self._manual(order_id, worker, "FEE_SNAPSHOT_MISSING",
@@ -294,27 +318,45 @@ class OrderConfirmService:
             return self._manual(order_id, worker, "FEE_SNAPSHOT_MISSING",
                                 "快照里没有可用的赎回费率档位")
 
+        # 到账日 = 实际确认日 + 1 个交易日。确认发生顺延时，到账日跟着顺延，
+        # 不能沿用下单时的预估值。
+        try:
+            settle_date = next_trading_day(today)
+        except (CalendarUnavailable, CalendarOutOfCoverage) as exc:
+            logger.error(
+                "[确认] 无法推算到账日，订单保持 pending: order=%s today=%s err=%s",
+                order_id, today, exc,
+            )
+            return "retryable"
+
         payload = self._call_rpc("confirm_sell_order", {
             "p_order_id": order_id,
             "p_worker": worker,
             "p_nav": float(nav),
             "p_plan": plan,
+            "p_settle_date": settle_date.isoformat(),
         }, order_id, worker)
 
         outcome = self._log_and_count(order, payload)
-        # 确认晚于到账日：同一轮立即入账（只入一次，RPC 状态 CAS 保证）
-        settle_date = _as_date(payload.get("settle_date"))
-        if payload.get("result") == "settling" and settle_date and settle_date <= today:
+        # 正常时序下到账日晚于今天；保留同轮入账兜底（只入一次，RPC 状态 CAS 保证）
+        settled = _as_date(payload.get("settle_date"))
+        if payload.get("result") == "settling" and settled and settled <= today:
             self._settle_one(order_id, worker, today)
         return outcome
 
-    def _settle_due(self, worker: str, today: date) -> int:
-        rows = (
+    def _settle_due(self, worker: str, today: date, before_start: bool) -> int:
+        query = (
             self.client.table("trade_orders")
             .select("id")
             .eq("status", "settling")
-            .lte("settle_date", today.isoformat())
-            .order("settle_date")
+        )
+        # 到账日等于今天时，未到 10:00 不入账；更早日期的到账属于补漏
+        if before_start:
+            query = query.lt("settle_date", today.isoformat())
+        else:
+            query = query.lte("settle_date", today.isoformat())
+        rows = (
+            query.order("settle_date")
             .order("id")
             .limit(SETTINGS.CONFIRM_MAX_ORDERS)
             .execute()
@@ -471,7 +513,8 @@ class OrderConfirmService:
         result.update(counters)
         # 旧字段别名：老调度/老接口仍按 processed/skipped 读
         result["processed"] = counters["scanned"]
-        result["skipped"] = counters["skipped_nav"] + counters["retryable"]
+        result["skipped"] = (counters["skipped_nav"] + counters["skipped_time"]
+                              + counters["retryable"])
         return result
 
 

@@ -102,17 +102,17 @@ SELECT pg_temp.assert_eq((SELECT last_error_code FROM trade_orders WHERE id=:'oi
 INSERT INTO trade_orders(id, user_id, fund_code, fund_name, direction, price, quantity, amount, fee,
                          status, accepted_date, confirm_date, settle_date, fund_type)
 VALUES ('22222222-2222-2222-2222-222222222222', :'uid','110020','测试基金','sell',
-        1.5, 808.82, 0, 0, 'pending', '2026-10-30','2026-10-30','2026-11-04','of');
+        1.5, 808.82, 0, 0, 'pending', '2026-10-30','2026-10-30','2026-11-02','of');
 SELECT (SELECT id FROM position_lots WHERE order_id='11111111-1111-1111-1111-111111111111') AS lot1 \gset
 
 -- 3.1 可赎回日未到 → retryable LOT_PLAN_STALE
 SELECT pg_temp.assert_eq(
   confirm_sell_order('22222222-2222-2222-2222-222222222222','w1',1.5000,
-    jsonb_build_array(jsonb_build_object('lot_id', :'lot1', 'quantity', 808.82, 'fee', 2.00)))->>'result',
+    jsonb_build_array(jsonb_build_object('lot_id', :'lot1', 'quantity', 808.82, 'fee', 2.00)), '2026-11-04'))->>'result',
   'retryable', 'lot 未到可赎回日 → retryable');
 SELECT pg_temp.assert_eq(
   confirm_sell_order('22222222-2222-2222-2222-222222222222','w1',1.5000,
-    jsonb_build_array(jsonb_build_object('lot_id', :'lot1', 'quantity', 808.82, 'fee', 2.00)))->>'code',
+    jsonb_build_array(jsonb_build_object('lot_id', :'lot1', 'quantity', 808.82, 'fee', 2.00)), '2026-11-04'))->>'code',
   'LOT_PLAN_STALE', '错误码 LOT_PLAN_STALE');
 SELECT pg_temp.assert_eq((SELECT status FROM trade_orders WHERE id='22222222-2222-2222-2222-222222222222'),
   'pending', '可赎回日未到不改状态');
@@ -121,7 +121,7 @@ SELECT pg_temp.assert_eq((SELECT status FROM trade_orders WHERE id='22222222-222
 UPDATE position_lots SET available_date = '2026-10-30' WHERE id = :'lot1';
 SELECT pg_temp.assert_eq(
   confirm_sell_order('22222222-2222-2222-2222-222222222222','w1',1.5000,
-    jsonb_build_array(jsonb_build_object('lot_id', :'lot1', 'quantity', 100, 'fee', 2.00)))->>'code',
+    jsonb_build_array(jsonb_build_object('lot_id', :'lot1', 'quantity', 100, 'fee', 2.00)), '2026-11-04'))->>'code',
   'INVALID_PLAN', '计划份额不符 → INVALID_PLAN');
 SELECT pg_temp.assert_eq((SELECT status FROM trade_orders WHERE id='22222222-2222-2222-2222-222222222222'),
   'manual_review', 'INVALID_PLAN 转人工');
@@ -131,10 +131,12 @@ SELECT requeue_manual_review_order('22222222-2222-2222-2222-222222222222','admin
 -- 3.3 正常卖出 → settling
 SELECT pg_temp.assert_eq(
   confirm_sell_order('22222222-2222-2222-2222-222222222222','w1',1.5000,
-    jsonb_build_array(jsonb_build_object('lot_id', :'lot1', 'quantity', 808.82, 'fee', 2.00)))->>'result',
+    jsonb_build_array(jsonb_build_object('lot_id', :'lot1', 'quantity', 808.82, 'fee', 2.00)), '2026-11-04'))->>'result',
   'settling', '卖单确认 → settling');
 SELECT pg_temp.assert_eq((SELECT status FROM trade_orders WHERE id='22222222-2222-2222-2222-222222222222'),
   'settling', '订单状态 settling');
+SELECT pg_temp.assert_eq((SELECT settle_date::text FROM trade_orders WHERE id='22222222-2222-2222-2222-222222222222'),
+  '2026-11-04', '确认时按实际到账日覆盖下单预估');
 SELECT pg_temp.assert_eq((SELECT amount::text FROM trade_orders WHERE id='22222222-2222-2222-2222-222222222222'),
   '1213.23', '卖单 amount = 成交金额');
 SELECT pg_temp.assert_eq((SELECT net_amount::text FROM trade_orders WHERE id='22222222-2222-2222-2222-222222222222'),

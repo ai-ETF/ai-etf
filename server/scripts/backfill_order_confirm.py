@@ -61,8 +61,8 @@ def compute_order_dates(order: dict, rule: dict) -> dict:
 
     买单：受理日 = 确认日回推 `confirm_delay` 个交易日；可赎回日 = 确认日顺延
         `redeem_available_delay` 个交易日。
-    卖单：受理日 = 确认日（旧口径卖单确认日即净值日）；到账日 = 确认日顺延
-        `redeem_settle_delay` 个交易日。
+    卖单：受理日 = 确认日（存量旧口径的兜底，新单应已有 accepted_date）；
+        到账日 = 确认日 + 1 个交易日（实际确认时会按真实确认日覆盖）。
 
     日历越界/未载入时抛 `CalendarOutOfCoverage` / `CalendarUnavailable`，
     由调用方记为「无法反推」，不做工作日兜底。
@@ -81,9 +81,7 @@ def compute_order_dates(order: dict, rule: dict) -> dict:
         return {"accepted_date": accepted.isoformat(),
                 "available_date": available.isoformat()}
 
-    settle = confirm
-    for _ in range(_require_delay(rule, "redeem_settle_delay")):
-        settle = next_trading_day(settle)
+    settle = next_trading_day(confirm)
     return {"accepted_date": confirm.isoformat(),
             "settle_date": settle.isoformat()}
 

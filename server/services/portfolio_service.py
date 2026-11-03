@@ -757,7 +757,7 @@ class PortfolioService:
             else:
                 message = (
                     f"申购申请已提交（{day_label}受理），"
-                    f"将于 {actual_confirm.isoformat()} 确认份额（T+{confirm_delay}），资金已冻结"
+                    f"将于 {actual_confirm.isoformat()} 10:00 确认份额（T+{confirm_delay}），资金已冻结"
                 )
 
             logger.info(
@@ -870,18 +870,21 @@ class PortfolioService:
 
             now_beijing = _beijing_now()
 
-            # 1. 受理日 T = 卖单的成交净值日（卖单 confirm_date == accepted_date）
+            # 1. 受理日 T 同时是卖单的成交净值日
             if self._is_trading_day(now_beijing.date()) and self._is_before_cutoff(now_beijing):
                 t_day = now_beijing.date()
             else:
                 t_day = self._next_trading_day(now_beijing.date())
-            confirm_date = t_day
 
-            # 到账日 = T + redeem_settle_delay 个交易日，下单时落库，确认时不改写
-            redeem_delay = int(_require_rule_field(rule, fund_code, "redeem_settle_delay"))
-            settle_date = confirm_date
-            for _ in range(redeem_delay):
-                settle_date = self._next_trading_day(settle_date)
+            # 确认日 = T + confirm_delay 个交易日（普通 1、QDII 2），与买入一致
+            confirm_delay = int(_require_rule_field(rule, fund_code, "confirm_delay"))
+            confirm_date = t_day
+            for _ in range(confirm_delay):
+                confirm_date = self._next_trading_day(confirm_date)
+
+            # 到账日 = 实际确认日 + 1 个交易日；这里是下单时的预估值，
+            # 确认顺延时由确认任务按实际确认日覆盖。
+            settle_date = self._next_trading_day(confirm_date)
 
             # 2. 获取基金名称（传入 rule 避免重复查询）
             fund_name = self._get_fund_name(fund_code, rule=rule)
@@ -927,13 +930,16 @@ class PortfolioService:
             if result == "existing":
                 message = f"重复提交的赎回请求，已返回原订单 {order.get('id')}"
             else:
-                message = f"赎回申请已提交，将于 {settle_date.isoformat()} 到账（T+{redeem_delay}）"
+                message = (
+                    f"赎回申请已提交，预计 {confirm_date.isoformat()} 10:00 确认份额，"
+                    f"{settle_date.isoformat()} 10:00 到账（实际确认日 + 1 个交易日）"
+                )
 
             logger.info(
-                "赎回%s: user=%s, code=%s, qty=%s, accepted=%s, settle=%s, order=%s",
+                "赎回%s: user=%s, code=%s, qty=%s, accepted=%s, confirm=%s, settle=%s, order=%s",
                 "幂等命中" if result == "existing" else "pending",
                 user_id, fund_code, quantity, t_day.isoformat(),
-                settle_date.isoformat(), order.get("id"),
+                confirm_date.isoformat(), settle_date.isoformat(), order.get("id"),
             )
 
             return {
@@ -960,6 +966,95 @@ class PortfolioService:
         except Exception as e:
             logger.error(f"赎回失败: {e}", exc_info=True)
             return {"success": False, "message": f"赎回失败: {str(e)}", "data": None}
+
+    def cancel_order(self, user_id: str, order_id: str) -> dict:
+        """撤销待确认订单。
+
+        业务规则（《基金订单确认规则》§5）：仅 `pending` 订单、且当前时间早于
+        受理日 15:00（Asia/Shanghai）时可撤。退款、释放份额、状态流转全部在
+        `cancel_trade_order` RPC 的单个事务内完成，本方法只做结果映射。
+
+        参数:
+            user_id: 当前用户 ID（RPC 内校验订单归属）
+            order_id: 订单 ID
+
+        返回:
+            dict: `success/message/data`，失败时附 `status_code` 供 API 映射。
+        """
+        try:
+            payload = self.client.rpc("cancel_trade_order", {
+                "p_order_id": order_id,
+                "p_user_id": user_id,
+            }).execute().data or {}
+        except Exception as e:
+            logger.error("撤单失败 order_id=%s user=%s: %s", order_id, user_id, e,
+                         exc_info=True)
+            return {
+                "success": False,
+                "status_code": 500,
+                "message": "撤单失败，请稍后重试",
+                "data": None,
+            }
+
+        result = payload.get("result")
+
+        if result == "already_cancelled":
+            return {
+                "success": True,
+                "message": "订单已撤销（重复请求）",
+                "data": {
+                    "order_id": payload.get("order_id") or order_id,
+                    "status": "cancelled",
+                },
+            }
+
+        if result == "cancelled":
+            direction = payload.get("direction")
+            if direction == "buy":
+                refunded = float(payload.get("refunded_amount") or 0)
+                message = f"撤单成功，已退回 {refunded:.2f} 元"
+            else:
+                released = float(payload.get("released_quantity") or 0)
+                message = f"撤单成功，已释放 {released:.2f} 份"
+            logger.info("撤单成功: user=%s order=%s direction=%s", user_id, order_id, direction)
+            return {
+                "success": True,
+                "message": message,
+                "data": {
+                    "order_id": payload.get("order_id") or order_id,
+                    "status": "cancelled",
+                    "direction": direction,
+                    "refunded_amount": float(payload.get("refunded_amount") or 0),
+                    "released_quantity": float(payload.get("released_quantity") or 0),
+                    "cancel_deadline": payload.get("cancel_deadline"),
+                },
+            }
+
+        errors = {
+            "not_found": (404, "订单不存在"),
+            "not_cancellable": (409, f"订单当前状态为 {payload.get('status') or '未知'}，不可撤单"),
+            "cancel_window_closed": (409, "已超过撤单截止时间（受理日 15:00），不可撤单"),
+            "accepted_date_missing": (409, "订单缺少受理日，无法判定撤单窗口，请联系客服"),
+            "manual_review": (409, "撤单时冻结资金异常，已转人工处理"),
+        }
+        if result in errors:
+            status_code, message = errors[result]
+            logger.warning("撤单被拒绝: user=%s order=%s result=%s status=%s",
+                           user_id, order_id, result, payload.get("status"))
+            return {
+                "success": False,
+                "status_code": status_code,
+                "message": message,
+                "data": None,
+            }
+
+        logger.error("撤单返回未知结果: user=%s order=%s payload=%s", user_id, order_id, payload)
+        return {
+            "success": False,
+            "status_code": 500,
+            "message": f"撤单失败：{result or '未知结果'}",
+            "data": None,
+        }
 
     # ==================== 持仓查询 ====================
 

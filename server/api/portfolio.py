@@ -18,6 +18,7 @@ import os
 from datetime import date
 from decimal import Decimal
 from typing import Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
 
@@ -28,6 +29,8 @@ from server.models.schemas import (
     RedeemRequest,
     OrderResponse,
     OrderResult,
+    CancelOrderResponse,
+    CancelOrderResult,
     RiskWarning,
     PositionListResponse,
     PositionItem,
@@ -130,6 +133,34 @@ async def apply_redeem(
         success=True,
         message=result["message"],
         data=OrderResult(**result["data"]) if result["data"] else None,
+    )
+
+
+@router.post("/orders/{order_id}/cancel", response_model=CancelOrderResponse)
+async def cancel_order(
+    order_id: UUID,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    撤销待确认订单（需 JWT 认证）
+
+    - 仅 `pending` 订单可撤，且必须在**受理日 15:00 前**提交
+    - 买入撤单：冻结资金原路退回可用现金
+    - 卖出撤单：释放被占用的可赎份额
+    - 退款/释放份额/状态变更在同一数据库事务内完成；重复撤单幂等返回
+    """
+    svc = PortfolioService()
+    result = svc.cancel_order(user_id=current_user, order_id=str(order_id))
+    if not result["success"]:
+        raise HTTPException(
+            status_code=result.get("status_code", 400),
+            detail=result["message"],
+        )
+
+    return CancelOrderResponse(
+        success=True,
+        message=result["message"],
+        data=CancelOrderResult(**result["data"]) if result["data"] else None,
     )
 
 
@@ -240,9 +271,10 @@ async def take_snapshot(
 async def confirm_pending(_: None = Depends(require_admin_token)):
     """手动触发一轮 pending 订单确认（需 `X-Admin-Token`，未配置时 503）。
 
-    扫描条件：`status='pending' AND confirm_date <= today`。取不到 T 日净值的订单
-    保持 pending（计入 `skipped_nav`）；已有批次在跑时返回 `status='busy'`（HTTP 200，
-    不是失败）。响应字段见 `ConfirmRunResponse`。
+    扫描条件：`status='pending' AND confirm_date <= today`。确认日等于今天且当前
+    早于 10:00 的订单保持 pending（计入 `skipped_time`）；取不到 T 日净值的订单
+    保持 pending（计入 `skipped_nav`）；已有批次在跑时返回 `status='busy'`
+    （HTTP 200，不是失败）。响应字段见 `ConfirmRunResponse`。
     """
     svc = PortfolioService()
     return svc.confirm_pending_orders()

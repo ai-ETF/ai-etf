@@ -69,6 +69,9 @@ class Settings:
         # 重试上限与单笔租约（秒）
         self.CONFIRM_MAX_ATTEMPTS = int(os.getenv("CONFIRM_MAX_ATTEMPTS", "5"))
         self.CONFIRM_LEASE_SECONDS = int(os.getenv("CONFIRM_LEASE_SECONDS", "300"))
+        # 确认/到账的当日最早时点（Asia/Shanghai，整点）：确认日或到账日等于
+        # 今天时，早于该时刻不执行，避免净值还没公布就提前确认。
+        self.CONFIRM_START_HOUR = int(os.getenv("CONFIRM_START_HOUR", "10"))
         # 净值迟迟不到的告警/转人工阈值（自然日，确认路径不依赖交易日历）
         self.NAV_PENDING_ALERT_DAYS = int(os.getenv("NAV_PENDING_ALERT_DAYS", "5"))
         self.PENDING_MAX_DAYS = int(os.getenv("PENDING_MAX_DAYS", "14"))

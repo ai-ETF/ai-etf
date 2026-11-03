@@ -95,15 +95,17 @@ SELECT place_redeem_order(
   '{}'::jsonb, NULL)->>'result' AS r10 \gset
 SELECT pg_temp.assert_eq(:'r10','insufficient_shares','超过可赎份额 → insufficient_shares');
 
--- 10. 正常赎回
+-- 10. 正常赎回：确认日可以晚于受理日（T+1 10:00 确认）
 SELECT place_redeem_order(
-  :'uid','110020','测试基金',40,'2026-10-30','2026-10-30','2026-11-04',
+  :'uid','110020','测试基金',40,'2026-10-30','2026-11-02','2026-11-03',
   '{"redeem_settle_delay":2}'::jsonb, 'rk-1')->>'result' AS r11 \gset
-SELECT pg_temp.assert_eq(:'r11','placed','赎回 placed');
+SELECT pg_temp.assert_eq(:'r11','placed','赎回 placed（confirm_date > accepted_date）');
 SELECT pg_temp.assert_eq((SELECT status||'/'||quantity::text||'/'||amount::text||'/'||price::text
   FROM trade_orders WHERE client_order_id='rk-1'),'pending/40.00/0.00/0.0000','赎单金额净值为 0 待确认回填');
+SELECT pg_temp.assert_eq((SELECT confirm_date::text FROM trade_orders WHERE client_order_id='rk-1'),
+  '2026-11-02','confirm_date 允许晚于受理日');
 SELECT pg_temp.assert_eq((SELECT settle_date::text FROM trade_orders WHERE client_order_id='rk-1'),
-  '2026-11-04','settle_date 落库');
+  '2026-11-03','settle_date 按确认日 + 1 交易日预估');
 
 -- 11. 在途卖单占用可赎份额
 SELECT place_redeem_order(
