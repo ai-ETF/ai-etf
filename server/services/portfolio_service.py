@@ -30,6 +30,7 @@ from server.services.order_confirm_rules import build_fee_snapshot
 from server.services.trading_calendar import (
     CalendarOutOfCoverage,
     CalendarUnavailable,
+    prev_trading_day,
 )
 
 logger = logging.getLogger(__name__)
@@ -1653,96 +1654,41 @@ class PortfolioService:
     # ==================== 每日快照 ====================
 
     def take_snapshot(self, user_id: str, snapshot_date: Optional[date] = None) -> dict:
-        if snapshot_date is None:
-            snapshot_date = _beijing_date()
+        """确保某用户的交易日快照存在且有效（薄委托）。
 
-        try:
-            summary = self.account_summary(user_id)
-            snapshot_data = {
-                "user_id": user_id,
-                "snapshot_date": snapshot_date.isoformat(),
-                "total_assets": summary["total_assets"],
-                "cash": summary["cash"],
-                "settling_cash": summary.get("settling_cash", 0),
-                "position_value": summary["position_value"],
-                "total_pnl": summary["total_pnl"],
-                "total_return_rate": summary["total_return_rate"],
-                "created_at": _now_iso(),
-            }
+        默认目标为 `prev_trading_day(今天)`：T 日快照在 T+1 生成，此时总资产仍等于
+        T 日收盘值。非交易日 / 净值不齐由 `AccountSnapshotService` 抛业务异常，
+        这里不再捕获成 `success=False`，交由 API 映射为 409。
+        """
+        from server.services.account_snapshot_service import AccountSnapshotService
 
-            existing = (
-                self.client.table("account_snapshots")
-                .select("*")
-                .eq("user_id", user_id)
-                .eq("snapshot_date", snapshot_date.isoformat())
-                .execute()
-            )
-
-            if existing.data and len(existing.data) > 0:
-                self.client.table("account_snapshots").update(snapshot_data).eq(
-                    "id", existing.data[0]["id"]
-                ).execute()
-                logger.info(f"快照已更新: user={user_id}, date={snapshot_date}")
-            else:
-                self.client.table("account_snapshots").insert(snapshot_data).execute()
-                logger.info(f"快照已创建: user={user_id}, date={snapshot_date}")
-
-            return {
-                "success": True,
-                "message": "快照已保存",
-                "data": {
-                    "snapshot_date": snapshot_date.isoformat(),
-                    "total_assets": summary["total_assets"],
-                    "cash": summary["cash"],
-                    "settling_cash": summary.get("settling_cash", 0),
-                    "position_value": summary["position_value"],
-                    "total_pnl": summary["total_pnl"],
-                    "total_return_rate": summary["total_return_rate"],
-                },
-            }
-
-        except Exception as e:
-            logger.error(f"快照保存失败: {e}")
-            return {"success": False, "message": f"快照保存失败: {str(e)}", "data": None}
+        target = snapshot_date or prev_trading_day(_beijing_date())
+        row = AccountSnapshotService(client=self.client).snapshot_user(
+            user_id, target, source="manual"
+        )
+        return {
+            "success": True,
+            "message": f"快照已保存（{target.isoformat()}）",
+            "data": {
+                "snapshot_date": str(row["snapshot_date"])[:10],
+                "total_assets": row["total_assets"],
+                "cash": row["cash"],
+                "frozen_cash": row.get("frozen_cash", 0),
+                "settling_cash": row.get("settling_cash", 0),
+                "position_value": row["position_value"],
+                "total_pnl": row["total_pnl"],
+                "total_return_rate": row["total_return_rate"],
+                "status": row.get("status"),
+                "invalid_reason": row.get("invalid_reason"),
+            },
+        }
 
     def get_daily_returns(self, user_id: str, days: int = 30) -> dict:
-        if not self.client:
-            return {"items": []}
+        """只基于有效快照计算区间/日收益（薄委托）。
 
-        try:
-            result = (
-                self.client.table("account_snapshots")
-                .select("*")
-                .eq("user_id", user_id)
-                .order("snapshot_date", desc=True)
-                .limit(days + 1)
-                .execute()
-            )
+        缺口日返回 `period_days > 1` 且 `daily_return=None`；数据库与交易日历异常
+        向上抛，由 API 映射为 503，不再用空列表冒充「没有收益」。
+        """
+        from server.services.account_snapshot_service import AccountSnapshotService
 
-            items = result.data or []
-            items.sort(key=lambda x: x["snapshot_date"])
-
-            returns = []
-            for i, item in enumerate(items):
-                daily_return = 0.0
-                if i > 0:
-                    prev_assets = float(items[i - 1]["total_assets"])
-                    curr_assets = float(item["total_assets"])
-                    if prev_assets > 0:
-                        daily_return = (curr_assets - prev_assets) / prev_assets
-
-                returns.append({
-                    "date": item["snapshot_date"],
-                    "total_assets": float(item["total_assets"]),
-                    "cash": float(item["cash"]),
-                    "position_value": float(item["position_value"]),
-                    "total_pnl": float(item["total_pnl"]),
-                    "total_return_rate": float(item["total_return_rate"]),
-                    "daily_return": round(daily_return, 6),
-                })
-
-            return {"items": returns}
-
-        except Exception as e:
-            logger.error(f"查询每日收益率失败: {e}")
-            return {"items": []}
+        return AccountSnapshotService(client=self.client).daily_returns(user_id, days)

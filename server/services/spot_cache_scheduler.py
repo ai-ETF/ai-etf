@@ -6,7 +6,8 @@
 2. 货基万份收益入账（每天 00:05）
 3. 场外基金白名单同步（每天 02:17）
 4. 场外基金最新净值更新；**更新成功后异步触发一次确认**（确认只读 DB）
-5. 启动时补偿：净值补跑 → 确认遗漏订单（串行）
+5. 账户日终快照（每天 08:45，目标为上一交易日）
+6. 启动时补偿：净值补跑 → 确认遗漏订单（串行）
 
 确认与抓取解耦：确认不再挂在净值任务里同步执行，也不再有 15:37 的「只补历史」窗口。
 
@@ -16,7 +17,7 @@
 """
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -86,6 +87,35 @@ async def _credit_money_fund_income_job():
     except Exception as e:
         # 无兜底：明确失败并上抛，不静默跳过（宁可当天不入账）
         logger.error(f"[货基收益] 每日收益入账失败（未入账）: {e}", exc_info=True)
+        raise
+
+
+async def _account_snapshot_job():
+    """账户日终快照任务（每天 08:45 执行，含周末/节假日）。
+
+    目标日固定为 `prev_trading_day(今天)`：T 日快照在 T+1 08:45 生成，此时
+    T+1 的买卖尚未确认，账户总资产仍等于 T 日收盘值；08:05 的净值补抓和
+    08:30 的确认轮都已跑完。周末/节假日重复以周五为目标，已有有效快照则跳过。
+
+    交易日历不可用、批量读取失败时直接抛错，由调度器标记失败，不写半成品。
+    """
+    from server.services.account_snapshot_service import AccountSnapshotService
+    from server.services.trading_calendar import prev_trading_day
+
+    today = datetime.now(TZ).date()
+    target = None
+    try:
+        target = await asyncio.to_thread(prev_trading_day, today)
+        logger.info("[快照] 开始生成 %s 的账户快照...", target)
+        result = await asyncio.to_thread(
+            AccountSnapshotService().run, target, "scheduled"
+        )
+        logger.info("[快照] 本轮结束: %s", result.as_dict())
+        return result
+    except Exception as exc:
+        logger.error(
+            "[快照] 目标日 %s 生成失败: %s", target, exc, exc_info=True
+        )
         raise
 
 
@@ -299,6 +329,19 @@ def start_scheduler() -> AsyncIOScheduler:
         misfire_grace_time=3600,  # 错过1小时内仍可补执行
     )
     logger.info("货基收益入账任务已注册（每天00:05，1小时容错）")
+
+    # 任务 3.5：账户日终快照（每天 08:45，含周末/节假日）
+    # 排 08:05 净值补抓、08:30 确认轮之后，09:30 开盘之前；目标日固定为
+    # prev_trading_day(今天)，保证 T+1 的买卖还没确认时取到 T 日收盘状态。
+    _scheduler.add_job(
+        _account_snapshot_job,
+        trigger=CronTrigger(hour=8, minute=45, timezone=TZ),
+        id="account_daily_snapshot",
+        name="账户日终快照（每天08:45，目标为上一交易日）",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info("账户日终快照任务已注册（每天08:45，目标为上一交易日）")
 
     # 任务4：场外基金白名单同步（每天 02:17）
     # 选在凌晨非交易时段：不影响下单，也避开 00:05 的货基收益入账。

@@ -883,69 +883,6 @@ def test_query_trade_flow_数据库不可用_返回空(monkeypatch):
     assert result["items"] == []
 
 
-# ==================== get_daily_returns：每日收益 ====================
-
-
-def test_get_daily_returns_有快照_计算日收益率(monkeypatch):
-    svc = PortfolioService()
-    svc._client = FakeClient({"account_snapshots": [
-        {"user_id": "u1", "snapshot_date": "2026-01-05", "total_assets": 100000, "cash": 100000, "position_value": 0, "total_pnl": 0, "total_return_rate": 0},
-        {"user_id": "u1", "snapshot_date": "2026-01-06", "total_assets": 101000, "cash": 100000, "position_value": 1000, "total_pnl": 1000, "total_return_rate": 0.01},
-    ]})
-    result = svc.get_daily_returns("u1")
-    items = result["items"]
-    assert len(items) == 2
-    assert items[0]["date"] == "2026-01-05"
-    assert items[0]["daily_return"] == 0.0
-    assert items[1]["date"] == "2026-01-06"
-    assert items[1]["daily_return"] == 0.01
-
-
-def test_get_daily_returns_数据库不可用_返回空(monkeypatch):
-    monkeypatch.setattr("server.storage.supabase_client.get_supabase", lambda: None)
-    assert PortfolioService().get_daily_returns("u1") == {"items": []}
-
-
-# ==================== take_snapshot：每日快照 ====================
-
-
-def test_take_snapshot_新建(monkeypatch):
-    monkeypatch.setattr(PortfolioService, "account_summary",
-                        lambda self, uid: {"total_assets": 100000.0, "cash": 100000.0, "position_value": 0, "total_pnl": 0, "total_return_rate": 0})
-    svc = PortfolioService()
-    svc._client = FakeClient()
-    result = svc.take_snapshot("u1", snapshot_date=date(2026, 1, 5))
-    assert result["success"] is True
-    assert len(svc._client.rows["account_snapshots"]) == 1
-    assert svc._client.rows["account_snapshots"][0]["snapshot_date"] == "2026-01-05"
-
-
-def test_take_snapshot_已存在则更新(monkeypatch):
-    monkeypatch.setattr(PortfolioService, "account_summary",
-                        lambda self, uid: {"total_assets": 101000.0, "cash": 100000.0, "position_value": 1000, "total_pnl": 1000, "total_return_rate": 0.01})
-    svc = PortfolioService()
-    svc._client = FakeClient({"account_snapshots": [
-        {"id": "s1", "user_id": "u1", "snapshot_date": "2026-01-05", "total_assets": 100000.0},
-    ]})
-    result = svc.take_snapshot("u1", snapshot_date=date(2026, 1, 5))
-    assert result["success"] is True
-    assert len(svc._client.rows["account_snapshots"]) == 1
-    assert svc._client.rows["account_snapshots"][0]["total_assets"] == 101000.0
-
-
-def test_take_snapshot_写入在途赎回款(monkeypatch):
-    monkeypatch.setattr(PortfolioService, "account_summary",
-                        lambda self, uid: {"total_assets": 105000.0, "cash": 100000.0,
-                                           "settling_cash": 5000.0, "position_value": 0,
-                                           "total_pnl": 5000.0, "total_return_rate": 0.05})
-    svc = PortfolioService()
-    svc._client = FakeClient()
-    result = svc.take_snapshot("u1", snapshot_date=date(2026, 1, 5))
-    row = svc._client.rows["account_snapshots"][0]
-    assert row["settling_cash"] == 5000.0
-    assert result["data"]["settling_cash"] == 5000.0
-
-
 # ==================== set_auto_invest_config：余额理财开关 ====================
 
 

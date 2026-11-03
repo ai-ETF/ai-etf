@@ -473,10 +473,13 @@ class SnapshotData(BaseModel):
     snapshot_date: str
     total_assets: float
     cash: float
+    frozen_cash: float = 0.0  # 冻结资金（pending 买单）
     settling_cash: float = 0.0  # 在途赎回款
     position_value: float
     total_pnl: float
     total_return_rate: float
+    status: str = "valid"
+    invalid_reason: Optional[str] = None
 
 
 class SnapshotResponse(BaseModel):
@@ -487,14 +490,18 @@ class SnapshotResponse(BaseModel):
 
 
 class DailyReturnItem(BaseModel):
-    """每日收益率"""
+    """每日/区间收益率"""
     date: str
     total_assets: float
     cash: float
+    frozen_cash: float = 0.0
+    settling_cash: float = 0.0
     position_value: float
     total_pnl: float
     total_return_rate: float
-    daily_return: float
+    period_days: Optional[int] = None
+    period_return: Optional[float] = None
+    daily_return: Optional[float] = None
 
 
 class DailyReturnResponse(BaseModel):

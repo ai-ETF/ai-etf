@@ -213,11 +213,21 @@ async def query_trade_flow(
 async def take_snapshot(
     current_user: str = Depends(get_current_user),
 ):
-    """手动创建当日资产快照（需 JWT 认证）"""
+    """确保最近一个交易日的账户快照存在且有效（需 JWT 认证）。
+
+    幂等：已有有效快照直接返回，不重复写入。非交易日或 T 日净值未齐返回 409；
+    交易日历不可用返回 503。
+    """
+    from server.services.account_snapshot_service import NotTradingDay, ValuationNotReady
+    from server.services.trading_calendar import CalendarOutOfCoverage, CalendarUnavailable
+
     svc = PortfolioService()
-    result = svc.take_snapshot(user_id=current_user)
-    if not result["success"]:
-        raise HTTPException(status_code=500, detail=result["message"])
+    try:
+        result = svc.take_snapshot(user_id=current_user)
+    except (NotTradingDay, ValuationNotReady) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except (CalendarUnavailable, CalendarOutOfCoverage) as exc:
+        raise HTTPException(status_code=503, detail=f"交易日历不可用: {exc}")
 
     return SnapshotResponse(
         success=True,
@@ -243,9 +253,22 @@ async def get_daily_returns(
     days: int = Query(30, ge=1, le=365, description="查询最近多少天"),
     current_user: str = Depends(get_current_user),
 ):
-    """查询每日收益率（需 JWT 认证）"""
+    """查询每日/区间收益率（需 JWT 认证）。
+
+    只基于 `status='valid'` 的快照；缺口日 `daily_return=null`，同时给出
+    `period_days` 与 `period_return`。数据库或交易日历异常返回 503。
+    """
+    from server.services.trading_calendar import CalendarOutOfCoverage, CalendarUnavailable
+
     svc = PortfolioService()
-    result = svc.get_daily_returns(user_id=current_user, days=days)
+    try:
+        result = svc.get_daily_returns(user_id=current_user, days=days)
+    except (CalendarUnavailable, CalendarOutOfCoverage) as exc:
+        raise HTTPException(status_code=503, detail=f"交易日历不可用: {exc}")
+    except Exception as exc:
+        logger.exception("查询每日收益失败: user=%s days=%s", current_user, days)
+        raise HTTPException(status_code=503, detail=f"查询每日收益失败: {exc}")
+
     items = [DailyReturnItem(**item) for item in result["items"]]
     return DailyReturnResponse(items=items)
 
@@ -394,11 +417,17 @@ async def test_query_trade_flow(
 async def test_take_snapshot(
     user_id: str = Depends(_get_test_user),
 ):
-    """[开发] 创建快照（免 JWT）"""
+    """[开发] 确保最近一个交易日的账户快照（免 JWT）"""
+    from server.services.account_snapshot_service import NotTradingDay, ValuationNotReady
+    from server.services.trading_calendar import CalendarOutOfCoverage, CalendarUnavailable
+
     svc = PortfolioService()
-    result = svc.take_snapshot(user_id=user_id)
-    if not result["success"]:
-        raise HTTPException(status_code=500, detail=result["message"])
+    try:
+        result = svc.take_snapshot(user_id=user_id)
+    except (NotTradingDay, ValuationNotReady) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except (CalendarUnavailable, CalendarOutOfCoverage) as exc:
+        raise HTTPException(status_code=503, detail=f"交易日历不可用: {exc}")
     return SnapshotResponse(
         success=True,
         message=result["message"],
@@ -412,7 +441,16 @@ async def test_get_daily_returns(
     user_id: str = Depends(_get_test_user),
 ):
     """[开发] 每日收益率（免 JWT）"""
+    from server.services.trading_calendar import CalendarOutOfCoverage, CalendarUnavailable
+
     svc = PortfolioService()
-    result = svc.get_daily_returns(user_id=user_id, days=days)
+    try:
+        result = svc.get_daily_returns(user_id=user_id, days=days)
+    except (CalendarUnavailable, CalendarOutOfCoverage) as exc:
+        raise HTTPException(status_code=503, detail=f"交易日历不可用: {exc}")
+    except Exception as exc:
+        logger.exception("查询每日收益失败: user=%s days=%s", user_id, days)
+        raise HTTPException(status_code=503, detail=f"查询每日收益失败: {exc}")
+
     items = [DailyReturnItem(**item) for item in result["items"]]
     return DailyReturnResponse(items=items)
