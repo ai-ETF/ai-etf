@@ -2,7 +2,7 @@ import os
 import logging
 import threading
 try:
-    from supabase import create_client, Client
+    from supabase import create_client, ClientOptions,Client
 except Exception:
     create_client = None
     Client = None
@@ -87,7 +87,7 @@ def get_auth_client():
         return None
 
     try:
-        return create_client(url, key)
+        return create_client(url, key,options=ClientOptions(auto_refresh_token=False))
     except Exception as e:
         logger.error(f"Supabase认证客户端初始化失败: {str(e)}")
         return None
