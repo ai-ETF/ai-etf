@@ -1,0 +1,54 @@
+-- ============================================================================
+-- 迁移：下线账户懒创建（retire lazy account creation）
+--
+-- 状态：NOT IMPLEMENTED · 不执行
+-- 前置：accounts_rebuild.sql 第 5 步 trg_auth_users_provision_account 已生效，
+--       即每个 auth.users 行在 INSERT 时必有对应 accounts 行。
+-- 范围：本文件只处理「账户创建入口收敛」这一件事。
+--       表结构见 accounts_rebuild.sql；资金事务契约见 accounts_tx_contract.sql；
+--       position_value 触发器见 accounts_position_value_trigger.sql。
+-- 落地时机：审到 trade_orders / 应用层时一并提交；提交后回来校 accounts_rebuild.sql。
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 改造 1/2  place_purchase_order（DB RPC）
+-- 位置：20261030112609_place_order_rpc.sql:75-80
+--
+-- 现状（待删除）：
+--   SELECT * INTO v_account FROM "public"."accounts"
+--    WHERE "user_id" = p_user_id FOR UPDATE;
+--   IF NOT FOUND THEN
+--     INSERT INTO "public"."accounts" ("user_id") VALUES (p_user_id)
+--     ON CONFLICT ("user_id") DO NOTHING;
+--     SELECT * INTO v_account FROM "public"."accounts"
+--      WHERE "user_id" = p_user_id FOR UPDATE;
+--   END IF;
+--
+-- 目标（注册触发器已保证账户必然存在）：
+--   SELECT * INTO v_account FROM "public"."accounts"
+--    WHERE "user_id" = p_user_id FOR UPDATE;
+--   IF NOT FOUND THEN
+--     RAISE EXCEPTION 'account missing for user %', p_user_id;
+--   END IF;
+--
+-- 落地方式：CREATE OR REPLACE FUNCTION 重写该函数完整函数体。
+--           Postgres 无「局部替换函数体」语法，只能整体 REPLACE；
+--           本文件不覆盖现有实现——半成品上线会破坏下单链路。
+--           新函数体依赖 trade_orders / trade_flow 的终态结构，随该表审计一起提交。
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- 改造 2/2  portfolio_service._ensure_account（应用层 Python）
+-- 位置：server/services/portfolio_service.py:130-148
+-- 现状：SELECT 查不到 → 构造 insert_data → INSERT accounts（含 INITIAL_CASH 兜底）
+-- 目标：直接读账户；查不到抛业务异常，不兜底建账户、不再持有初始资金常量。
+-- 落地方式：应用层改造，与改造 1 同批提交。
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- 验收
+--   1. 除 accounts_rebuild.sql 的注册触发器外，全库再无 INSERT INTO public.accounts；
+--   2. 账户生命周期只由 auth.users 驱动：注册建 ↔ accounts_user_id_fkey
+--      ON DELETE CASCADE 注销删；
+--   3. 首单并发不再产生建账户竞争；账户缺失是显式业务异常而非静默兜底。
+-- ---------------------------------------------------------------------------
