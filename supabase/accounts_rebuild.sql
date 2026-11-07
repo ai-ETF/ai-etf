@@ -11,12 +11,12 @@ DROP TABLE IF EXISTS public.accounts;
 CREATE TABLE public.accounts (
     id                    uuid          NOT NULL DEFAULT gen_random_uuid(),
     user_id               uuid          NOT NULL,
-    cash                  numeric(18,4) NOT NULL DEFAULT 100000.0000,
-    frozen_cash           numeric(18,4) NOT NULL DEFAULT 0.0000,
-    settling_cash         numeric(18,4) NOT NULL DEFAULT 0.0000,
-    position_value        numeric(18,4) NOT NULL DEFAULT 0.0000,
+    cash                  numeric(18,2) NOT NULL DEFAULT 100000.00,
+    frozen_cash           numeric(18,2) NOT NULL DEFAULT 0.00,
+    settling_cash         numeric(18,2) NOT NULL DEFAULT 0.00,
+    position_value        numeric(18,2) NOT NULL DEFAULT 0.00,
     auto_invest_enabled   boolean       NOT NULL DEFAULT false,
-    auto_invest_reserve   numeric(18,4) NOT NULL DEFAULT 0.0000,
+    auto_invest_reserve   numeric(18,2) NOT NULL DEFAULT 0.00,
     created_at            timestamptz   NOT NULL DEFAULT now(),
     updated_at            timestamptz   NOT NULL DEFAULT now(),
 
@@ -96,7 +96,7 @@ GRANT  EXECUTE ON FUNCTION public.provision_account_for_new_user() TO service_ro
 
 -- 6) 注释
 COMMENT ON TABLE public.accounts IS
-'用户账户主表。一个 auth.users 用户对应一行，完整表达当前资产状态：可用现金 cash、冻结资金 frozen_cash、在途赎回款 settling_cash、持仓估值 position_value，四者之和为总资产。全部金额保留 4 位小数。';
+'用户账户主表。一个 auth.users 用户对应一行，完整表达当前资产状态：可用现金 cash、冻结资金 frozen_cash、在途赎回款 settling_cash、持仓估值 position_value，四者之和为总资产。全部金额保留 2 位小数。';
 
 COMMENT ON COLUMN public.accounts.id IS
 '账户代理主键，UUID。';
@@ -105,7 +105,7 @@ COMMENT ON COLUMN public.accounts.user_id IS
 '所属用户 ID，关联 auth.users.id，ON DELETE CASCADE；UNIQUE 保证一用户一账户。';
 
 COMMENT ON COLUMN public.accounts.cash IS
-'可用现金余额，单位：元。DEFAULT 100000.0000 为初始资金，由注册触发器 trg_auth_users_provision_account 在 auth.users 插入时建账户并按本列默认值发放。CHECK >= 0。';
+'可用现金余额，单位：元。DEFAULT 100000.00 为初始资金，由注册触发器 trg_auth_users_provision_account 在 auth.users 插入时建账户并按本列默认值发放。CHECK >= 0。';
 
 COMMENT ON COLUMN public.accounts.frozen_cash IS
 '冻结资金余额，单位：元。pending 买单受理时由 cash 划入，确认或撤单时释放。计算口径：Σ 当前处于冻结状态的买入订单金额。CHECK >= 0。';
@@ -120,7 +120,7 @@ COMMENT ON COLUMN public.accounts.auto_invest_enabled IS
 '余额自动理财开关。';
 
 COMMENT ON COLUMN public.accounts.auto_invest_reserve IS
-'余额自动理财预留现金，单位：元，numeric(18,4)（与其余金额统一 4 位）。启用时账户保留不参与自动申购的金额。CHECK >= 0。';
+'余额自动理财预留现金，单位：元，numeric(18,2)。启用时账户保留不参与自动申购的金额。CHECK >= 0。';
 
 COMMENT ON COLUMN public.accounts.created_at IS
 '账户首次初始化时间，NOT NULL，默认 now()。';

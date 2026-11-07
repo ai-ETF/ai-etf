@@ -37,4 +37,4 @@
 
 -- TODO-6  待定
 --   set_updated_at() 同名覆盖：保留 REPLACE / 复用不定义 / 改名
---   全库金额精度统一 numeric(18,4)：后续表审到时同步，回来校 accounts_rebuild.sql
+--   全库金额精度统一 numeric(18,2)：后续表审到时同步，回来校 accounts_rebuild.sql
