@@ -43,8 +43,9 @@ class Settings:
         self.ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
         # Lyra 使用的模型
         self.LYRA_MODEL = os.getenv("LYRA_MODEL", "claude-sonnet-4-20250514")
-        # Lyra 最大 token 数
-        self.LYRA_MAX_TOKENS = int(os.getenv("LYRA_MAX_TOKENS", "4096"))
+        # Lyra 最大 token 数。这是「总输出预算」，推理模型的思考（thinking）
+        # 也计入其中：预算过小会让复杂问题的思考吃光额度，正文为空。
+        self.LYRA_MAX_TOKENS = int(os.getenv("LYRA_MAX_TOKENS", "16384"))
 
         # === XiaoYan 配置 ===
         # 数据缓存时间（秒），默认 1 天
