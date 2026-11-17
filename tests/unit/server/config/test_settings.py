@@ -29,7 +29,8 @@ def test_默认值(monkeypatch):
     assert s.DB_PATH == "server_data.db"
     assert s.EMBED_DIM == 768
     assert s.LYRA_MODEL == "claude-sonnet-4-20250514"
-    assert s.LYRA_MAX_TOKENS == 4096
+    # 16384 是「思考 + 正文」的总输出预算，复杂问题的 thinking 可能吃掉上万 token
+    assert s.LYRA_MAX_TOKENS == 16384
     assert s.XIAOYAN_CACHE_TTL == 86400
     assert s.XIAOYAN_TIMEOUT == 30
     assert s.EMOTION_DETECTION_ENABLED is True
