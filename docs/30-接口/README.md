@@ -12,9 +12,10 @@
 | 对话 & 会话 | [02-对话与会话.md](02-对话与会话.md) | LLM 流式对话、会话管理 |
 | 行情 | [03-行情.md](03-行情.md) | kline / intraday / detail / search |
 | 自选股 | [04-自选股.md](04-自选股.md) | watchlist |
-| 组合交易 | [05-组合交易.md](05-组合交易.md) | portfolio：申购 / 赎回 / 持仓 / 流水 / 快照 / 定投 / `test/*` 开发接口 |
+| 组合交易 | [05-组合交易.md](05-组合交易.md) | portfolio：申购 / 赎回 / 持仓 / 账户概况 / 流水 / 快照 / 定投 / `test/*` 开发接口 |
 | 风险测评 | [06-风险测评.md](06-风险测评.md) | risk：问卷 / 提交 / 画像 |
 | 文档上传 | [07-文档上传.md](07-文档上传.md) | upload |
+| 管理接口 | [08-管理接口.md](08-管理接口.md) | admin：交易日历刷新 / 状态核验（`X-Admin-Token`） |
 
 ## 环境配置
 
@@ -35,68 +36,75 @@ TOKEN=$(curl -s -X POST "$API/api/secure-chat/login" \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 AUTH="Authorization: Bearer $TOKEN"
+
+# 管理接口用（见 08-管理接口.md；与用户 $TOKEN 不是同一凭证）
+ADMIN_TOKEN="<ADMIN_API_TOKEN 的值>"
 ```
 
 > 提示：token 有效期 3600 秒（1 小时），过期后重新执行登录即可。
 
 ## 接口总览
 
-> 由 `scripts/gen_index.py` 从线上 `/openapi.json` 生成，字段含义：`🔒`=需要 JWT，`-`=公开接口。
+> 由 `scripts/gen_index.py` 从线上 `/openapi.json` 生成，字段含义：`🔒`=需要 JWT，`X-User-Id`=开发端点，`X-Admin-Token`=管理接口，`-`=公开接口。
 
 | 方法 | 路径 | 认证 | 文档 |
 |------|------|:---:|------|
-| GET | `/` | - | [01](01-基础与认证.md) |
-| GET | `/api/test/hello` | - | [01](01-基础与认证.md) |
-| POST | `/api/secure-chat/login` | - | [01](01-基础与认证.md) |
-| POST | `/api/secure-chat/register` | - | [01](01-基础与认证.md) |
-| POST | `/api/secure-chat/refresh` | - | [01](01-基础与认证.md) |
-| POST | `/api/secure-chat/logout` | 🔒 | [01](01-基础与认证.md) |
-| POST | `/api/secure-chat/delete-account` | 🔒 | [01](01-基础与认证.md) |
-| POST | `/api/secure-chat` | 🔒 | [02](02-对话与会话.md) |
-| GET | `/api/secure-chat/chats` | 🔒 | [02](02-对话与会话.md) |
-| GET | `/api/secure-chat/chats/{chat_id}/messages` | 🔒 | [02](02-对话与会话.md) |
-| PUT | `/api/secure-chat/chats/{chat_id}/title` | 🔒 | [02](02-对话与会话.md) |
-| DELETE | `/api/secure-chat/chats/{chat_id}` | 🔒 | [02](02-对话与会话.md) |
-| POST | `/api/watchlist/add` | 🔒 | [04](04-自选股.md) |
-| DELETE | `/api/watchlist/remove` | 🔒 | [04](04-自选股.md) |
-| GET | `/api/watchlist/list` | 🔒 | [04](04-自选股.md) |
-| DELETE | `/api/watchlist/clear` | 🔒 | [04](04-自选股.md) |
-| GET | `/api/watchlist/health` | - | [04](04-自选股.md) |
-| GET | `/api/market/health` | - | [03](03-行情.md) |
-| GET | `/api/market/kline/{fund_code}` | - | [03](03-行情.md) |
-| GET | `/api/market/kline/name/{fund_name}` | - | [03](03-行情.md) |
-| GET | `/api/market/intraday/{fund_code}` | - | [03](03-行情.md) |
-| GET | `/api/market/intraday/name/{fund_name}` | - | [03](03-行情.md) |
-| GET | `/api/market/detail/{fund_code}` | - | [03](03-行情.md) |
-| GET | `/api/market/detail/name/{fund_name}` | - | [03](03-行情.md) |
-| GET | `/api/market/search` | - | [03](03-行情.md) |
-| POST | `/api/portfolio/apply-purchase` | 🔒 | [05](05-组合交易.md) |
-| POST | `/api/portfolio/apply-redeem` | 🔒 | [05](05-组合交易.md) |
-| GET | `/api/portfolio/positions` | 🔒 | [05](05-组合交易.md) |
-| GET | `/api/portfolio/account` | 🔒 | [05](05-组合交易.md) |
-| GET | `/api/portfolio/trade-flow` | 🔒 | [05](05-组合交易.md) |
-| POST | `/api/portfolio/snapshot` | 🔒 | [05](05-组合交易.md) |
-| POST | `/api/portfolio/confirm-pending` | 🔒 | [05](05-组合交易.md) |
-| GET | `/api/portfolio/daily-returns` | 🔒 | [05](05-组合交易.md) |
-| GET | `/api/portfolio/auto-invest/config` | 🔒 | [05](05-组合交易.md) |
-| POST | `/api/portfolio/auto-invest/config` | 🔒 | [05](05-组合交易.md) |
-| GET | `/api/portfolio/funds` | 🔒 | [05](05-组合交易.md) |
-| GET | `/api/portfolio/funds/{fund_code}` | 🔒 | [05](05-组合交易.md) |
-| GET | `/api/portfolio/health` | - | [05](05-组合交易.md) |
-| POST | `/api/portfolio/test/apply-purchase` | `X-User-Id` | [05](05-组合交易.md) |
-| POST | `/api/portfolio/test/apply-redeem` | `X-User-Id` | [05](05-组合交易.md) |
-| GET | `/api/portfolio/test/positions` | `X-User-Id` | [05](05-组合交易.md) |
-| GET | `/api/portfolio/test/account` | `X-User-Id` | [05](05-组合交易.md) |
-| GET | `/api/portfolio/test/trade-flow` | `X-User-Id` | [05](05-组合交易.md) |
-| POST | `/api/portfolio/test/snapshot` | `X-User-Id` | [05](05-组合交易.md) |
-| GET | `/api/portfolio/test/daily-returns` | `X-User-Id` | [05](05-组合交易.md) |
-| GET | `/api/risk/health` | - | [06](06-风险测评.md) |
-| GET | `/api/risk/questionnaire` | 🔒 | [06](06-风险测评.md) |
-| POST | `/api/risk/submit` | 🔒 | [06](06-风险测评.md) |
-| GET | `/api/risk/profile` | 🔒 | [06](06-风险测评.md) |
-| POST | `/api/upload` | - | [07](07-文档上传.md) |
-| POST | `/api/upload/process-file-from-edge` | - | [07](07-文档上传.md) |
-| GET | `/api/upload/health` | - | [07](07-文档上传.md) |
+| GET    | `/` | - | [01-基础与认证.md](01-基础与认证.md) |
+| POST   | `/api/admin/trading-calendar/refresh` | `X-Admin-Token` | [08-管理接口.md](08-管理接口.md) |
+| GET    | `/api/admin/trading-calendar/status` | `X-Admin-Token` | [08-管理接口.md](08-管理接口.md) |
+| GET    | `/api/market/detail/name/{fund_name}` | - | [03-行情.md](03-行情.md) |
+| GET    | `/api/market/detail/{fund_code}` | - | [03-行情.md](03-行情.md) |
+| GET    | `/api/market/health` | - | [03-行情.md](03-行情.md) |
+| GET    | `/api/market/intraday/name/{fund_name}` | - | [03-行情.md](03-行情.md) |
+| GET    | `/api/market/intraday/{fund_code}` | - | [03-行情.md](03-行情.md) |
+| GET    | `/api/market/kline/name/{fund_name}` | - | [03-行情.md](03-行情.md) |
+| GET    | `/api/market/kline/{fund_code}` | - | [03-行情.md](03-行情.md) |
+| GET    | `/api/market/search` | - | [03-行情.md](03-行情.md) |
+| GET    | `/api/portfolio/account` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| POST   | `/api/portfolio/apply-purchase` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| POST   | `/api/portfolio/apply-redeem` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/auto-invest/config` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| POST   | `/api/portfolio/auto-invest/config` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| POST   | `/api/portfolio/confirm-pending` | `X-Admin-Token` | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/daily-returns` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/funds` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/funds/{fund_code}` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/health` | - | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/overview` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/positions` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| POST   | `/api/portfolio/snapshot` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/test/account` | `X-User-Id` | [05-组合交易.md](05-组合交易.md) |
+| POST   | `/api/portfolio/test/apply-purchase` | `X-User-Id` | [05-组合交易.md](05-组合交易.md) |
+| POST   | `/api/portfolio/test/apply-redeem` | `X-User-Id` | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/test/daily-returns` | `X-User-Id` | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/test/overview` | `X-User-Id` | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/test/positions` | `X-User-Id` | [05-组合交易.md](05-组合交易.md) |
+| POST   | `/api/portfolio/test/snapshot` | `X-User-Id` | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/test/trade-flow` | `X-User-Id` | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/portfolio/trade-flow` | 🔒 | [05-组合交易.md](05-组合交易.md) |
+| GET    | `/api/risk/health` | - | [06-风险测评.md](06-风险测评.md) |
+| GET    | `/api/risk/profile` | 🔒 | [06-风险测评.md](06-风险测评.md) |
+| GET    | `/api/risk/questionnaire` | 🔒 | [06-风险测评.md](06-风险测评.md) |
+| POST   | `/api/risk/submit` | 🔒 | [06-风险测评.md](06-风险测评.md) |
+| POST   | `/api/secure-chat` | 🔒 | [02-对话与会话.md](02-对话与会话.md) |
+| GET    | `/api/secure-chat/chats` | 🔒 | [02-对话与会话.md](02-对话与会话.md) |
+| DELETE | `/api/secure-chat/chats/{chat_id}` | 🔒 | [02-对话与会话.md](02-对话与会话.md) |
+| GET    | `/api/secure-chat/chats/{chat_id}/messages` | 🔒 | [02-对话与会话.md](02-对话与会话.md) |
+| PUT    | `/api/secure-chat/chats/{chat_id}/title` | 🔒 | [02-对话与会话.md](02-对话与会话.md) |
+| POST   | `/api/secure-chat/delete-account` | 🔒 | [01-基础与认证.md](01-基础与认证.md) |
+| POST   | `/api/secure-chat/login` | - | [01-基础与认证.md](01-基础与认证.md) |
+| POST   | `/api/secure-chat/logout` | 🔒 | [01-基础与认证.md](01-基础与认证.md) |
+| POST   | `/api/secure-chat/refresh` | - | [01-基础与认证.md](01-基础与认证.md) |
+| POST   | `/api/secure-chat/register` | - | [01-基础与认证.md](01-基础与认证.md) |
+| GET    | `/api/test/hello` | - | [01-基础与认证.md](01-基础与认证.md) |
+| POST   | `/api/upload` | - | [07-文档上传.md](07-文档上传.md) |
+| GET    | `/api/upload/health` | - | [07-文档上传.md](07-文档上传.md) |
+| POST   | `/api/upload/process-file-from-edge` | - | [07-文档上传.md](07-文档上传.md) |
+| POST   | `/api/watchlist/add` | 🔒 | [04-自选股.md](04-自选股.md) |
+| DELETE | `/api/watchlist/clear` | 🔒 | [04-自选股.md](04-自选股.md) |
+| GET    | `/api/watchlist/health` | - | [04-自选股.md](04-自选股.md) |
+| GET    | `/api/watchlist/list` | 🔒 | [04-自选股.md](04-自选股.md) |
+| DELETE | `/api/watchlist/remove` | 🔒 | [04-自选股.md](04-自选股.md) |
 
 ## 新增接口规范
 

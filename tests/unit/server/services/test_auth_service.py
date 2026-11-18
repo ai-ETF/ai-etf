@@ -119,7 +119,33 @@ def fake_supabase():
 
 
 def _patch_supabase(monkeypatch, fake):
+    """登录类操作统一走独立认证客户端；这里同时打桩两个入口，避免测试依赖真实建连。"""
     monkeypatch.setattr(auth_service, "get_supabase", lambda: fake)
+    monkeypatch.setattr(auth_service, "get_auth_client", lambda: fake)
+
+
+class _ExplodingClient:
+    """访问任何属性都报错，用来证明登录类操作没有碰共享数据客户端。"""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"登录类操作不应访问共享数据客户端（尝试访问 .{name}）")
+
+
+def test_登录类操作_不碰共享数据客户端(monkeypatch, fake_supabase):
+    """回归：sign_up / refresh_session / sign_in 会改写客户端 Authorization，
+    必须落在独立客户端上；一旦走共享客户端就会污染全进程的数据库身份。"""
+    monkeypatch.setattr(auth_service, "get_supabase", lambda: _ExplodingClient())
+    monkeypatch.setattr(auth_service, "get_auth_client", lambda: fake_supabase)
+    fake_supabase.sign_up_result = type(
+        "R", (), {"session": None, "user": type("U", (), {"id": "user-1"})()}
+    )()
+    fake_supabase.refresh_result = type(
+        "R", (), {"session": object(), "user": object()}
+    )()
+
+    register_user("user@example.com", "password123")
+    refresh_session_token("refresh-token")
+    delete_account("user-1", "user@example.com", "password123")
 
 
 # ==================== validate_email ====================
@@ -193,6 +219,7 @@ def test_密码过短_抛400():
 
 def test_注册_数据库未就绪_抛500(monkeypatch):
     monkeypatch.setattr(auth_service, "get_supabase", lambda: None)
+    monkeypatch.setattr(auth_service, "get_auth_client", lambda: None)
     with pytest.raises(HTTPException) as e:
         register_user("user@example.com", "password123")
     assert e.value.status_code == 500
@@ -324,6 +351,7 @@ def test_sign_out抛异常_不阻塞返回(monkeypatch, fake_supabase):
 
 def test_注销_数据库未就绪_抛500(monkeypatch):
     monkeypatch.setattr(auth_service, "get_supabase", lambda: None)
+    monkeypatch.setattr(auth_service, "get_auth_client", lambda: None)
     with pytest.raises(HTTPException) as e:
         delete_account("user-1", "user@example.com", "password123")
     assert e.value.status_code == 500
@@ -416,6 +444,7 @@ def test_刷新_空token_抛400且不调用supabase(monkeypatch, fake_supabase):
 
 def test_刷新_数据库未就绪_抛500(monkeypatch):
     monkeypatch.setattr(auth_service, "get_supabase", lambda: None)
+    monkeypatch.setattr(auth_service, "get_auth_client", lambda: None)
 
     with pytest.raises(HTTPException) as e:
         refresh_session_token("rt")

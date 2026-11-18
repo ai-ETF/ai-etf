@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>public.trade_orders 订单状态机（settling 设计审阅）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 64px;
+    background: #f1f5f9; color: #1e293b; line-height: 1.7;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .sub { color: #64748b; font-size: 13px; margin: 0 0 20px; }
+  .card {
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 12px;
+    padding: 18px 20px; margin-bottom: 18px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+  }
+  .card h2 { font-size: 17px; margin: 0 0 14px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; }
+  .lg { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+  .sw {
+    width: 34px; height: 22px; border-radius: 5px; display: inline-block;
+    border: 1.5px solid; flex: none; position: relative;
+  }
+  .sw-buy    { background: #dbeafe; border-color: #1d4ed8; }
+  .sw-sell   { background: #d1fae5; border-color: #15803d; }
+  .sw-common { background: #eef2f7; border-color: #94a3b8; }
+  .sw-term   { background: #cbd5e1; border-color: #334155;
+               box-shadow: 0 0 0 2px #fff, 0 0 0 3px #334155; }
+  .sw-term i {
+    position: absolute; right: -6px; top: -7px; width: 15px; height: 15px;
+    border-radius: 50%; background: #334155; color: #fff;
+    font-size: 9px; font-style: normal; text-align: center; line-height: 15px;
+  }
+  .sw-unused {
+    background: repeating-linear-gradient(45deg, #fff1f2, #fff1f2 4px, #fecaca 4px, #fecaca 7px);
+    border-color: #dc2626; border-style: dashed;
+  }
+  .legend-note { font-size: 11.5px; color: #64748b; margin: 12px 0 0; }
+  .diagram { padding: 12px 12px 6px; }
+  svg { display: block; width: 100%; height: auto; }
+  .notes ol { margin: 0; padding-left: 22px; }
+  .notes li { margin-bottom: 12px; font-size: 13.5px; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: .92em; background: #f1f5f9; padding: 1px 5px; border-radius: 4px;
+  }
+  .suggest {
+    margin-top: 16px; border: 1px dashed #f59e0b; background: #fffbeb;
+    border-radius: 10px; padding: 14px 16px; font-size: 13px;
+  }
+  .suggest .tag {
+    display: inline-block; background: #f59e0b; color: #fff;
+    font-size: 11px; font-weight: 700; padding: 2px 9px;
+    border-radius: 20px; margin-bottom: 8px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>public.trade_orders 订单状态机</h1>
+  <p class="sub">数据库审计 · 用于审阅 <code>settling</code> 状态设计是否合理。共 9 个状态（来自 <code>trade_orders_status_check</code> 约束）、10 条迁移边；状态与边均取自给定清单，未额外补充。</p>
+
+  <div class="card">
+    <h2>图例</h2>
+    <div class="legend">
+      <div class="lg"><span class="sw sw-buy"></span>买入专用</div>
+      <div class="lg"><span class="sw sw-sell"></span>卖出专用</div>
+      <div class="lg"><span class="sw sw-common"></span>共用</div>
+      <div class="lg"><span class="sw sw-term"><i>终</i></span>终态（不可逆，叠加标记）</div>
+      <div class="lg"><span class="sw sw-unused"></span>未使用</div>
+    </div>
+    <p class="legend-note">
+      底色区分「方向归属」：蓝＝买入专用、绿＝卖出专用、灰＝共用、红色虚线斜纹＝未使用。
+      「终态」是叠加标记而非独立底色：在方向色基础上<strong>加深填充</strong>、加<strong>双边框</strong>与右上角「终」角标，覆盖 <code>completed</code> / <code>settled</code> / <code>rejected</code> / <code>cancelled</code> 四个不可逆状态（它们本身也属于某个方向桶）。
+      箭头配色：灰＝共用主链，蓝＝买入分支，绿＝卖出分支；虚线细线为标签引线。胶囊框 <code>[新建订单]</code> 为入口，不是状态；<code>reserved</code> 为孤立节点，无任何迁移边。
+    </p>
+  </div>
+
+  <div class="card diagram">
+    <svg viewBox="0 0 1460 820" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-label="public.trade_orders 订单状态机：共用主链、买入分支、卖出分支、未使用状态">
+      <title>public.trade_orders 订单状态机</title>
+      <defs>
+        <marker id="mC" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 z" fill="#64748b"/>
+        </marker>
+        <marker id="mB" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 z" fill="#2563eb"/>
+        </marker>
+        <marker id="mS" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 z" fill="#16a34a"/>
+        </marker>
+        <pattern id="hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="9" height="9" fill="#fff1f2"/>
+          <line x1="0" y1="0" x2="0" y2="9" stroke="#fecaca" stroke-width="3"/>
+        </pattern>
+      </defs>
+
+      <!-- 泳道背景 -->
+      <rect x="16" y="16" width="1428" height="130" rx="10" fill="#f7fbff" stroke="#dbeafe" stroke-width="1.2"/>
+      <text x="32" y="36" font-size="12" font-weight="700" fill="#1d4ed8">买入分支</text>
+      <text x="100" y="36" font-size="11" fill="#94a3b8">仅买入</text>
+
+      <rect x="16" y="162" width="1428" height="340" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.2"/>
+      <text x="32" y="182" font-size="12" font-weight="700" fill="#475569">共用主链</text>
+      <text x="100" y="182" font-size="11" fill="#94a3b8">买 / 卖共用</text>
+
+      <rect x="16" y="518" width="1428" height="182" rx="10" fill="#f6fdf8" stroke="#d1fae5" stroke-width="1.2"/>
+      <text x="32" y="538" font-size="12" font-weight="700" fill="#15803d">卖出分支</text>
+      <text x="100" y="538" font-size="11" fill="#94a3b8">仅卖出</text>
+
+      <!-- ============ 迁移边（先画，节点覆盖其上） ============ -->
+      <!-- ① 新建订单 → pending -->
+      <path d="M194,230 L255,230" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#mC)"/>
+      <!-- ② pending → processing -->
+      <path d="M465,230 L555,230" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#mC)"/>
+      <!-- ③ processing → pending（租约回收，回环弧） -->
+      <path d="M600,270 C600,330 360,330 360,270" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#mC)"/>
+      <!-- ④ processing → manual_review -->
+      <path d="M700,270 C800,270 820,400 920,400" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#mC)"/>
+      <!-- ⑤ manual_review → pending（重新入队，底部回流） -->
+      <path d="M1005,480 L1005,486 L225,486 L225,250 L255,250" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#mC)"/>
+      <!-- ⑥ processing → rejected -->
+      <path d="M765,230 L855,230" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#mC)"/>
+      <!-- ⑦ pending → cancelled -->
+      <path d="M360,270 L360,400" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#mC)"/>
+      <!-- ⑧ processing → completed（买入分支） -->
+      <path d="M660,190 L660,116" fill="none" stroke="#2563eb" stroke-width="2.6" marker-end="url(#mB)"/>
+      <!-- ⑨ processing → settling（卖出分支） -->
+      <path d="M660,270 L660,548" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mS)"/>
+      <!-- ⑩ settling → settled -->
+      <path d="M765,588 L895,588" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mS)"/>
+
+      <!-- 标签引线 -->
+      <path d="M664,158 C700,128 735,100 775,80" fill="none" stroke="#2563eb" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"/>
+      <path d="M880,584 C886,566 890,552 900,540" fill="none" stroke="#16a34a" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"/>
+
+      <!-- ============ 入口（非状态） ============ -->
+      <rect x="44" y="207" width="150" height="46" rx="23" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+      <text x="119" y="235" text-anchor="middle" font-size="12.5" font-weight="600" fill="#334155">[新建订单]</text>
+
+      <!-- ============ 状态节点（9 个） ============ -->
+      <!-- pending -->
+      <g>
+        <rect x="255" y="190" width="210" height="80" rx="8" fill="#eef2f7" stroke="#94a3b8" stroke-width="1.6"/>
+        <text x="269" y="212" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#1e293b">pending</text>
+        <text x="269" y="230" font-size="12" font-weight="600" fill="#334155">待确认</text>
+        <text x="269" y="247" font-size="9.5" fill="#64748b">新建订单的初始状态</text>
+        <text x="269" y="262" font-size="9.5" font-weight="600" fill="#64748b">共用 · 非终态</text>
+      </g>
+      <!-- processing -->
+      <g>
+        <rect x="555" y="190" width="210" height="80" rx="8" fill="#eef2f7" stroke="#94a3b8" stroke-width="1.6"/>
+        <text x="569" y="212" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#1e293b">processing</text>
+        <text x="569" y="230" font-size="12" font-weight="600" fill="#334155">确认中（带租约）</text>
+        <text x="569" y="247" font-size="9" fill="#64748b">含 processing_at / by / attempt_count</text>
+        <text x="569" y="262" font-size="9.5" font-weight="600" fill="#64748b">共用 · 非终态</text>
+      </g>
+      <!-- completed：买入专用 · 终态 -->
+      <g>
+        <rect x="551" y="32" width="218" height="88" rx="11" fill="none" stroke="#1d4ed8" stroke-width="1.2" opacity="0.85"/>
+        <rect x="555" y="36" width="210" height="80" rx="8" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.8"/>
+        <text x="569" y="58" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#1e3a8a">completed</text>
+        <text x="569" y="76" font-size="12" font-weight="600" fill="#1e3a8a">买入完成</text>
+        <text x="569" y="93" font-size="9.5" fill="#1d4ed8">解冻 frozen_cash、建仓、写 trade_flow</text>
+        <text x="569" y="108" font-size="9.5" font-weight="600" fill="#1d4ed8">仅买入 · 终态</text>
+        <circle cx="751" cy="52" r="11" fill="#1d4ed8"/>
+        <text x="751" y="56" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff">终</text>
+      </g>
+      <!-- settling：卖出专用 · 非终态 -->
+      <g>
+        <rect x="555" y="548" width="210" height="80" rx="8" fill="#d1fae5" stroke="#34d399" stroke-width="1.6"/>
+        <text x="569" y="570" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#065f46">settling</text>
+        <text x="569" y="588" font-size="12" font-weight="600" fill="#065f46">卖出待收款</text>
+        <text x="569" y="605" font-size="9.5" fill="#15803d">份额已扣、net_amount 已定、cash 未增</text>
+        <text x="569" y="620" font-size="9.5" font-weight="600" fill="#15803d">仅卖出 · 非终态</text>
+      </g>
+      <!-- settled：卖出专用 · 终态 -->
+      <g>
+        <rect x="891" y="544" width="218" height="88" rx="11" fill="none" stroke="#15803d" stroke-width="1.2" opacity="0.85"/>
+        <rect x="895" y="548" width="210" height="80" rx="8" fill="#86efac" stroke="#15803d" stroke-width="1.8"/>
+        <text x="909" y="570" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#14532d">settled</text>
+        <text x="909" y="588" font-size="12" font-weight="600" fill="#14532d">已到账</text>
+        <text x="909" y="605" font-size="9.5" fill="#15803d">cash += net_amount、settled_at = now()</text>
+        <text x="909" y="620" font-size="9.5" font-weight="600" fill="#15803d">仅卖出 · 终态</text>
+        <circle cx="1091" cy="564" r="11" fill="#15803d"/>
+        <text x="1091" y="568" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff">终</text>
+      </g>
+      <!-- rejected：共用 · 终态 -->
+      <g>
+        <rect x="851" y="186" width="218" height="88" rx="11" fill="none" stroke="#334155" stroke-width="1.2" opacity="0.85"/>
+        <rect x="855" y="190" width="210" height="80" rx="8" fill="#cbd5e1" stroke="#334155" stroke-width="1.8"/>
+        <text x="869" y="212" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#0f172a">rejected</text>
+        <text x="869" y="230" font-size="12" font-weight="600" fill="#1e293b">业务拒单</text>
+        <text x="869" y="247" font-size="9.5" fill="#475569">同事务完成补偿</text>
+        <text x="869" y="262" font-size="9.5" font-weight="600" fill="#334155">共用 · 终态</text>
+        <circle cx="1051" cy="206" r="11" fill="#334155"/>
+        <text x="1051" y="210" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff">终</text>
+      </g>
+      <!-- cancelled：共用 · 终态 -->
+      <g>
+        <rect x="251" y="396" width="218" height="88" rx="11" fill="none" stroke="#334155" stroke-width="1.2" opacity="0.85"/>
+        <rect x="255" y="400" width="210" height="80" rx="8" fill="#cbd5e1" stroke="#334155" stroke-width="1.8"/>
+        <text x="269" y="422" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#0f172a">cancelled</text>
+        <text x="269" y="440" font-size="12" font-weight="600" fill="#1e293b">已撤销</text>
+        <text x="269" y="457" font-size="9.5" fill="#475569">买单退回 cash</text>
+        <text x="269" y="472" font-size="9.5" font-weight="600" fill="#334155">共用 · 终态</text>
+        <circle cx="451" cy="416" r="11" fill="#334155"/>
+        <text x="451" y="420" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff">终</text>
+      </g>
+      <!-- manual_review：共用 · 非终态 -->
+      <g>
+        <rect x="900" y="400" width="210" height="80" rx="8" fill="#eef2f7" stroke="#94a3b8" stroke-width="1.6"/>
+        <text x="914" y="422" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#1e293b">manual_review</text>
+        <text x="914" y="440" font-size="12" font-weight="600" fill="#334155">人工复核</text>
+        <text x="914" y="457" font-size="9.5" fill="#64748b">可重新入队回 pending</text>
+        <text x="914" y="472" font-size="9.5" font-weight="600" fill="#64748b">共用 · 非终态</text>
+      </g>
+      <!-- reserved：未使用 -->
+      <g>
+        <rect x="39" y="720" width="210" height="80" rx="8" fill="url(#hatch)" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4"/>
+        <text x="53" y="742" font-family="ui-monospace, Consolas, monospace" font-size="14" font-weight="700" fill="#7f1d1d">reserved</text>
+        <text x="53" y="760" font-size="12" font-weight="600" fill="#991b1b">预留</text>
+        <text x="53" y="777" font-size="9.5" fill="#b91c1c">CHECK 中存在，全库从未使用</text>
+        <text x="53" y="792" font-size="9.5" font-weight="600" fill="#dc2626">未使用 · 方向无 / 终态无</text>
+      </g>
+      <text x="270" y="756" font-size="11.5" fill="#991b1b">未使用：CHECK 约束中存在，但全库从未使用，且无任何迁移边。</text>
+
+      <!-- ============ 箭头标签（最上层，白底胶囊） ============ -->
+      <g>
+        <rect x="140" y="150" width="170" height="34" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="1"/>
+        <text x="148" y="164" font-size="10.5" font-weight="700" fill="#334155">① place_purchase_order</text>
+        <text x="148" y="178" font-size="10.5" fill="#334155">place_redeem_order</text>
+      </g>
+      <g>
+        <rect x="375" y="148" width="270" height="34" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="1"/>
+        <text x="383" y="162" font-size="10.5" font-weight="700" fill="#334155">② confirm_buy_order / confirm_sell_order</text>
+        <text x="383" y="176" font-size="10.5" fill="#334155">原子 CAS 认领（WHERE status='pending'）</text>
+      </g>
+      <g>
+        <rect x="370" y="276" width="225" height="34" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="1"/>
+        <text x="378" y="290" font-size="10.5" font-weight="700" fill="#334155">③ reap_stale_processing</text>
+        <text x="378" y="304" font-size="10.5" fill="#334155">租约超时回收（attempt_count 未达上限）</text>
+      </g>
+      <g>
+        <rect x="720" y="318" width="160" height="34" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="1"/>
+        <text x="728" y="332" font-size="10.5" font-weight="700" fill="#334155">④ 租约超上限 / 数据不一致</text>
+        <text x="728" y="346" font-size="10.5" fill="#334155">NO_NAV</text>
+      </g>
+      <g>
+        <rect x="600" y="466" width="280" height="34" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="1"/>
+        <text x="608" y="480" font-size="10.5" font-weight="700" fill="#334155">⑤ requeue_manual_review_order</text>
+        <text x="608" y="494" font-size="10.5" fill="#334155">重新入队回 pending</text>
+      </g>
+      <g>
+        <rect x="730" y="156" width="160" height="34" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="1"/>
+        <text x="738" y="170" font-size="10.5" font-weight="700" fill="#334155">⑥ 业务拒单</text>
+        <text x="738" y="184" font-size="10.5" fill="#334155">同事务完成补偿</text>
+      </g>
+      <g>
+        <rect x="275" y="322" width="170" height="24" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="1"/>
+        <text x="283" y="338" font-size="10.5" font-weight="700" fill="#334155">⑦ cancel_trade_order</text>
+      </g>
+      <g>
+        <rect x="775" y="44" width="345" height="48" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="1"/>
+        <text x="783" y="58" font-size="10.5" font-weight="700" fill="#1d4ed8">⑧ confirm_buy_order</text>
+        <text x="783" y="72" font-size="10.5" fill="#334155">解冻 frozen_cash、按 net_amount 建仓</text>
+        <text x="783" y="86" font-size="10.5" fill="#334155">写 trade_flow、尾差回 cash</text>
+      </g>
+      <g>
+        <rect x="665" y="396" width="230" height="48" rx="6" fill="#ffffff" stroke="#16a34a" stroke-width="1"/>
+        <text x="673" y="410" font-size="10.5" font-weight="700" fill="#15803d">⑨ confirm_sell_order</text>
+        <text x="673" y="424" font-size="10.5" fill="#334155">FIFO 扣 lot/positions、算 net_amount</text>
+        <text x="673" y="438" font-size="10.5" fill="#334155">写 trade_flow、不动 cash</text>
+      </g>
+      <g>
+        <rect x="880" y="496" width="320" height="48" rx="6" fill="#ffffff" stroke="#16a34a" stroke-width="1"/>
+        <text x="888" y="510" font-size="10.5" font-weight="700" fill="#15803d">⑩ settle_redeem_order</text>
+        <text x="888" y="524" font-size="10.5" fill="#334155">settle_date &lt;= today</text>
+        <text x="888" y="538" font-size="10.5" fill="#334155">cash += net_amount、settled_at = now()</text>
+      </g>
+    </svg>
+  </div>
+
+  <div class="card notes">
+    <h2>审阅注记</h2>
+    <ol>
+      <li><strong>业务阶段必需</strong>：赎回确认与到账之间存在真实时间差；用户侧「在途金额」、<code>account_snapshots.settling_cash</code> 聚合、<code>reconcile_orders</code> 对账都依赖它。依据 <code>docs/10-需求/订单确认.md</code> §2.1、§2.9 与 Q4 决策（2026-10-30「确认只生成应收，到账日再进 cash」）。</li>
+      <li><strong>派生状态物化</strong>：<code>trade_orders</code> 已有 <code>settle_date</code>（应到账日）与 <code>settled_at</code>（实际到账时间）。<code>settling</code> 等价于 <code>direction='sell' AND settle_date IS NOT NULL AND settled_at IS NULL</code>；<code>settled</code> 等价于 <code>settled_at IS NOT NULL</code>。同一事实存了两处。</li>
+      <li><strong>买卖不对称 + 文档偏差</strong>：买入终态是 <code>completed</code>，卖出终态是 <code>settled</code>，卖出<strong>从不经过 completed</strong>（代码为 <code>processing → settling</code>）；但文档 §2.1 画的是「（赎回）completed → settling → settled」，与实现不符。</li>
+      <li><strong>枚举不干净</strong>：<code>reserved</code> 从未使用；<code>status</code> 列默认值是 <code>'completed'</code>（老系统「下单即建仓」的历史遗留）。</li>
+    </ol>
+    <div class="suggest">
+      <span class="tag">建议，未定稿</span>
+      <div>5. <strong>可选改进</strong>：卖出确认后统一为 <code>completed</code>，「在途」由 <code>settled_at IS NULL</code> 表达，去掉 <code>settling</code>/<code>settled</code> 两个枚举值；代价是用户侧展示、快照聚合、对账的查询条件都要从 <code>status='settling'</code> 改为 <code>settled_at IS NULL AND net_amount IS NOT NULL</code>。</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -37,10 +37,6 @@ router.include_router(off_exchange_funds.router)
 router.include_router(risk_router)
 router.include_router(admin.router)
 
-# 已弃用的 ask 路由不再注册（保留 import 避免破坏旧引用）
-# from . import ask
-# router.include_router(ask.router)
-
 __all__ = [
     "upload", "test", "secure_chat", "watchlist", "portfolio", "off_exchange_funds",
     "admin", "market_router", "risk_router", "router",

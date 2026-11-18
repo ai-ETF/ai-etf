@@ -217,6 +217,11 @@ class SearchItem(BaseModel):
     fund_type: Optional[str] = None  # 基金类型
     net_asset_scale: Optional[str] = None  # 净资产规模
 
+    # 交易准入（来自 fund_catalog，搜索页据此直接标注，无需再调详情）
+    subscribe_status: Optional[str] = None  # 空=存量行按开放申购
+    min_purchase_amount: Optional[float] = None  # 最低申购金额（元）
+    max_purchase_amount: Optional[float] = None  # 空：开放申购=无限额；限大额=上限未知（拒绝申购）
+
 
 class SearchResponse(BaseModel):
     """搜索响应"""
@@ -333,6 +338,8 @@ class OrderResult(BaseModel):
     frozen_cash: Optional[float] = None
     status: str = "completed"
     trade_time: Optional[str] = None
+    trade_date: Optional[str] = None  # 受理日（成交净值日）T
+    error_code: Optional[str] = None  # 下单失败/人工复核的原因码
 
 
 class RiskWarning(BaseModel):
@@ -352,6 +359,23 @@ class OrderResponse(BaseModel):
     message: str
     data: Optional[OrderResult] = None
     risk_warning: Optional[RiskWarning] = None
+
+
+class CancelOrderResult(BaseModel):
+    """撤单结果"""
+    order_id: str
+    status: str
+    direction: Optional[str] = None  # buy / sell
+    refunded_amount: Optional[float] = None  # 买入撤单退回的冻结资金
+    released_quantity: Optional[float] = None  # 卖出撤单释放的份额
+    cancel_deadline: Optional[str] = None  # 撤单截止时间（受理日 15:00）
+
+
+class CancelOrderResponse(BaseModel):
+    """撤单响应"""
+    success: bool
+    message: str
+    data: Optional[CancelOrderResult] = None
 
 
 class PositionItem(BaseModel):
@@ -386,11 +410,21 @@ class AccountSummaryResponse(BaseModel):
     """账户概况响应"""
     cash: float
     frozen_cash: float
+    settling_cash: float = 0.0  # 在途赎回款（status=settling 的 net_amount 合计）
     position_value: float
     total_assets: float
     total_pnl: float
     total_return_rate: float
     position_count: int
+
+
+class PortfolioOverviewResponse(BaseModel):
+    """持仓页概况响应：账户概况 + 持仓列表一次返回。
+
+    两个字段共用同一次持仓计算，避免页面加载时前后端各算一遍。
+    """
+    account: AccountSummaryResponse
+    positions: PositionListResponse
 
 
 class TradeFlowItem(BaseModel):
@@ -405,6 +439,7 @@ class TradeFlowItem(BaseModel):
     quantity: float
     fee: float
     trade_time: str
+    order_id: Optional[str] = None  # 关联订单（确认 RPC 写入）
 
 
 class TradeFlowResponse(BaseModel):
@@ -414,6 +449,33 @@ class TradeFlowResponse(BaseModel):
     page_size: int
     total_pages: int
     items: List[TradeFlowItem]
+
+
+class ConfirmRunResponse(BaseModel):
+    """订单确认批次响应（见《订单确认-实现方案》§6）。
+
+    `status='busy'` 表示已有一轮在跑，本轮跳过（不是失败，HTTP 仍为 200）。
+    保留 `processed/skipped` 两个旧字段作为别名：processed=scanned，
+    skipped=skipped_nav+skipped_time+retryable。
+    """
+    run_id: Optional[str] = None
+    status: str  # ok / busy
+    trigger: Optional[str] = None
+    message: Optional[str] = None
+    trade_date: Optional[str] = None
+    scanned: int = 0
+    confirmed: int = 0
+    rejected: int = 0
+    skipped_nav: int = 0
+    skipped_time: int = 0
+    retryable: int = 0
+    manual_review: int = 0
+    settled: int = 0
+    error: Optional[str] = None
+    duration_ms: int = 0
+    # 旧字段别名
+    processed: int = 0
+    skipped: int = 0
 
 
 class TradeFlowQueryParams(BaseModel):
@@ -429,9 +491,13 @@ class SnapshotData(BaseModel):
     snapshot_date: str
     total_assets: float
     cash: float
+    frozen_cash: float = 0.0  # 冻结资金（pending 买单）
+    settling_cash: float = 0.0  # 在途赎回款
     position_value: float
     total_pnl: float
     total_return_rate: float
+    status: str = "valid"
+    invalid_reason: Optional[str] = None
 
 
 class SnapshotResponse(BaseModel):
@@ -442,14 +508,18 @@ class SnapshotResponse(BaseModel):
 
 
 class DailyReturnItem(BaseModel):
-    """每日收益率"""
+    """每日/区间收益率"""
     date: str
     total_assets: float
     cash: float
+    frozen_cash: float = 0.0
+    settling_cash: float = 0.0
     position_value: float
     total_pnl: float
     total_return_rate: float
-    daily_return: float
+    period_days: Optional[int] = None
+    period_return: Optional[float] = None
+    daily_return: Optional[float] = None
 
 
 class DailyReturnResponse(BaseModel):

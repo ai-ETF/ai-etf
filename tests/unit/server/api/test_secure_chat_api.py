@@ -55,7 +55,7 @@ class FakeRepo:
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setattr("server.api.secure_chat.get_supabase", lambda: FakeSupabase())
+    monkeypatch.setattr("server.api.secure_chat.get_auth_client", lambda: FakeSupabase())
     monkeypatch.setattr("server.api.secure_chat.get_chat_repo", lambda: FakeRepo())
     monkeypatch.setattr("server.api.secure_chat.register_user",
                         lambda email, password: {"session": None, "user": None})
@@ -87,7 +87,7 @@ def test_login_未返回session_抛401(client, monkeypatch):
     class _Supabase:
         auth = _Auth()
 
-    monkeypatch.setattr("server.api.secure_chat.get_supabase", lambda: _Supabase())
+    monkeypatch.setattr("server.api.secure_chat.get_auth_client", lambda: _Supabase())
     resp = client.post("/secure-chat/login", json={"email": "u@e.com", "password": "pass12345"})
     assert resp.status_code == 401
 

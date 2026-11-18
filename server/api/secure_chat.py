@@ -4,10 +4,12 @@
 提供登录、发送消息、会话管理等端点，所有接口（除登录外）需要 JWT 认证。
 user_id 从 JWT token 中自动读取，不从请求体取，杜绝冒充。
 """
+import asyncio
+import contextlib
 import logging
 import time
 from datetime import datetime
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -23,7 +25,7 @@ from server.services.auth_service import (
     register_user,
 )
 from server.storage.chat_repo import get_chat_repo
-from server.storage.supabase_client import get_supabase
+from server.storage.supabase_client import get_auth_client
 from server.utils.sse import format_sse_event, create_sse_stream_response
 
 logger = logging.getLogger(__name__)
@@ -128,7 +130,9 @@ async def login(req: LoginRequest):
     同时返回 refresh_token（长效凭证，Supabase 默认 30 天）：access_token 过期后
     用 POST /secure-chat/refresh 换取新的一对 token，实现免登录。前端需持久化保存。
     """
-    supabase = get_supabase()
+    # 登录必须用独立客户端：sign_in 会把客户端的 Authorization 改成该用户 JWT，
+    # 共享的数据客户端一旦被改写，全进程后续请求都会串成这个用户的身份。
+    supabase = get_auth_client()
     if not supabase:
         raise HTTPException(status_code=500, detail="数据库连接未就绪")
 
@@ -258,6 +262,63 @@ async def delete_account_endpoint(
 
 # ========== 流式生成器 ==========
 
+# SSE 保活间隔（秒）。推理模型在「思考」阶段不产出正文，链路上可能长时间
+# 没有字节流过；微信客户端、反向代理、云网关通常会在 20s 级别的空闲后
+# 主动断开连接。取 10s，小于常见空闲阈值的一半。
+SSE_HEARTBEAT_INTERVAL_SECONDS = 10.0
+
+
+async def with_heartbeat(
+    source: AsyncIterator[str],
+    interval: float = SSE_HEARTBEAT_INTERVAL_SECONDS,
+) -> AsyncIterator[str]:
+    """在流式输出静默超过 interval 时插入 SSE 注释帧，保持连接存活。
+
+    背景：模型思考期间服务端只消费 thinking 块、不产出正文，客户端看到的是
+    一条完全静默的连接，可能被微信/代理按空闲超时切断，最终表现为
+    「流结束了但一个 token 都没有」。
+
+    SSE 规范中冒号开头的行为注释，客户端必须忽略；前端 parseSSELine 也会
+    跳过，因此无需改动客户端。
+
+    实现说明：不能直接对 async generator 使用 ``asyncio.wait_for`` —— 超时会
+    取消底层迭代，生成器无法继续消费。这里用生产者/消费者队列解耦：
+    后台任务持续从 source 取数据，主循环负责按时插入心跳。
+    """
+    queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+
+    async def produce() -> None:
+        try:
+            async for item in source:
+                await queue.put(("data", item))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # 交由主循环统一抛出，由调用方记录
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("end", None))
+
+    task = asyncio.create_task(produce())
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                continue
+
+            if kind == "data":
+                yield payload  # type: ignore[misc]
+            elif kind == "error":
+                raise payload  # type: ignore[misc]
+            else:
+                break
+    finally:
+        # 客户端断开或正常结束时都要停掉后台任务，避免继续消耗模型调用。
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
 
 async def stream_with_save(question: str, chat_id: str, user_id: str):
     """
@@ -354,7 +415,7 @@ async def create_secure_message(
 
     # 4. 流式返回 LLM 回答
     return create_sse_stream_response(
-        generator=stream_with_save(req.question, chat_id, user_id),
+        generator=with_heartbeat(stream_with_save(req.question, chat_id, user_id)),
         session_id=chat_id,
     )
 

@@ -1,0 +1,30 @@
+-- ============================================================================
+-- accounts.position_value 刷新触发器 · 契约占位（NOT IMPLEMENTED）
+-- 本次只定名字；实现与启用顺序见下方「落地前提」。
+-- ============================================================================
+--
+-- 触发器名（定稿）  ：trg_positions_refresh_position_value
+-- 宿主表 / 事件     ：public.positions
+--                     AFTER INSERT OR UPDATE OF quantity OR DELETE, FOR EACH ROW
+-- 触发器函数（待实现）：public.trg_positions_refresh_account_position_value()
+-- 被调业务函数       ：public.account_refresh_position_value(uuid)
+--                     已在 accounts_tx_contract.sql 定义，当前为 RAISE EXCEPTION 骨架
+--
+-- 业务：positions.quantity 变化（建仓 / 加减仓 / 货基收益入账）后，按
+--       Σ(quantity × 估值净值) 重算该用户 accounts.position_value。
+--       触发器只做转发，业务口径留在 account_refresh_position_value 单一来源，
+--       避免与 portfolio_service 实时估值、account_snapshot_service 日终估值形成多份实现。
+--       净值批量更新（merge_fund_nav / upsert_fund_nav_state）不挂触发器，
+--       走显式批量刷新，避免 M×N 写放大与 accounts 行锁竞争。
+-- 兜底：reconcile_orders 扩展 position_value_mismatch 对账项，漏刷新变可观测告警。
+--
+-- 落地前提（顺序不能反）：
+--   1. 先填 account_refresh_position_value 的实现；
+--   2. 再建触发器——函数仍是骨架时启用，会让所有 positions 写入失败；
+--   3. positions 后续重建 / 改列时，回来同步修改本文件。
+--
+-- 本文件不执行。以下语句保持注释，待实现后解除。
+-- ---------------------------------------------------------------------------
+-- CREATE OR REPLACE TRIGGER trg_positions_refresh_position_value
+-- AFTER INSERT OR UPDATE OF quantity OR DELETE ON public.positions
+-- FOR EACH ROW EXECUTE FUNCTION public.trg_positions_refresh_account_position_value();

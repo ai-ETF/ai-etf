@@ -231,7 +231,9 @@ def test_search_catalog_名称命中并带最新净值():
     )
     fake_meta = FakeFundMeta([
         FundMeta(fund_code="110020", fund_name="易方达沪深300ETF联接A", ftype="指数型-股票",
-                 net_asset_scale=Decimal("123456789.12")),
+                 net_asset_scale=Decimal("123456789.12"),
+                 subscribe_status="限大额", min_purchase_amount=Decimal("10"),
+                 max_purchase_amount=Decimal("10000")),
     ])
 
     results = FinanceApiService(fund_nav=fake_nav, fund_meta=fake_meta).search_catalog("沪深300")
@@ -243,6 +245,9 @@ def test_search_catalog_名称命中并带最新净值():
         "net_asset_scale": "123456789.12",
         "nav": 1.52,
         "nav_date": "2026-01-06",
+        "subscribe_status": "限大额",
+        "min_purchase_amount": 10.0,
+        "max_purchase_amount": 10000.0,
     }]
     assert fake_meta.search_calls == [{"keyword": "沪深300", "limit": 10}]
 

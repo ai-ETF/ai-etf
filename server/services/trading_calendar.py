@@ -84,6 +84,41 @@ def is_trading_day(d: date) -> bool:
     return get_calendar_cache().is_trading_day(d)
 
 
+def next_trading_day(d: date) -> date:
+    """`d` 之后的第一个交易日（严格大于 `d`，`d` 本身是否为交易日不影响）。
+
+    日期越出快照覆盖区间抛 `CalendarOutOfCoverage`，快照未就绪抛
+    `CalendarUnavailable`；不跨区间猜测，也不无限向后找。
+    """
+    return _shift(d, 1)
+
+
+def prev_trading_day(d: date) -> date:
+    """`d` 之前的最后一个交易日（严格小于 `d`）。
+
+    存量订单回填要用它把 `confirm_date` 反推回受理日（T），这是项目里唯一
+    的「向前找交易日」入口；越界与未就绪的失败语义同 `next_trading_day`。
+    """
+    return _shift(d, -1)
+
+
+def _shift(d: date, step: int) -> date:
+    """逐日推进直到落在交易日上；区间检查用快照边界，不靠 `is_trading_day` 抛错。"""
+    snap = get_calendar_cache().snapshot
+    if snap is None:
+        raise CalendarUnavailable("交易日历未载入，无法推算交易日")
+
+    cursor = d
+    # 上限 60 天：超过说明快照有洞（整年数据缺失），继续循环只会空转
+    for _ in range(60):
+        cursor += timedelta(days=step)
+        if cursor < snap.coverage_start or cursor > snap.coverage_end:
+            raise CalendarOutOfCoverage(cursor, snap.coverage_start, snap.coverage_end)
+        if cursor in snap.trading_days:
+            return cursor
+    raise CalendarOutOfCoverage(cursor, snap.coverage_start, snap.coverage_end)
+
+
 def is_trading_time(dt: datetime) -> bool:
     """是否为 A 股连续竞价时段（交易日 9:30-15:00；含 9:30，不含 15:00）。
 

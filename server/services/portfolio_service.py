@@ -26,9 +26,11 @@ from server.services.fund_fee_service import (
     LIMITED_SUBSCRIBE_STATUS,
     PURCHASABLE_SUBSCRIBE_STATUSES,
 )
+from server.services.order_confirm_rules import build_fee_snapshot
 from server.services.trading_calendar import (
     CalendarOutOfCoverage,
     CalendarUnavailable,
+    prev_trading_day,
 )
 
 logger = logging.getLogger(__name__)
@@ -233,7 +235,12 @@ class PortfolioService:
         return self.get_auto_invest_config(user_id)
 
     def _confirm_money_fund_order(self, user_id: str):
-        """确认用户最新的货基 pending 申购订单（自动申购专用）。"""
+        """确认用户最新的货基 pending 申购订单（余额理财自动申购专用）。
+
+        走统一 `confirm_buy_order` RPC：货基净值恒 1.0000，份额 = floor(net/1.00)，
+        尾差为 0；本金/成本由 RPC 按 lot 建立，不在应用层直接改 positions
+        （否则 `position_lots` 与 `positions` 会分叉，见《业务规则》§3.10）。
+        """
         try:
             result = (
                 self.client.table("trade_orders")
@@ -248,13 +255,33 @@ class PortfolioService:
             )
             if not result.data:
                 return
-            from server.services.fund_fee_service import FundFeeService
-            rule = FundFeeService().get_fee_rule(MONEY_FUND_CODE)
-            today = _beijing_date()
-            self._confirm_one_order(result.data[0], today, rule=rule)
-            logger.info(f"用户 {user_id} 货基自动申购已确认")
+
+            from server.services.order_confirm_rules import calc_buy_amounts
+
+            order = result.data[0]
+            amounts = calc_buy_amounts(
+                Decimal(str(order.get("amount") or 0)),
+                Decimal("1.0000"),
+                Decimal(str(order.get("fee") or 0)),
+            )
+            payload = self.client.rpc("confirm_buy_order", {
+                "p_order_id": order["id"],
+                "p_worker": "auto-invest",
+                "p_nav": 1.0,
+                "p_fee": float(amounts["fee"]),
+                "p_net_amount": float(amounts["net_amount"]),
+                "p_quantity": float(amounts["quantity"]),
+                "p_residual": float(amounts["residual"]),
+            }).execute().data or {}
+
+            rpc_result = payload.get("result")
+            if rpc_result == "completed":
+                logger.info(f"用户 {user_id} 货基自动申购已确认: {amounts['quantity']} 份")
+            else:
+                # not_claimed / retryable 等交给每日确认 Runner 兜底，不在这里重试
+                logger.warning(f"用户 {user_id} 货基自动申购确认未完成: {payload}")
         except Exception as e:
-            logger.error(f"确认货基自动申购失败: {e}")
+            logger.error(f"确认货基自动申购失败: {e}", exc_info=True)
 
     def get_account(self, user_id: str) -> Optional[dict]:
         if not self.client:
@@ -380,22 +407,30 @@ class PortfolioService:
         """给所有持有货币基金的用户，按最近公布的万份收益把收益折算成份额。
 
         真实货基收益机制：净值恒 1.0000，每日按「万份收益」计息并复投。
-        这里模拟为：当日收益折算成份额加进 positions.quantity（份额逐日增长，
-        即复利——次日收益在更大份额上计算），本金 principal 保持不变。
+        收益写成 `source='income'` 的 lot（`cost_price=0`、`remaining_cost=0`），
+        由 `credit_money_fund_income_atomic` 在同一事务里重算 `positions`——
+        份额逐日增长（复利），本金 `principal` 不变。
 
         入账规则：
-        - 当日收益 = 份额 × 昨日万份收益 / 10000，保留 2 位小数（分）。
-          NAV=1.0000，故收益（元）= 新增份额，直接 quantity += 收益。
+        - 当日收益 = 份额 × 万份收益 / 10000，保留 2 位小数（分）。
+          NAV=1.0000，故收益（元）= 新增份额。
         - 收益 <= 0 的持仓跳过（子分位舍入到 0，如刚买入、份额极小；货基无日亏）。
         - 万份收益获取失败时直接抛异常（不兜底），整个任务中断，
           由调度器记录错误——宁可当天不入账，也不用虚假数据。
+        - 是否重复入账由 RPC 的 `(user_id, fund_code, 'income', income_date)` 幂等键保证，
+          同日重跑返回 `already_credited`，不算失败。
 
         由 spot_cache_scheduler 每日 00:05 调用（届时昨日万份收益已披露）。
         不做历史回填：从本方法上线的下一天起逐日入账。
         """
         # 1. 先取万份收益（失败即抛错，无兜底）——在循环前只请求一次
         per10k = self._money_fund_per10k_income()
-        logger.info(f"[货基收益] 万份收益 = {per10k} 元/万份，开始逐仓折算份额")
+        # 入账日期取「万份收益对应的计息日」而不是今天：幂等键是
+        # (user_id, fund_code, 'income', income_date)，补跑同一天不会重复入账。
+        income_date = self._money_fund_cache.get("income_date")
+        if not income_date:
+            raise RuntimeError(f"货基 {MONEY_FUND_CODE} 万份收益缺少计息日，拒绝入账")
+        logger.info(f"[货基收益] 万份收益 = {per10k} 元/万份（{income_date}），开始逐仓折算份额")
 
         if not self.client:
             raise RuntimeError("数据库不可用")
@@ -411,16 +446,19 @@ class PortfolioService:
         if not positions:
             logger.info("[货基收益] 暂无货基持仓，跳过入账")
             return {
-                "status": "ok", "credited": 0,
-                "per10k_income": float(per10k), "total_income": 0.0,
+                "status": "ok", "credited": 0, "skipped": 0,
+                "per10k_income": float(per10k), "income_date": income_date,
+                "total_income": 0.0,
             }
 
-        now = _now_iso()
         credited = 0
+        skipped = 0
         total_income = Decimal("0")
         errors = []
 
-        # 3. 逐仓入账：收益折算成份额，quantity 逐日增长（本金 principal 不变）
+        # 3. 逐仓入账：收益折算成 source='income' 的 lot（cost 0），由 RPC 重算持仓。
+        #    份额逐日增长即复投（次日收益在更大份额上计算），本金 principal 不变。
+        #    收益 <= 0 的持仓跳过（子分位舍入到 0，如刚买入、份额极小；货基无日亏）。
         for pos in positions:
             user_id = pos.get("user_id")
             qty = Decimal(str(pos.get("quantity", 0) or 0))
@@ -435,36 +473,49 @@ class PortfolioService:
                 logger.debug(f"[货基收益] user={user_id} 当日收益 {income} 元，跳过")
                 continue
 
-            new_qty = (qty + income).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             try:
-                self.client.table("positions").update({
-                    "quantity": float(new_qty),
-                    "updated_at": now,
-                }).eq("id", pos["id"]).execute()
-                total_income += income
-                credited += 1
-                logger.info(
-                    f"[货基收益] user={user_id} 份额 {qty} +{income} = {new_qty}"
-                    f"（本金不变）"
-                )
+                payload = self.client.rpc("credit_money_fund_income_atomic", {
+                    "p_user_id": user_id,
+                    "p_fund_code": MONEY_FUND_CODE,
+                    "p_income": float(income),
+                    "p_income_date": income_date,
+                }).execute().data or {}
+                rpc_result = payload.get("result")
+                if rpc_result == "credited":
+                    total_income += income
+                    credited += 1
+                    logger.info(
+                        f"[货基收益] user={user_id} 份额 +{income}"
+                        f"（{income_date}，本金不变）"
+                    )
+                elif rpc_result == "already_credited":
+                    # 同日重跑/补跑：幂等命中，不算失败
+                    skipped += 1
+                    logger.info(f"[货基收益] user={user_id} {income_date} 已入账，跳过")
+                else:
+                    # no_income / no_position：并发下持仓已清空或舍入为 0，按跳过处理
+                    skipped += 1
+                    logger.warning(f"[货基收益] user={user_id} 不入账: {rpc_result}")
             except Exception as e:
                 # 单仓 DB 失败只记录，不影响其他用户
                 # （与数据源失败「整个任务中断」是两种不同级别的错误处理）
                 errors.append(f"{user_id}: {e}")
                 logger.error(f"[货基收益] user={user_id} 入账失败: {e}", exc_info=True)
 
-        result = {
+        result_payload = {
             "status": "ok" if not errors else "partial",
             "credited": credited,
+            "skipped": skipped,
             "per10k_income": float(per10k),
+            "income_date": income_date,
             "total_income": float(total_income.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
             "errors": errors,
         }
         logger.info(
-            f"[货基收益] 入账完成: 成功 {credited} 仓, 合计 {result['total_income']} 元, "
-            f"错误 {len(errors)}"
+            f"[货基收益] 入账完成: 成功 {credited} 仓, 跳过 {skipped} 仓, "
+            f"合计 {result_payload['total_income']} 元, 错误 {len(errors)}"
         )
-        return result
+        return result_payload
 
     def _get_fund_name(self, fund_code: str, rule: Optional[dict] = None) -> str:
         """获取基金名称（优先从 rule 中读取，避免重复查询）"""
@@ -540,42 +591,23 @@ class PortfolioService:
             return None
         return Decimal(str(fee))
 
-    # ==================== T 日累计申购额度 ====================
-
-    def _sum_t_day_purchase(self, user_id: str, fund_code: str,
-                            confirm_date: date) -> Decimal:
-        """统计该用户对该基金在「同一 T 日」已提交的累计申购金额（元）。
-
-        为什么用 confirm_date 分组而不是存一列 T 日：同一基金下 confirm_delay 是常量，
-        「T 日 → 确认日」是套用 N 次 _next_trading_day()、严格单调，故两笔属于同一 T 日
-        ⟺ 确认日相同 —— 按确认日等值匹配与按 T 日聚合完全等价，无需新增列。
-        （若日后 confirm_delay 变成按日可变，这个双射会失效，届时必须显式存 T 日。）
-
-        只计入 pending / completed：已撤销、已拒的申请不占用额度。
-        查询异常直接上抛（fail-closed）—— 算不出已用额度时宁可拒单，也不能放行。
-        """
-        resp = (self.client.table("trade_orders")
-                .select("amount")
-                .eq("user_id", user_id)
-                .eq("fund_code", fund_code)
-                .eq("direction", "buy")
-                .in_("status", ["pending", "completed"])
-                .eq("confirm_date", confirm_date.isoformat())
-                .execute())
-        return sum((Decimal(str(r["amount"])) for r in (resp.data or [])), Decimal("0"))
-
     # ==================== 申购 ====================
 
     def apply_purchase(self, user_id: str, fund_code: str, amount: Decimal,
-            price: Optional[Decimal] = None) -> dict:
+            price: Optional[Decimal] = None,
+            client_order_id: Optional[str] = None) -> dict:
         """
         场外基金按金额申购。
+
+        资金冻结、单日额度与幂等由 `place_purchase_order` RPC 在同一事务内完成；
+        本方法只做业务前置校验（白名单/ETF/申购状态/金额上下限）并计算日期与费用。
 
         参数:
             user_id: 用户 ID
             fund_code: 基金代码
             amount: 申购金额（元）
-            price: 净值（不传则自动获取）
+            price: 预估净值（不传则取最新净值），仅用于展示，不参与确认取价
+            client_order_id: 幂等键（来自 Idempotency-Key），同键重复提交返回原订单
         """
         try:
             # 0. 校验基金白名单 + ETF 拦截（只查一次 rule）
@@ -610,10 +642,11 @@ class PortfolioService:
 
             now_beijing = _beijing_now()
 
-            # 1. 计算 T 日（申请被受理的交易日）与确认日（从 rule 中直接读取，不再重复查询）
-            #    注意 t_day 不是自然日：收盘后或非交易日（含法定节假日）下单会顺延，
+            # 1. 受理日 T（申请被受理的交易日）与确认日
+            #    受理日也是成交净值日（方案 A）。收盘后或非交易日下单顺延，
             #    假期里每天下的单全部归集到节后第一个交易日，算作同一个 T 日。
             confirm_delay = int(_require_rule_field(rule, fund_code, "confirm_delay"))
+            available_delay = int(_require_rule_field(rule, fund_code, "redeem_available_delay"))
             if self._is_trading_day(now_beijing.date()) and self._is_before_cutoff(now_beijing):
                 t_day = now_beijing.date()
                 day_label = "当日"
@@ -625,6 +658,11 @@ class PortfolioService:
             for _ in range(confirm_delay):
                 actual_confirm = self._next_trading_day(actual_confirm)
 
+            # 份额可赎回日 = 确认日 + redeem_available_delay 个交易日（下单时算好并落库）
+            available_date = actual_confirm
+            for _ in range(available_delay):
+                available_date = self._next_trading_day(available_date)
+
             # 2. 校验申购金额上下限（均从 rule 中直接读取）
             min_amount = Decimal(str(_require_rule_field(rule, fund_code, "min_purchase_amount")))
             if amount < min_amount:
@@ -635,8 +673,7 @@ class PortfolioService:
                 }
 
             # 单日累计申购上限（「限大额」基金），NULL = 无限额。
-            # 语义是「同一 T 日累计」，因此必须聚合该 T 日已提交的申购金额 ——
-            # 只校验单笔会让用户拆成多笔小额绕过上限。
+            # 额度校验在 RPC 内与冻结同事务完成，这里只拦「限大额但上限未知」。
             max_amount = rule.get("max_purchase_amount")
             if subscribe_status == LIMITED_SUBSCRIBE_STATUS and max_amount is None:
                 # 「限大额」却没有上限值 = 同步时没抓到 MAXSG，限额未知。
@@ -647,84 +684,93 @@ class PortfolioService:
                     "message": "该基金限额信息暂不可用（同步未取到单日申购上限），暂不接受申购",
                     "data": None,
                 }
-            if max_amount is not None:
-                limit = Decimal(str(max_amount))
-                used = self._sum_t_day_purchase(user_id, fund_code, actual_confirm)
-                if used + amount > limit:
-                    return {
-                        "success": False,
-                        "message": f"本交易日已申购 {float(used):.2f} 元，本次申购 {float(amount):.2f} 元，"
-                                   f"合计超过该基金单日累计申购上限 {float(limit):.2f} 元",
-                        "data": None,
-                    }
 
-            # 3. 获取净值（必须在冻结资金之前；只读 DB，不触网）
+            # 3. 预估净值（只用于展示与额度提示，不参与确认取价）
             if price is None:
                 price = self._latest_nav(fund_code)
             if price is None or price <= 0:
                 return {"success": False, "message": f"无法获取基金 {fund_code} 的净值", "data": None}
 
-            # 4. 计算申购费（传入 rule 避免重复查询）
+            # 4. 申购费（外扣法）。net 严格 = amount - fee，不做二次 round，
+            #    否则 amount == net + fee 会差 0.01（§3.7.2）。
             fee_result = self._calc_purchase_fee(fund_code, amount, rule=rule)
             if fee_result is None:
                 return {"success": False, "message": f"暂不支持基金 {fund_code} 的交易", "data": None}
-            fee = fee_result["fee"]
-            net_amount = fee_result["net_amount"]
+            fee = Decimal(str(fee_result["fee"]))
+            net_amount = amount - fee
 
-            # 5. 获取基金名称（传入 rule 避免重复查询）
+            # 5. 获取基金名称 + 风险提示（建议性，异常不影响交易）
             fund_name = self._get_fund_name(fund_code, rule=rule)
-
-            # 5a. 生成风险提示（建议性，任何异常都不影响交易）
             risk_warning = self._get_risk_warning(user_id, fund_code)
 
-            # 6. 校验可用现金
-            account = self._ensure_account(user_id)
-            cash = Decimal(str(account["cash"]))
-            frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
+            # 6. 原子下单：冻结资金 + 单日额度 + 幂等都在 RPC 同一事务内
+            payload = self.client.rpc("place_purchase_order", {
+                "p_user_id": user_id,
+                "p_fund_code": fund_code,
+                "p_fund_name": fund_name,
+                "p_amount": float(amount),
+                "p_fee": float(fee),
+                "p_net_amount": float(net_amount),
+                "p_estimated_nav": float(price),
+                "p_accepted_date": t_day.isoformat(),
+                "p_confirm_date": actual_confirm.isoformat(),
+                "p_available_date": available_date.isoformat(),
+                "p_fee_snapshot": build_fee_snapshot(rule),
+                "p_max_purchase_amount": (float(max_amount)
+                                          if max_amount is not None else None),
+                "p_client_order_id": client_order_id,
+            }).execute().data or {}
 
-            if cash < amount:
+            result = payload.get("result")
+            order = payload.get("order") or {}
+            if result == "insufficient_cash":
+                cash = Decimal(str(payload.get("cash") or 0))
                 return {
                     "success": False,
                     "message": f"可用现金不足：需 {float(amount):.2f} 元，实际可用 {float(cash):.2f} 元",
                     "data": None,
                 }
+            if result == "limit_exceeded":
+                used = Decimal(str(payload.get("used") or 0))
+                limit = Decimal(str(payload.get("limit") or 0))
+                return {
+                    "success": False,
+                    "message": f"本交易日已申购 {float(used):.2f} 元，本次申购 {float(amount):.2f} 元，"
+                               f"合计超过该基金单日累计申购上限 {float(limit):.2f} 元",
+                    "data": None,
+                }
+            if result == "idempotency_conflict":
+                return {
+                    "success": False,
+                    "message": "幂等键已被另一笔订单占用（基金或方向不一致），请更换 Idempotency-Key",
+                    "data": None,
+                }
+            if result not in ("placed", "existing"):
+                return {
+                    "success": False,
+                    "message": f"申购失败：{result or '未知结果'}",
+                    "data": None,
+                }
 
-            now = _now_iso()
-
-            # 场外基金统一走 pending 流程：冻结资金，不立即建仓
-            # T+1 确认时由 confirm_pending_orders() 按确认日净值计算精确份额
-            self.client.table("accounts").update({
-                "cash": float(cash - amount),
-                "frozen_cash": float(frozen_cash + amount),
-                "updated_at": now,
-            }).eq("user_id", user_id).execute()
-
-            # 写委托记录（pending，份额待确认后填入）
-            # 如果写订单失败，回滚冻结资金
-            try:
-                self._write_trade_order(
-                    user_id, fund_code, fund_name, "buy", amount,
-                    Decimal("0"), Decimal("0"), fee, "pending",
-                    confirm_date=actual_confirm.isoformat(),
+            if result == "existing":
+                message = f"重复提交的申购请求，已返回原订单 {order.get('id')}"
+            else:
+                message = (
+                    f"申购申请已提交（{day_label}受理），"
+                    f"将于 {actual_confirm.isoformat()} 10:00 确认份额（T+{confirm_delay}），资金已冻结"
                 )
-            except Exception:
-                self.client.table("accounts").update({
-                    "cash": float(cash),
-                    "frozen_cash": float(frozen_cash),
-                    "updated_at": now,
-                }).eq("user_id", user_id).execute()
-                raise
-
-            message = (
-                f"申购申请已提交（{day_label}受理），"
-                f"将于 {actual_confirm.isoformat()} 确认份额（T+{confirm_delay}），资金已冻结"
-            )
 
             logger.info(
-                f"申购pending: user={user_id}, code={fund_code}, "
-                f"amount={amount}, fee={fee}, confirm={actual_confirm.isoformat()}"
+                "申购%s: user=%s, code=%s, amount=%s, fee=%s, "
+                "accepted=%s, confirm=%s, order=%s",
+                "幂等命中" if result == "existing" else "pending",
+                user_id, fund_code, amount, fee,
+                t_day.isoformat(), actual_confirm.isoformat(), order.get("id"),
             )
 
+            # 账户余额只用于回显（RPC 已在事务内改完）；读失败不能让已成交的下单变成
+            # 「失败」—— 那会诱导用户重试、在没带幂等键时重复下单。
+            account = self.get_account(user_id) or {}
             return {
                 "success": True,
                 "message": message,
@@ -735,11 +781,17 @@ class PortfolioService:
                     "price": float(price),
                     "fee": float(fee),
                     "net_amount": float(net_amount),
+                    "quantity": 0.0,
+                    "trade_date": t_day.isoformat(),
                     "confirm_date": actual_confirm.isoformat(),
-                    "cash_remaining": float(cash - amount),
-                    "frozen_cash": float(frozen_cash + amount),
-                    "status": "pending",
-                    "trade_time": now,
+                    "available_date": available_date.isoformat(),
+                    "cash_remaining": (float(Decimal(str(account["cash"])))
+                                       if account.get("cash") is not None else None),
+                    "frozen_cash": (float(Decimal(str(account["frozen_cash"])))
+                                    if account.get("frozen_cash") is not None else None),
+                    "status": order.get("status", "pending"),
+                    "order_id": order.get("id"),
+                    "trade_time": order.get("created_at") or _now_iso(),
                 },
                 "risk_warning": risk_warning,
             }
@@ -782,15 +834,20 @@ class PortfolioService:
     # ==================== 赎回 ====================
 
     def apply_redeem(self, user_id: str, fund_code: str, quantity: Decimal,
-             price: Optional[Decimal] = None) -> dict:
+             price: Optional[Decimal] = None,
+             client_order_id: Optional[str] = None) -> dict:
         """
         场外基金按份额赎回。
+
+        可赎份额（lot 余额 - 在途卖单占用）与幂等由 `place_redeem_order` RPC 在同一事务内校验；
+        份额在确认时才扣，现金在到账日才入账。
 
         参数:
             user_id: 用户 ID
             fund_code: 基金代码
             quantity: 赎回份额
-            price: 净值（不传则自动获取）
+            price: 兼容参数，期初不参与计算（卖单净值在确认时取 T 日）
+            client_order_id: 幂等键（来自 Idempotency-Key）
         """
         try:
             # 0. 校验基金白名单 + ETF 拦截（只查一次 rule）
@@ -813,83 +870,76 @@ class PortfolioService:
 
             now_beijing = _beijing_now()
 
-            # 1. 计算确认日
+            # 1. 受理日 T 同时是卖单的成交净值日
             if self._is_trading_day(now_beijing.date()) and self._is_before_cutoff(now_beijing):
-                confirm_date = now_beijing.date()
+                t_day = now_beijing.date()
             else:
-                confirm_date = self._next_trading_day(now_beijing.date())
+                t_day = self._next_trading_day(now_beijing.date())
 
-            # 2. 校验持仓
-            position = self._get_position(user_id, fund_code)
-            if not position:
-                return {"success": False, "message": f"未持有基金 {fund_code}，无法赎回", "data": None}
+            # 确认日 = T + confirm_delay 个交易日（普通 1、QDII 2），与买入一致
+            confirm_delay = int(_require_rule_field(rule, fund_code, "confirm_delay"))
+            confirm_date = t_day
+            for _ in range(confirm_delay):
+                confirm_date = self._next_trading_day(confirm_date)
 
-            # 2a. 检查是否存在 pending 申购（份额未确认前不可赎回）
-            pending_buys = (
-                self.client.table("trade_orders")
-                .select("*")
-                .eq("user_id", user_id)
-                .eq("fund_code", fund_code)
-                .eq("direction", "buy")
-                .eq("status", "pending")
-                .execute()
-            )
-            if pending_buys.data:
+            # 到账日 = 实际确认日 + 1 个交易日；这里是下单时的预估值，
+            # 确认顺延时由确认任务按实际确认日覆盖。
+            settle_date = self._next_trading_day(confirm_date)
+
+            # 2. 获取基金名称（传入 rule 避免重复查询）
+            fund_name = self._get_fund_name(fund_code, rule=rule)
+
+            # 3. 原子下单：可赎份额（lot 余额 - 在途卖单）与幂等都在 RPC 同一事务内
+            payload = self.client.rpc("place_redeem_order", {
+                "p_user_id": user_id,
+                "p_fund_code": fund_code,
+                "p_fund_name": fund_name,
+                "p_quantity": float(quantity),
+                "p_accepted_date": t_day.isoformat(),
+                "p_confirm_date": confirm_date.isoformat(),
+                "p_settle_date": settle_date.isoformat(),
+                "p_fee_snapshot": build_fee_snapshot(rule),
+                "p_client_order_id": client_order_id,
+            }).execute().data or {}
+
+            result = payload.get("result")
+            order = payload.get("order") or {}
+            if result == "pending_purchase":
                 return {
                     "success": False,
                     "message": f"基金 {fund_code} 存在待确认的申购订单，份额确认前无法赎回",
                     "data": None,
                 }
-
-            # 2b. 计算可用份额（扣除已有 pending 赎回订单）
-            current_qty = Decimal(str(position["quantity"]))
-            pending_sells = (
-                self.client.table("trade_orders")
-                .select("quantity")
-                .eq("user_id", user_id)
-                .eq("fund_code", fund_code)
-                .eq("direction", "sell")
-                .eq("status", "pending")
-                .execute()
-            )
-            pending_qty = Decimal("0")
-            if pending_sells.data:
-                for ps in pending_sells.data:
-                    pending_qty += Decimal(str(ps.get("quantity", 0)))
-
-            available_qty = current_qty - pending_qty
-            if quantity > available_qty:
+            if result == "insufficient_shares":
+                available = Decimal(str(payload.get("available") or 0))
                 return {
                     "success": False,
-                    "message": f"可赎份额不足：需 {float(quantity)} 份，实际可用 {float(available_qty)} 份"
-                               + (f"（{float(pending_qty)} 份在待确认赎回订单中）" if pending_qty > 0 else ""),
+                    "message": f"可赎份额不足：需 {float(quantity)} 份，实际可用 {float(max(available, Decimal('0')))} 份"
+                               "（在途卖单占用的份额不可重复赎回）",
                     "data": None,
                 }
+            if result == "idempotency_conflict":
+                return {
+                    "success": False,
+                    "message": "幂等键已被另一笔订单占用（基金或方向不一致），请更换 Idempotency-Key",
+                    "data": None,
+                }
+            if result not in ("placed", "existing"):
+                return {"success": False, "message": f"赎回失败：{result or '未知结果'}", "data": None}
 
-            # 3. 获取基金名称（传入 rule 避免重复查询）
-            fund_name = self._get_fund_name(fund_code, rule=rule)
-
-            # 场外基金统一走 pending 流程：不立即入账，T+1 确认后由 confirm_pending_orders() 处理
-            # 赎回费在确认时按确认日净值和持有天数计算
-            redeem_delay = int(_require_rule_field(rule, fund_code, "redeem_settle_delay"))
-            settle_date = confirm_date
-            for _ in range(redeem_delay):
-                settle_date = self._next_trading_day(settle_date)
-
-            now = _now_iso()
-
-            self._write_trade_order(
-                user_id, fund_code, fund_name, "sell",
-                Decimal("0"), Decimal("0"),  # 金额和净值确认时按确认日填入
-                quantity, Decimal("0"), "pending",
-                confirm_date=confirm_date.isoformat(),
-            )
-
-            message = f"赎回申请已提交，将于 {settle_date.isoformat()} 到账（T+{redeem_delay}）"
+            if result == "existing":
+                message = f"重复提交的赎回请求，已返回原订单 {order.get('id')}"
+            else:
+                message = (
+                    f"赎回申请已提交，预计 {confirm_date.isoformat()} 10:00 确认份额，"
+                    f"{settle_date.isoformat()} 10:00 到账（实际确认日 + 1 个交易日）"
+                )
 
             logger.info(
-                f"赎回pending: user={user_id}, code={fund_code}, "
-                f"qty={quantity}, confirm={confirm_date.isoformat()}, settle={settle_date.isoformat()}"
+                "赎回%s: user=%s, code=%s, qty=%s, accepted=%s, confirm=%s, settle=%s, order=%s",
+                "幂等命中" if result == "existing" else "pending",
+                user_id, fund_code, quantity, t_day.isoformat(),
+                confirm_date.isoformat(), settle_date.isoformat(), order.get("id"),
             )
 
             return {
@@ -902,10 +952,12 @@ class PortfolioService:
                     "price": 0.0,
                     "fee": 0.0,
                     "quantity": float(quantity),
+                    "trade_date": t_day.isoformat(),
                     "confirm_date": confirm_date.isoformat(),
                     "settle_date": settle_date.isoformat(),
-                    "status": "pending",
-                    "trade_time": now,
+                    "status": order.get("status", "pending"),
+                    "order_id": order.get("id"),
+                    "trade_time": order.get("created_at") or _now_iso(),
                 },
             }
 
@@ -914,6 +966,95 @@ class PortfolioService:
         except Exception as e:
             logger.error(f"赎回失败: {e}", exc_info=True)
             return {"success": False, "message": f"赎回失败: {str(e)}", "data": None}
+
+    def cancel_order(self, user_id: str, order_id: str) -> dict:
+        """撤销待确认订单。
+
+        业务规则（《基金订单确认规则》§5）：仅 `pending` 订单、且当前时间早于
+        受理日 15:00（Asia/Shanghai）时可撤。退款、释放份额、状态流转全部在
+        `cancel_trade_order` RPC 的单个事务内完成，本方法只做结果映射。
+
+        参数:
+            user_id: 当前用户 ID（RPC 内校验订单归属）
+            order_id: 订单 ID
+
+        返回:
+            dict: `success/message/data`，失败时附 `status_code` 供 API 映射。
+        """
+        try:
+            payload = self.client.rpc("cancel_trade_order", {
+                "p_order_id": order_id,
+                "p_user_id": user_id,
+            }).execute().data or {}
+        except Exception as e:
+            logger.error("撤单失败 order_id=%s user=%s: %s", order_id, user_id, e,
+                         exc_info=True)
+            return {
+                "success": False,
+                "status_code": 500,
+                "message": "撤单失败，请稍后重试",
+                "data": None,
+            }
+
+        result = payload.get("result")
+
+        if result == "already_cancelled":
+            return {
+                "success": True,
+                "message": "订单已撤销（重复请求）",
+                "data": {
+                    "order_id": payload.get("order_id") or order_id,
+                    "status": "cancelled",
+                },
+            }
+
+        if result == "cancelled":
+            direction = payload.get("direction")
+            if direction == "buy":
+                refunded = float(payload.get("refunded_amount") or 0)
+                message = f"撤单成功，已退回 {refunded:.2f} 元"
+            else:
+                released = float(payload.get("released_quantity") or 0)
+                message = f"撤单成功，已释放 {released:.2f} 份"
+            logger.info("撤单成功: user=%s order=%s direction=%s", user_id, order_id, direction)
+            return {
+                "success": True,
+                "message": message,
+                "data": {
+                    "order_id": payload.get("order_id") or order_id,
+                    "status": "cancelled",
+                    "direction": direction,
+                    "refunded_amount": float(payload.get("refunded_amount") or 0),
+                    "released_quantity": float(payload.get("released_quantity") or 0),
+                    "cancel_deadline": payload.get("cancel_deadline"),
+                },
+            }
+
+        errors = {
+            "not_found": (404, "订单不存在"),
+            "not_cancellable": (409, f"订单当前状态为 {payload.get('status') or '未知'}，不可撤单"),
+            "cancel_window_closed": (409, "已超过撤单截止时间（受理日 15:00），不可撤单"),
+            "accepted_date_missing": (409, "订单缺少受理日，无法判定撤单窗口，请联系客服"),
+            "manual_review": (409, "撤单时冻结资金异常，已转人工处理"),
+        }
+        if result in errors:
+            status_code, message = errors[result]
+            logger.warning("撤单被拒绝: user=%s order=%s result=%s status=%s",
+                           user_id, order_id, result, payload.get("status"))
+            return {
+                "success": False,
+                "status_code": status_code,
+                "message": message,
+                "data": None,
+            }
+
+        logger.error("撤单返回未知结果: user=%s order=%s payload=%s", user_id, order_id, payload)
+        return {
+            "success": False,
+            "status_code": 500,
+            "message": f"撤单失败：{result or '未知结果'}",
+            "data": None,
+        }
 
     # ==================== 持仓查询 ====================
 
@@ -932,6 +1073,11 @@ class PortfolioService:
         return None
 
     def list_positions(self, user_id: str, include_quote: bool = True) -> dict:
+        """持仓列表（只返回仍有份额的持仓）。
+
+        `positions` 现在是由 `position_lots` 汇总出的读模型：清仓后保留零行
+        （不删行，便于审计与重算），展示层在这里过滤 `quantity > 0`（§3.8.3 / U6）。
+        """
         if not self.client:
             return {"total": 0, "items": [], "total_pnl": 0, "total_position_value": 0}
 
@@ -940,6 +1086,7 @@ class PortfolioService:
                 self.client.table("positions")
                 .select("*")
                 .eq("user_id", user_id)
+                .gt("quantity", 0)
                 .order("updated_at", desc=True)
                 .execute()
             )
@@ -1026,6 +1173,65 @@ class PortfolioService:
             return {"total": 0, "items": [], "total_pnl": 0, "total_position_value": 0}
 
     # ==================== 账户概况 ====================
+    def _settling_cash(self, user_id: str) -> Decimal:
+        """在途赎回款 = `status='settling'` 卖单的 net_amount 合计（《业务规则》§3.9）。
+
+        卖出确认时份额已从 positions 扣掉，现金要到 settle_date 才入账；
+        这段「已经卖了、钱还没到」的应收必须在总资产里体现，否则总资产会凭空下降。
+        查询失败直接上抛（由 account_summary 的 try 统一处理），不返回 0 冒充。
+        """
+        if not self.client:
+            raise RuntimeError("数据库不可用")
+        result = (
+            self.client.table("trade_orders")
+            .select("net_amount")
+            .eq("user_id", user_id)
+            .eq("direction", "sell")
+            .eq("status", "settling")
+            .execute()
+        )
+        return sum((Decimal(str(r.get("net_amount") or 0)) for r in (result.data or [])),
+                   Decimal("0"))
+
+    @staticmethod
+    def _empty_account_summary() -> dict:
+        """账户不存在时的默认值（与原先 account_summary 的兜底保持一致）。"""
+        return {
+            "cash": float(INITIAL_CASH),
+            "frozen_cash": 0,
+            "settling_cash": 0,
+            "position_value": 0,
+            "total_assets": float(INITIAL_CASH),
+            "total_pnl": 0,
+            "total_return_rate": 0,
+            "position_count": 0,
+        }
+
+    def _build_account_summary(self, user_id: str, positions_data: dict) -> dict:
+        """用已算好的持仓数据组装账户概况，不再重复调用 list_positions。"""
+        account = self.get_account(user_id)
+        if not account:
+            return self._empty_account_summary()
+
+        cash = Decimal(str(account["cash"]))
+        frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
+        settling_cash = self._settling_cash(user_id)
+        position_value = Decimal(str(positions_data["total_position_value"]))
+        # 在途赎回款仍是资产：份额已扣、现金未到，不加上会让总资产在到账前缩水
+        total_assets = cash + frozen_cash + settling_cash + position_value
+        total_pnl = total_assets - INITIAL_CASH
+        total_return_rate = (total_pnl / INITIAL_CASH) if INITIAL_CASH > 0 else Decimal("0")
+
+        return {
+            "cash": float(cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "frozen_cash": float(frozen_cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "settling_cash": float(settling_cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "position_value": float(position_value.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
+            "total_assets": float(total_assets.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
+            "total_pnl": float(total_pnl.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
+            "total_return_rate": float(total_return_rate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)),
+            "position_count": positions_data["total"],
+        }
 
     def account_summary(self, user_id: str) -> dict:
         try:
@@ -1033,39 +1239,36 @@ class PortfolioService:
             self._ensure_account(user_id)
             # 新老用户一视同仁：闲置现金自动申购货基
             self._auto_invest_money_fund(user_id)
-            account = self.get_account(user_id)
-            if not account:
-                return {
-                    "cash": float(INITIAL_CASH),
-                    "frozen_cash": 0,
-                    "position_value": 0,
-                    "total_assets": float(INITIAL_CASH),
-                    "total_pnl": 0,
-                    "total_return_rate": 0,
-                    "position_count": 0,
-                }
-
-            cash = Decimal(str(account["cash"]))
-            frozen_cash = Decimal(str(account.get("frozen_cash", 0)))
             positions_data = self.list_positions(user_id, include_quote=True)
-            position_value = Decimal(str(positions_data["total_position_value"]))
-            total_assets = cash + frozen_cash + position_value
-            total_pnl = total_assets - INITIAL_CASH
-            total_return_rate = (total_pnl / INITIAL_CASH) if INITIAL_CASH > 0 else Decimal("0")
-
-            return {
-                "cash": float(cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
-                "frozen_cash": float(frozen_cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
-                "position_value": float(position_value.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
-                "total_assets": float(total_assets.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
-                "total_pnl": float(total_pnl.quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)),
-                "total_return_rate": float(total_return_rate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)),
-                "position_count": positions_data["total"],
-            }
+            return self._build_account_summary(user_id, positions_data)
 
         except Exception as e:
             logger.error(f"账户概况查询失败: {e}", exc_info=True)
-            return {"cash": 0, "frozen_cash": 0, "position_value": 0, "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0}
+            return {"cash": 0, "frozen_cash": 0, "settling_cash": 0, "position_value": 0,
+                    "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0}
+
+    def portfolio_overview(self, user_id: str) -> dict:
+        """持仓页一次读取：账户概况 + 持仓列表。
+
+        持仓只计算一次，账户字段复用同一份结果；替代页面原先并行请求
+        `/portfolio/account` 与 `/portfolio/positions` 导致的双倍计算。
+        """
+        try:
+            self._ensure_account(user_id)
+            self._auto_invest_money_fund(user_id)
+            positions_data = self.list_positions(user_id, include_quote=True)
+            return {
+                "account": self._build_account_summary(user_id, positions_data),
+                "positions": positions_data,
+            }
+
+        except Exception as e:
+            logger.error(f"持仓页概况查询失败: {e}", exc_info=True)
+            return {
+                "account": {"cash": 0, "frozen_cash": 0, "settling_cash": 0, "position_value": 0,
+                            "total_assets": 0, "total_pnl": 0, "total_return_rate": 0, "position_count": 0},
+                "positions": {"total": 0, "items": [], "total_pnl": 0, "total_position_value": 0},
+            }
 
     # ==================== Pending 订单确认 ====================
 
@@ -1074,105 +1277,16 @@ class PortfolioService:
     # 所以确认失败只能落到 "rejected"。
     TRADE_ORDER_STATUSES = ("pending", "completed", "cancelled", "rejected", "reserved")
 
-    def confirm_pending_orders(self, before_today: bool = False) -> dict:
+    def confirm_pending_orders(self) -> dict:
+        """兼容薄壳：委托给 `OrderConfirmService`（见《执行机制》§3.5）。
+
+        扫描条件固定为 `status='pending' AND confirm_date <= today`；
+        「当日净值还没公布」由取价时刻的净值状态决定（保持 pending，下一轮再扫），
+        不需要「只补历史」这类旁路参数。
         """
-        扫描 trade_orders 中 status='pending' 且 confirm_date 到期的订单，
-        执行资金扣款/入账、持仓创建/更新、写流水。
+        from server.services.order_confirm_service import OrderConfirmService
 
-        参数:
-            before_today: 是否只确认「今天之前」的订单。
-                True  —— `confirm_date <  today`（15:37 任务：只补历史遗漏，
-                         当日订单一律等净值公布后的晚间窗口）
-                False —— `confirm_date <= today`（晚间 20:05 起、08:05、
-                         启动补偿、手动触发）
-
-        截止日由调用场景显式给出，不再依赖「今天是否交易日」：确认路径本身不触网，
-        也不看日历（日历不可用时仍需能确认已到期订单）。
-
-        取不到确认日净值（未公布/抓取失败/非净值日）的订单**保持 pending**，
-        计入返回值的 `skipped`，既不拒单也不退款（接入方案 §4.8）。
-        """
-        if not self.client:
-            return {"status": "error", "message": "数据库不可用"}
-
-        today = _beijing_date()
-        # 日历不可用/越界时 `_is_trading_day` 会抛异常，而确认路径不该因此停摆，
-        # 故这里完全不查日历（只有下单路径需要）。
-
-        try:
-            query = (
-                self.client.table("trade_orders")
-                .select("*")
-                .eq("status", "pending")
-            )
-
-            cutoff = (today - timedelta(days=1)) if before_today else today
-            query = query.lte("confirm_date", cutoff.isoformat())
-
-            result = query.execute()
-
-            orders = result.data or []
-            if not orders:
-                return {"status": "ok", "message": "无待确认订单",
-                        "processed": 0, "confirmed": 0, "rejected": 0, "skipped": 0}
-
-            # 预加载所有涉及的基金费率规则（一次批量查询代替每笔单独查询）
-            fund_codes = list({o.get("fund_code") for o in orders if o.get("fund_code")})
-            from server.services.fund_fee_service import FundFeeService
-            fee_svc = FundFeeService()
-            rules_map = fee_svc.get_fee_rules_batch(fund_codes)
-            logger.info(f"预加载费率规则: {len(fund_codes)} 只基金 → {len(rules_map)} 条")
-
-            confirmed = 0
-            rejected = 0
-            skipped = 0
-            for order in orders:
-                try:
-                    rule = rules_map.get(order.get("fund_code"))
-                    self._confirm_one_order(order, today, rule=rule)
-                    confirmed += 1
-                except NavUnavailableForConfirm as e:
-                    # 净值还没到 ≠ 订单有问题：保持 pending，下个窗口重试
-                    skipped += 1
-                    logger.info(
-                        "确认日净值不可用，订单保持 pending: order=%s, date=%s, "
-                        "status=%s, reason=%s",
-                        e.order_id, e.nav_date, e.status, e.reason,
-                    )
-                except (CalendarUnavailable, CalendarOutOfCoverage):
-                    # 日历不可用/越界不是单笔订单的错：不能拒绝并退款，
-                    # 必须让整个确认任务失败，由人工处理日历后重跑。
-                    raise
-                except Exception as e:
-                    rejected += 1
-                    logger.error(f"确认订单失败 {order.get('id')}: {e}", exc_info=True)
-                    # 先落终态再退款：顺序反过来的话，万一终态写库失败，
-                    # 就会出现「本金已退、订单还是 pending」——下一轮重试会用退回来的钱
-                    # 再建一次仓（凭空多出持仓）。
-                    self._reject_order(order, e)
-                    if order.get("direction") == "buy":
-                        self._refund_rejected_buy(order)
-
-            logger.info(
-                "Pending 订单确认完成: 成功 %s, 失败 %s, 跳过 %s", confirmed, rejected, skipped
-            )
-            return {
-                "status": "ok",
-                "message": f"确认完成: 成功 {confirmed}, 失败 {rejected}, 跳过 {skipped}",
-                # 跳过的也计「处理过」：调度日志里 processed=0 而实际扫到了订单会误导排查
-                "processed": confirmed + rejected + skipped,
-                "confirmed": confirmed,
-                "rejected": rejected,
-                "skipped": skipped,
-            }
-
-        except (CalendarUnavailable, CalendarOutOfCoverage):
-            # 日历错误必须保持异常语义（不降级成 {"status": "error"}），
-            # 让调度器把本轮任务标记为失败，而不是静默返回。
-            raise
-        except Exception as e:
-            logger.error(f"确认 pending 订单失败: {e}", exc_info=True)
-            return {"status": "error", "message": str(e), "processed": 0}
+        return OrderConfirmService().run(trigger="manual")
 
     def _reject_order(self, order: dict, error: Exception) -> None:
         """把确认失败的订单落为 rejected，并记录原因。
@@ -1635,94 +1749,41 @@ class PortfolioService:
     # ==================== 每日快照 ====================
 
     def take_snapshot(self, user_id: str, snapshot_date: Optional[date] = None) -> dict:
-        if snapshot_date is None:
-            snapshot_date = _beijing_date()
+        """确保某用户的交易日快照存在且有效（薄委托）。
 
-        try:
-            summary = self.account_summary(user_id)
-            snapshot_data = {
-                "user_id": user_id,
-                "snapshot_date": snapshot_date.isoformat(),
-                "total_assets": summary["total_assets"],
-                "cash": summary["cash"],
-                "position_value": summary["position_value"],
-                "total_pnl": summary["total_pnl"],
-                "total_return_rate": summary["total_return_rate"],
-                "created_at": _now_iso(),
-            }
+        默认目标为 `prev_trading_day(今天)`：T 日快照在 T+1 生成，此时总资产仍等于
+        T 日收盘值。非交易日 / 净值不齐由 `AccountSnapshotService` 抛业务异常，
+        这里不再捕获成 `success=False`，交由 API 映射为 409。
+        """
+        from server.services.account_snapshot_service import AccountSnapshotService
 
-            existing = (
-                self.client.table("account_snapshots")
-                .select("*")
-                .eq("user_id", user_id)
-                .eq("snapshot_date", snapshot_date.isoformat())
-                .execute()
-            )
-
-            if existing.data and len(existing.data) > 0:
-                self.client.table("account_snapshots").update(snapshot_data).eq(
-                    "id", existing.data[0]["id"]
-                ).execute()
-                logger.info(f"快照已更新: user={user_id}, date={snapshot_date}")
-            else:
-                self.client.table("account_snapshots").insert(snapshot_data).execute()
-                logger.info(f"快照已创建: user={user_id}, date={snapshot_date}")
-
-            return {
-                "success": True,
-                "message": "快照已保存",
-                "data": {
-                    "snapshot_date": snapshot_date.isoformat(),
-                    "total_assets": summary["total_assets"],
-                    "cash": summary["cash"],
-                    "position_value": summary["position_value"],
-                    "total_pnl": summary["total_pnl"],
-                    "total_return_rate": summary["total_return_rate"],
-                },
-            }
-
-        except Exception as e:
-            logger.error(f"快照保存失败: {e}")
-            return {"success": False, "message": f"快照保存失败: {str(e)}", "data": None}
+        target = snapshot_date or prev_trading_day(_beijing_date())
+        row = AccountSnapshotService(client=self.client).snapshot_user(
+            user_id, target, source="manual"
+        )
+        return {
+            "success": True,
+            "message": f"快照已保存（{target.isoformat()}）",
+            "data": {
+                "snapshot_date": str(row["snapshot_date"])[:10],
+                "total_assets": row["total_assets"],
+                "cash": row["cash"],
+                "frozen_cash": row.get("frozen_cash", 0),
+                "settling_cash": row.get("settling_cash", 0),
+                "position_value": row["position_value"],
+                "total_pnl": row["total_pnl"],
+                "total_return_rate": row["total_return_rate"],
+                "status": row.get("status"),
+                "invalid_reason": row.get("invalid_reason"),
+            },
+        }
 
     def get_daily_returns(self, user_id: str, days: int = 30) -> dict:
-        if not self.client:
-            return {"items": []}
+        """只基于有效快照计算区间/日收益（薄委托）。
 
-        try:
-            result = (
-                self.client.table("account_snapshots")
-                .select("*")
-                .eq("user_id", user_id)
-                .order("snapshot_date", desc=True)
-                .limit(days + 1)
-                .execute()
-            )
+        缺口日返回 `period_days > 1` 且 `daily_return=None`；数据库与交易日历异常
+        向上抛，由 API 映射为 503，不再用空列表冒充「没有收益」。
+        """
+        from server.services.account_snapshot_service import AccountSnapshotService
 
-            items = result.data or []
-            items.sort(key=lambda x: x["snapshot_date"])
-
-            returns = []
-            for i, item in enumerate(items):
-                daily_return = 0.0
-                if i > 0:
-                    prev_assets = float(items[i - 1]["total_assets"])
-                    curr_assets = float(item["total_assets"])
-                    if prev_assets > 0:
-                        daily_return = (curr_assets - prev_assets) / prev_assets
-
-                returns.append({
-                    "date": item["snapshot_date"],
-                    "total_assets": float(item["total_assets"]),
-                    "cash": float(item["cash"]),
-                    "position_value": float(item["position_value"]),
-                    "total_pnl": float(item["total_pnl"]),
-                    "total_return_rate": float(item["total_return_rate"]),
-                    "daily_return": round(daily_return, 6),
-                })
-
-            return {"items": returns}
-
-        except Exception as e:
-            logger.error(f"查询每日收益率失败: {e}")
-            return {"items": []}
+        return AccountSnapshotService(client=self.client).daily_returns(user_id, days)

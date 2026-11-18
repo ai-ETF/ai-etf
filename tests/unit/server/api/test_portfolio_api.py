@@ -22,11 +22,20 @@ class FakePortfolioService:
     auto_invest_config = {"enabled": True, "reserve": 0.0, "money_fund_code": "000198",
                           "money_fund_name": "天弘余额宝货币市场基金"}
 
-    def apply_purchase(self, user_id, fund_code, amount, price=None):
+    last_purchase_kwargs = {}
+    last_redeem_kwargs = {}
+    confirm_result = {"status": "ok", "scanned": 0, "processed": 0, "skipped": 0}
+
+    def apply_purchase(self, user_id, fund_code, amount, price=None, client_order_id=None):
+        FakePortfolioService.last_purchase_kwargs = {"client_order_id": client_order_id}
         return self.purchase_result
 
-    def apply_redeem(self, user_id, fund_code, quantity, price=None):
+    def apply_redeem(self, user_id, fund_code, quantity, price=None, client_order_id=None):
+        FakePortfolioService.last_redeem_kwargs = {"client_order_id": client_order_id}
         return self.redeem_result
+
+    def confirm_pending_orders(self):
+        return self.confirm_result
 
     def list_positions(self, user_id, include_quote=True):
         return self.positions_result
@@ -73,6 +82,24 @@ def test_apply_purchase_失败返回400(client):
     FakePortfolioService.purchase_result = {"success": False, "message": "暂不支持基金 999999 的交易", "data": None}
     resp = client.post("/portfolio/apply-purchase", json={"fund_code": "999999", "amount": 1000})
     assert resp.status_code == 400
+
+
+def test_apply_purchase_Idempotency_Key透传(client):
+    FakePortfolioService.purchase_result = {"success": True, "message": "ok", "data": None, "risk_warning": None}
+    resp = client.post("/portfolio/apply-purchase",
+                       json={"fund_code": "110020", "amount": 1000},
+                       headers={"Idempotency-Key": "ck-1"})
+    assert resp.status_code == 200
+    assert FakePortfolioService.last_purchase_kwargs["client_order_id"] == "ck-1"
+
+
+def test_apply_redeem_Idempotency_Key透传(client):
+    FakePortfolioService.redeem_result = {"success": True, "message": "ok", "data": None}
+    resp = client.post("/portfolio/apply-redeem",
+                       json={"fund_code": "110020", "quantity": 100},
+                       headers={"Idempotency-Key": "rk-1"})
+    assert resp.status_code == 200
+    assert FakePortfolioService.last_redeem_kwargs["client_order_id"] == "rk-1"
 
 
 def test_apply_redeem_成功(client):
@@ -122,3 +149,40 @@ def test_set_auto_invest_config(client):
     resp = client.post("/portfolio/auto-invest/config", json={"enabled": False, "reserve": 5000})
     assert resp.status_code == 200
     assert resp.json()["enabled"] is True
+
+
+# ==================== /confirm-pending：管理员鉴权 + 批次响应 ====================
+
+
+def test_confirm_pending_未配置管理员凭证返回503(client, monkeypatch):
+    monkeypatch.delenv("ADMIN_API_TOKEN", raising=False)
+    resp = client.post("/portfolio/confirm-pending")
+    assert resp.status_code == 503
+
+
+def test_confirm_pending_凭证错误返回401(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_API_TOKEN", "s3cret")
+    resp = client.post("/portfolio/confirm-pending", headers={"X-Admin-Token": "wrong"})
+    assert resp.status_code == 401
+
+
+def test_confirm_pending_凭证正确返回批次字段(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_API_TOKEN", "s3cret")
+    FakePortfolioService.confirm_result = {
+        "run_id": "r1", "status": "ok", "scanned": 3, "confirmed": 2, "rejected": 0,
+        "skipped_nav": 1, "retryable": 0, "manual_review": 0, "settled": 0,
+        "processed": 3, "skipped": 1, "duration_ms": 12,
+    }
+    resp = client.post("/portfolio/confirm-pending", headers={"X-Admin-Token": "s3cret"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == "r1" and body["scanned"] == 3
+    assert body["processed"] == 3 and body["skipped"] == 1
+
+
+def test_confirm_pending_busy仍返回200(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_API_TOKEN", "s3cret")
+    FakePortfolioService.confirm_result = {"status": "busy", "message": "已有批次在跑"}
+    resp = client.post("/portfolio/confirm-pending", headers={"X-Admin-Token": "s3cret"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "busy"
