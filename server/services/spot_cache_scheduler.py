@@ -1,0 +1,356 @@
+"""
+定时任务调度器（订单确认 / 净值 / 白名单同步 / 货基收益）
+
+独立管理（调度口径见《订单确认-执行机制》§3.12）：
+1. 订单确认：每天 10:00 主任务 + 11:00–23:00 每小时补扫
+2. 货基万份收益入账（每天 00:05）
+3. 场外基金白名单同步（每天 02:17）
+4. 场外基金最新净值更新（只抓净值，不触发确认）
+5. 账户日终快照（每天 08:45，目标为上一交易日）
+6. 启动时补偿：净值补跑 → 确认遗漏订单（串行）
+
+确认与抓取解耦：确认固定等到 10:00，净值同步成功不再触发确认。
+10:00 前启动的补偿轮只会处理「确认日早于今天」的订单，当天订单由 Runner 的
+时点门槛挡住。
+
+2026-10-26：场内 ETF 的 30 秒行情轮询（`refresh_etf_spot`）与启动预热
+（`_warmup_cache`）已删除——产品只做场外基金，净值每日公布一次，不需要实时行情。
+文件名沿用 `spot_cache_scheduler`（改名会牵动全部 import，留作已知残留）。
+"""
+import asyncio
+import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+logger = logging.getLogger(__name__)
+
+_scheduler: AsyncIOScheduler | None = None
+
+# 所有 CronTrigger 显式使用东八区：服务器可能是 UTC
+TZ = ZoneInfo("Asia/Shanghai")
+
+async def _confirm_pending_orders_job(trigger: str = "fallback"):
+    """跑一轮订单确认（Runner 会自己抢批次锁，拿不到即视为本轮跳过）。
+
+    `trigger` 取 fallback / startup / manual，用于 confirm_runs 审计。
+    Runner 是同步实现（PostgREST 调用），放到线程里跑，不阻塞事件循环。
+    """
+    from server.config.settings import SETTINGS
+    if not SETTINGS.ORDER_CONFIRM_ENABLED:
+        logger.info("[确认] ORDER_CONFIRM_ENABLED=false，跳过本轮 trigger=%s", trigger)
+        return None
+
+    from server.services.order_confirm_service import OrderConfirmService
+
+    logger.info("[确认] 开始一轮 trigger=%s", trigger)
+    result = await asyncio.to_thread(OrderConfirmService().run, trigger)
+    logger.info("[确认] 本轮结束: %s", result)
+    return result
+
+
+async def _credit_money_fund_income_job():
+    """货基每日收益入账任务（每天 00:05 执行）。
+
+    把「昨日」公布的万份收益折算成份额，加到所有货基持仓的 quantity
+    （份额逐日增长，即复投；本金 principal 不变）。
+    数据源失败时 credit_money_fund_income 会抛异常（不兜底），
+    此处捕获后记录错误并重新抛出，让调度器将其标记为失败任务，
+    避免当天用虚假数字入账。
+    """
+    from server.services.portfolio_service import PortfolioService
+    logger.info("[货基收益] 开始每日收益入账...")
+    svc = PortfolioService()
+    try:
+        result = svc.credit_money_fund_income()
+        logger.info(f"[货基收益] 每日收益入账完成: {result}")
+    except Exception as e:
+        # 无兜底：明确失败并上抛，不静默跳过（宁可当天不入账）
+        logger.error(f"[货基收益] 每日收益入账失败（未入账）: {e}", exc_info=True)
+        raise
+
+
+async def _account_snapshot_job():
+    """账户日终快照任务（每天 08:45 执行，含周末/节假日）。
+
+    目标日固定为 `prev_trading_day(今天)`：T 日快照在 T+1 08:45 生成，此时
+    T+1 的买卖要到 10:00 才确认，账户总资产仍等于 T 日收盘值。
+    周末/节假日重复以周五为目标，已有有效快照则跳过。
+
+    交易日历不可用、批量读取失败时直接抛错，由调度器标记失败，不写半成品。
+    """
+    from server.services.account_snapshot_service import AccountSnapshotService
+    from server.services.trading_calendar import prev_trading_day
+
+    today = datetime.now(TZ).date()
+    target = None
+    try:
+        target = await asyncio.to_thread(prev_trading_day, today)
+        logger.info("[快照] 开始生成 %s 的账户快照...", target)
+        result = await asyncio.to_thread(
+            AccountSnapshotService().run, target, "scheduled"
+        )
+        logger.info("[快照] 本轮结束: %s", result.as_dict())
+        return result
+    except Exception as exc:
+        logger.error(
+            "[快照] 目标日 %s 生成失败: %s", target, exc, exc_info=True
+        )
+        raise
+
+
+async def _fund_catalog_sync_job():
+    """场外基金白名单同步任务（每天 02:17 执行）。
+
+    全量抓取场外 ETF 联接基金的元数据、费率与风险画像，经 RPC `upsert_fund_catalog`
+    一次事务写入 `fund` + `fund_trade_rule` + `fund_risk_profiles`
+    （旧表 `fund_fee_rules` 已由 `fund_catalog` 视图兼容）。数千只基金逐只抓取
+    耗时约 20-30 分钟，必须放到线程中执行 —— 直接在事件循环里跑 requests + sleep 会阻塞整个服务。
+    单只基金失败不影响其余基金（run 内部逐只捕获异常）。
+
+    与手动入口（server/scripts/sync_fund_catalog.py）共用 sync_lock：拿不到锁说明
+    已有同步在跑（多半是运维手工触发），本轮跳过即可，不视为失败。
+    """
+    from server.services.fund_catalog_sync import FundCatalogSync, SyncLockBusy, sync_lock
+
+    logger.info("[基金同步] 开始同步场外 ETF 联接基金白名单...")
+    try:
+        with sync_lock():
+            svc = FundCatalogSync()
+            result = await asyncio.to_thread(svc.run)
+    except SyncLockBusy as e:
+        logger.warning(f"[基金同步] 跳过本轮：{e}")
+        return
+    logger.info(f"[基金同步] 完成: {result}")
+
+
+async def _startup_pending_compensation():
+    """启动补偿：确认所有到期未确认的 pending 订单（含今天）。
+
+    扫描条件由 Runner 统一为 `status='pending' AND confirm_date <= today`，
+    不再有 `before_today` 这类「只补历史」的旁路。
+    """
+    logger.info("[启动补偿] 检查遗漏的 pending 订单...")
+    await _confirm_pending_orders_job("startup")
+
+
+def _is_trading_day_or_none(d) -> bool | None:
+    """交易日判定；日历不可用/越界返回 None（调用方自行决定是否放行）。
+
+    净值更新是幂等且只读上游的轻量操作，日历故障时**宁可多跑一轮**，
+    也不能因为日历没刷新就让全站净值停更 —— 但必须留下 WARNING。
+    """
+    from server.services.trading_calendar import (
+        CalendarOutOfCoverage,
+        CalendarUnavailable,
+        is_trading_day,
+    )
+
+    try:
+        return is_trading_day(d)
+    except (CalendarUnavailable, CalendarOutOfCoverage) as exc:
+        logger.warning("[净值] 交易日历不可用，按交易日处理: %s", exc)
+        return None
+
+
+async def _warm_positions_job():
+    """持仓历史预热：`quantity > 0` 且历史未补齐的基金逐只补齐。
+
+    串行限速放在同步服务内（`pause`），这里整体丢到线程里，避免阻塞事件循环。
+    """
+    from server.services.fund_nav_sync_service import FundNavSyncService
+    try:
+        results = await asyncio.to_thread(FundNavSyncService().warm_positions)
+    except Exception as exc:  # 预热失败不影响净值更新本身
+        logger.error("[净值] 持仓历史预热失败: %s", exc, exc_info=True)
+        return
+    logger.info("[净值] 持仓历史预热完成: 补齐 %s 只", len(results))
+
+
+async def _fund_nav_update_job(prev_day: bool = False):
+    """场外基金最新净值更新。
+
+    参数:
+        prev_day: True 用「昨天」判断是否交易日（凌晨 00:30/01:30 的收尾轮）
+
+    流程：`update_batch`（写最新一两个点）→ 持仓预热。
+    拿不到单飞锁（已有更新在跑）视为本轮跳过，**不算失败**。
+
+    确认与抓取解耦：净值入库后不再触发确认，确认统一由 10:00 的任务扫描。
+    抓取失败也不影响已入库净值的确认。
+    """
+    from server.services.fund_nav_sync_service import FundNavSyncService, NavLockBusy
+    from server.services.trading_calendar import beijing_now
+
+    today = beijing_now().date()
+    check_date = today - timedelta(days=1) if prev_day else today
+    if _is_trading_day_or_none(check_date) is False:
+        logger.info("[净值] %s 非交易日，跳过净值更新", check_date)
+        return
+
+    try:
+        result = await asyncio.to_thread(FundNavSyncService().update_batch)
+    except NavLockBusy as exc:
+        logger.warning("[净值] 跳过本轮更新：%s", exc)
+        return
+    except Exception as exc:
+        # 抓取失败只记 ERROR，不触发确认（兜底扫描会接着补）
+        logger.error("[净值] 最新净值更新失败: %s", exc, exc_info=True)
+        return
+
+    logger.info("[净值] 最新净值更新完成: %s", result.as_dict())
+    await _warm_positions_job()
+
+
+async def _startup_nav_update():
+    """启动补偿：今天还没跑过净值更新就补跑一轮（不载入任何内存缓存）。"""
+    from server.services.fund_nav_sync_service import FundNavSyncService
+
+    try:
+        result = await asyncio.to_thread(FundNavSyncService().startup_update_if_stale)
+    except Exception as exc:
+        logger.error("[净值] 启动补偿失败: %s", exc, exc_info=True)
+        return
+    if result is None:
+        logger.info("[净值] 今天已更新过，跳过启动补跑")
+        return
+    logger.info("[净值] 启动补跑完成: %s", result.as_dict())
+    await _warm_positions_job()
+
+
+async def _startup_nav_and_confirm():
+    """启动补偿（串行）：先补净值，再确认遗漏订单。
+
+    两步必须串行：并发跑的话确认会先扫一遍「净值还没入库」的订单，
+    全部 skipped，白做一轮。
+    """
+    await _startup_nav_update()
+    await _startup_pending_compensation()
+
+
+
+def start_scheduler() -> AsyncIOScheduler:
+    """启动定时刷新调度器 + Pending 确认调度器，返回 scheduler 实例"""
+    global _scheduler
+    from functools import partial
+
+    _scheduler = AsyncIOScheduler(timezone=TZ)
+
+    # 触发 2：订单确认（业务规则固定 10:00，非交易日照常）
+    # 确认只读 DB，取不到净值就保持 pending，等下一轮；能不能确认由
+    # `get_nav_on(accepted_date)` 决定。单飞由 confirm_runs 保证，busy 跳过即可。
+    # Runner 内部还有一道时点门槛：当天才到确认日的订单，早于 10:00 不处理。
+    _scheduler.add_job(
+        partial(_confirm_pending_orders_job, "fallback"),
+        trigger=CronTrigger(hour=10, minute=0, timezone=TZ),
+        id="order_confirm_primary",
+        name="订单确认主任务（每天10:00）",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 10:00 后每小时补扫：覆盖净值晚到、单轮超时、进程重启等情况。
+    # 更早日期的过期订单也由这些轮次和次日 10:00 主任务补确认，不额外加早间轮。
+    _scheduler.add_job(
+        partial(_confirm_pending_orders_job, "fallback"),
+        trigger=CronTrigger(hour="11-23", minute=0, timezone=TZ),
+        id="order_confirm_catchup",
+        name="订单确认补扫（11:00–23:00 每小时）",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
+    logger.info("订单确认任务已注册（10:00 主任务 + 11:00–23:00 每小时补扫）")
+
+    # 触发 1 的兜底来源：场外基金净值更新（净值通常交易日 18:00 后才公布）。
+    # 多轮重试覆盖「公布晚 / QDII 更晚」；每轮更新成功后异步触发一次确认。
+    _scheduler.add_job(
+        partial(_fund_nav_update_job),
+        trigger=CronTrigger(hour="18,19", minute=0, timezone=TZ),
+        id="fund_nav_update_early",
+        name="场外净值更新（交易日18:00/19:00）",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
+    _scheduler.add_job(
+        partial(_fund_nav_update_job),
+        trigger=CronTrigger(hour="20,21,22,23", minute=5, timezone=TZ),
+        id="fund_nav_update_late",
+        name="场外净值更新（交易日20:05/21:05/22:05/23:05）",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
+    # 凌晨收尾轮：按「昨天是否交易日」判断，收晚公布的 QDII / 海外基金
+    _scheduler.add_job(
+        partial(_fund_nav_update_job, prev_day=True),
+        trigger=CronTrigger(hour="0,1", minute=30, timezone=TZ),
+        id="fund_nav_update_overnight",
+        name="场外净值更新（次日00:30/01:30）",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
+    # 每天 08:05 补漏：不按交易日判断，覆盖前一夜失败与停机
+    _scheduler.add_job(
+        partial(_fund_nav_update_job),
+        trigger=CronTrigger(hour=8, minute=5, timezone=TZ),
+        id="fund_nav_update_morning",
+        name="场外净值更新（每天08:05补漏）",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info("场外净值更新任务已注册（18:00/19:00/20:05~23:05/00:30/01:30/08:05）")
+
+    # 任务3：货基每日收益入账（每天 00:05）
+    # 货基当日万份收益通常在晚间披露，00:05 运行时拿到的即昨日完整收益。
+    # 数据源失败时任务内会抛错，由调度器记录，不会用兜底数字入账。
+    _scheduler.add_job(
+        _credit_money_fund_income_job,
+        trigger=CronTrigger(hour=0, minute=5, timezone=TZ),
+        id="credit_money_fund_income",
+        name="货基万份收益每日入账（每天00:05）",
+        replace_existing=True,
+        misfire_grace_time=3600,  # 错过1小时内仍可补执行
+    )
+    logger.info("货基收益入账任务已注册（每天00:05，1小时容错）")
+
+    # 任务 3.5：账户日终快照（每天 08:45，含周末/节假日）
+    # 09:30 开盘之前；目标日固定为 prev_trading_day(今天)。当天的买卖要到
+    # 10:00 才确认，08:45 取到的仍是 T 日收盘状态。
+    _scheduler.add_job(
+        _account_snapshot_job,
+        trigger=CronTrigger(hour=8, minute=45, timezone=TZ),
+        id="account_daily_snapshot",
+        name="账户日终快照（每天08:45，目标为上一交易日）",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info("账户日终快照任务已注册（每天08:45，目标为上一交易日）")
+
+    # 任务4：场外基金白名单同步（每天 02:17）
+    # 选在凌晨非交易时段：不影响下单，也避开 00:05 的货基收益入账。
+    # 全量抓取耗时较长（数千只基金逐只抓页面），容错窗口给到 2 小时。
+    _scheduler.add_job(
+        _fund_catalog_sync_job,
+        trigger=CronTrigger(hour=2, minute=17, timezone=TZ),
+        id="fund_catalog_sync",
+        name="场外基金白名单同步（每天02:17）",
+        replace_existing=True,
+        misfire_grace_time=7200,
+    )
+    logger.info("场外基金白名单同步任务已注册（每天02:17，2小时容错）")
+
+    _scheduler.start()
+
+    # 启动补偿：净值补跑 → 遗漏订单确认（串行）
+    asyncio.ensure_future(_startup_nav_and_confirm())
+
+    return _scheduler
+
+
+def shutdown_scheduler():
+    """关闭调度器"""
+    global _scheduler
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+        logger.info("定时任务已停止")
+        _scheduler = None

@@ -1,0 +1,100 @@
+[
+  {
+    "id": 1,
+    "name": "恒生科技-指数简介检索",
+    "query": "恒生科技指数是什么",
+    "expected_keywords": ["HSTECH", "30家", "科技企业", "港股"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 2,
+    "name": "恒生科技-成分股检索",
+    "query": "恒生科技指数有哪些成分股",
+    "expected_keywords": ["腾讯", "阿里巴巴", "美团", "小米"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 3,
+    "name": "恒生科技-ETF产品检索",
+    "query": "有哪些恒生科技ETF可以买",
+    "expected_keywords": ["513180", "513010", "513160", "华夏"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 4,
+    "name": "恒生科技-费率检索",
+    "query": "恒生科技ETF的管理费是多少",
+    "expected_keywords": ["0.50%", "管理费", "托管费"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 5,
+    "name": "恒生科技-投资策略检索",
+    "query": "恒生科技ETF适合定投吗",
+    "expected_keywords": ["定投", "平滑成本", "波动"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 6,
+    "name": "恒生科技-风险提示检索",
+    "query": "投资恒生科技ETF有什么风险",
+    "expected_keywords": ["市场风险", "汇率风险", "政策风险"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 7,
+    "name": "恒生科技-交易规则检索",
+    "query": "恒生科技ETF怎么买卖",
+    "expected_keywords": ["T+1", "100份", "9:30"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 8,
+    "name": "恒生科技-常见问题检索",
+    "query": "恒生科技ETF和港股通有什么区别",
+    "expected_keywords": ["50万门槛", "印花税", "ETF无门槛"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 9,
+    "name": "跨文档-ETF基础检索",
+    "query": "什么是ETF",
+    "expected_keywords": ["交易所交易基金", "指数", "基金"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 10,
+    "name": "跨文档-红利低波检索",
+    "query": "红利低波ETF的费率是多少",
+    "expected_keywords": ["管理费", "托管费", "费率"],
+    "category": "知识库检索"
+  },
+  {
+    "id": 11,
+    "name": "级联删除-chat删除后messages清除",
+    "test_type": "cascade_delete",
+    "setup_sql": "INSERT INTO chats (id, user_id, title) VALUES ('00000000-0000-0000-0000-000000000011', 'a6ee55ff-b59c-4c2b-bcdd-2519e7072aa1', '级联测试'); INSERT INTO messages (id, chat_id, role, content) VALUES ('00000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-000000000011', 'user', '测试消息');",
+    "action_sql": "DELETE FROM chats WHERE id = '00000000-0000-0000-0000-000000000011';",
+    "verify_sql": "SELECT COUNT(*) AS cnt FROM messages WHERE chat_id = '00000000-0000-0000-0000-000000000011';",
+    "expected_result": 0,
+    "category": "级联删除"
+  },
+  {
+    "id": 12,
+    "name": "级联删除-message删除后message_chunks清除",
+    "test_type": "cascade_delete",
+    "setup_sql": "INSERT INTO chats (id, user_id, title) VALUES ('00000000-0000-0000-0000-000000000013', 'a6ee55ff-b59c-4c2b-bcdd-2519e7072aa1', '级联测试2'); INSERT INTO messages (id, chat_id, role, content) VALUES ('00000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-000000000013', 'user', '测试消息2'); INSERT INTO message_chunks (id, message_id, chunk_id) VALUES ('00000000-0000-0000-0000-000000000015', '00000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-000000000001');",
+    "action_sql": "DELETE FROM messages WHERE id = '00000000-0000-0000-0000-000000000014';",
+    "verify_sql": "SELECT COUNT(*) AS cnt FROM message_chunks WHERE message_id = '00000000-0000-0000-0000-000000000014';",
+    "expected_result": 0,
+    "category": "级联删除"
+  },
+  {
+    "id": 13,
+    "name": "恒生科技-数据完整性验证",
+    "test_type": "data_check",
+    "verify_sql": "SELECT COUNT(*) AS cnt FROM document_chunks dc JOIN documents d ON dc.document_id = d.id WHERE d.title LIKE '%恒生科技%';",
+    "expected_min": 10,
+    "category": "数据完整性"
+  }
+]
